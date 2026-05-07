@@ -1,73 +1,65 @@
-# React + TypeScript + Vite
+# ABDL Space Wiki 🍼
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+一个专注于 ABDL 用品（纸尿裤、玩具、服饰等）的维基百科式社区平台。支持多用户协作编辑、产品评分与评论。
 
-Currently, two official plugins are available:
+## ✨ 功能特性
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+- 📖 **Wiki 页面** — 多用户协作编辑，版本历史支持回滚
+- ⭐ **评分系统** — 1-5 星评分，聚合展示平均分
+- 💬 **评论系统** — 支持嵌套回复，评论区可直接引用 Wiki 内容
+- 🔐 **用户认证** — 邮箱注册登录，JWT 会话管理
+- 🌓 **暗亮色切换** — 跟随系统或手动切换
+- 📱 **响应式设计** — 完美适配桌面端与移动端
+- 🎨 **毛玻璃 UI** — 简约可爱的视觉风格
 
-## React Compiler
+## 🛠️ 技术栈
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+| 层级 | 技术选型 |
+| :--- | :--- |
+| **前端框架** | React 18 + TypeScript + Vite |
+| **后端框架** | Hono (Cloudflare Workers) |
+| **数据库** | Cloudflare D1 (SQLite) |
+| **认证** | 自定义 JWT (WebCrypto API) |
+| **文件存储** | Cloudflare R2 |
+| **部署** | Cloudflare Pages + Workers |
 
-## Expanding the ESLint configuration
+## 🚀 快速开始
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+```bash
+# 1. 安装依赖
+npm install
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
+# 2. 启动前端开发服务器
+npm run dev
 
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
+# 3. 启动本地 Worker API（另一个终端）
+npx wrangler dev
 
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+# 4. 本地初始化数据库
+npx wrangler d1 execute abdl-space-db --local --file schemas/schema.sql
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+## 📁 项目结构
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
 ```
+src/
+├── components/       # 可复用 UI 组件
+├── pages/            # 页面级组件（路由对应）
+├── lib/              # 工具函数和 API 封装
+│   ├── api.ts        # 后端 API 调用封装
+│   └── utils.ts      # 通用工具函数
+├── hooks/            # 自定义 React Hooks
+├── types/            # TypeScript 类型定义
+└── index.tsx         # 入口文件
+
+schemas/
+└── schema.sql        # D1 数据库表结构
+```
+
+## 🤝 贡献
+
+见 [CONTRIBUTING.md](./CONTRIBUTING.md) 和 [AGENTS.md](./AGENTS.md)
+
+## 📄 License
+
+MIT

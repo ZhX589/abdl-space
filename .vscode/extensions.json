@@ -1,0 +1,9 @@
+{
+  "recommendations": [
+    "dbaeumer.vscode-eslint",
+    "bradlc.vscode-tailwindcss",
+    "esbenp.prettier-vscode",
+    "cloudflare.cloudflare-wrangler",
+    "github.vscode-pull-request-github"
+  ]
+}

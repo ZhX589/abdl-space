@@ -13,12 +13,30 @@
   ],
   "agents": {
     "backend": {
-      "description": "后端 API 开发（Hono + D1）",
-      "files": ["src/index.ts", "src/lib/db.ts"]
+      "description": "后端 API 开发（Hono + D1 + JWT 认证）",
+      "files": [
+        "src/index.ts",
+        "src/lib/db.ts",
+        "schemas/schema.sql"
+      ]
     },
     "frontend": {
-      "description": "前端 React 组件开发",
-      "files": ["src/components/**/*", "src/pages/**/*", "src/lib/api.ts"]
+      "description": "前端 React 组件开发（UI + API 调用）",
+      "files": [
+        "src/components/**/*",
+        "src/pages/**/*",
+        "src/lib/api.ts",
+        "src/types/index.ts"
+      ]
+    },
+    "docs": {
+      "description": "文档维护（README / AGENTS / CONTRIBUTING）",
+      "files": [
+        "README.md",
+        "AGENTS.md",
+        "CONTRIBUTING.md",
+        "STYLE_GUIDE.md"
+      ]
     }
   },
   "rules": [
@@ -29,8 +47,33 @@
     },
     {
       "description": "使用 TypeScript 严格模式",
-      "pattern": "*.ts",
-      "instruction": "不要使用 any 类型，未知类型用 unknown"
+      "pattern": "*.{ts,tsx}",
+      "instruction": "不要使用 any 类型，未知类型用 unknown。所有 API 响应必须有类型定义"
+    },
+    {
+      "description": "组件文件命名规范",
+      "pattern": "src/components/**/*.tsx",
+      "instruction": "组件文件名使用 PascalCase，每个文件只导出一个组件"
+    },
+    {
+      "description": "样式使用 CSS 变量",
+      "pattern": "*.{css,tsx}",
+      "instruction": "颜色值通过 CSS 变量引用，不要硬编码色值，确保暗亮色切换兼容"
+    },
+    {
+      "description": "数据库查询安全",
+      "pattern": "src/lib/db.ts",
+      "instruction": "使用参数化查询 prepare().bind()，不要拼接 SQL 字符串"
+    },
+    {
+      "description": "毛玻璃 UI 规范",
+      "pattern": "*.{css,tsx}",
+      "instruction": "卡片/导航等容器优先使用毛玻璃效果（backdrop-filter: blur），移动端降低 blur 值"
+    },
+    {
+      "description": "评论和评分类型",
+      "pattern": "src/types/index.ts",
+      "instruction": "必须定义 Comment, Rating, WikiPage, User 等核心接口，与数据库表结构对应"
     }
   ]
 }
