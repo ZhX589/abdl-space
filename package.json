@@ -12,10 +12,12 @@
     "cf-typegen": "wrangler types"
   },
   "dependencies": {
+    "hono": "^4.12.18",
     "react": "^19.2.5",
     "react-dom": "^19.2.5"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260507.1",
     "@eslint/js": "^10.0.1",
     "@types/node": "^24.12.2",
     "@types/react": "^19.2.14",
