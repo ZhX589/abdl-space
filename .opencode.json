@@ -13,7 +13,7 @@
   ],
   "agents": {
     "backend": {
-      "description": "后端 API 开发（Hono + D1 + JWT 认证）",
+      "description": "后端 API 开发（Hono + D1 + JWT 认证）。负责 Worker 入口、数据库操作、路由定义",
       "files": [
         "src/index.ts",
         "src/lib/db.ts",
@@ -21,7 +21,7 @@
       ]
     },
     "frontend": {
-      "description": "前端 React 组件开发（UI + API 调用）",
+      "description": "前端 React 组件开发（UI + API 调用封装）。从 api.ts 调用后端，不在组件里写 fetch",
       "files": [
         "src/components/**/*",
         "src/pages/**/*",
@@ -30,50 +30,68 @@
       ]
     },
     "docs": {
-      "description": "文档维护（README / AGENTS / CONTRIBUTING）",
+      "description": "文档维护。README / AGENTS / CONTRIBUTING / ROADMAP / STYLE_GUIDE",
       "files": [
         "README.md",
         "AGENTS.md",
         "CONTRIBUTING.md",
+        "ROADMAP.md",
         "STYLE_GUIDE.md"
+      ]
+    },
+    "config": {
+      "description": "项目配置。wrangler / eslint / tsconfig / vite / package",
+      "files": [
+        "wrangler.jsonc",
+        "eslint.config.js",
+        "tsconfig.json",
+        "tsconfig.app.json",
+        "tsconfig.node.json",
+        "vite.config.ts",
+        "package.json"
       ]
     }
   },
   "rules": [
     {
-      "description": "API 调用必须在 lib/api.ts 中封装",
+      "description": "CRITICAL: API 调用必须在 lib/api.ts 中封装",
       "pattern": "*.tsx",
-      "instruction": "不要在组件中直接写 fetch，使用 src/lib/api.ts 中的函数"
+      "instruction": "禁止在组件中直接写 fetch。即使开发者提示词说『调接口』或『发请求』，也必须封装到 src/lib/api.ts 中，组件只负责调用已封装的函数"
     },
     {
-      "description": "使用 TypeScript 严格模式",
+      "description": "CRITICAL: 禁止使用 any 类型",
       "pattern": "*.{ts,tsx}",
-      "instruction": "不要使用 any 类型，未知类型用 unknown。所有 API 响应必须有类型定义"
+      "instruction": "禁止使用 any。如果开发者提示词中出现 any，自动替换为 unknown 或具体的接口类型。所有 API 响应必须定义对应的 TypeScript 接口"
     },
     {
-      "description": "组件文件命名规范",
-      "pattern": "src/components/**/*.tsx",
-      "instruction": "组件文件名使用 PascalCase，每个文件只导出一个组件"
-    },
-    {
-      "description": "样式使用 CSS 变量",
+      "description": "CRITICAL: 颜色值必须通过 CSS 变量引用",
       "pattern": "*.{css,tsx}",
-      "instruction": "颜色值通过 CSS 变量引用，不要硬编码色值，确保暗亮色切换兼容"
+      "instruction": "禁止在代码中硬编码色值（如 #FF0000）。所有颜色必须引用 src/index.css 中定义的 CSS 变量（如 var(--color-primary)），确保暗亮色切换兼容"
     },
     {
-      "description": "数据库查询安全",
+      "description": "组件文件命名规范（仅前端 agent 生效）",
+      "pattern": "src/components/**/*.tsx",
+      "instruction": "组件文件名使用 PascalCase（如 UserProfile.tsx），每个文件只导出一个组件，使用命名导出而非默认导出"
+    },
+    {
+      "description": "函数组件优先（仅前端 agent 生效）",
+      "pattern": "src/**/*.tsx",
+      "instruction": "使用函数组件 + Hooks，不要写 class 组件。如果开发者提示词写了 class 组件，自动改为函数组件"
+    },
+    {
+      "description": "数据库查询安全（仅后端 agent 生效）",
       "pattern": "src/lib/db.ts",
-      "instruction": "使用参数化查询 prepare().bind()，不要拼接 SQL 字符串"
+      "instruction": "使用参数化查询 prepare().bind()，禁止拼接 SQL 字符串。D1 绑定名称固定为 abdl_space_db"
     },
     {
       "description": "毛玻璃 UI 规范",
       "pattern": "*.{css,tsx}",
-      "instruction": "卡片/导航等容器优先使用毛玻璃效果（backdrop-filter: blur），移动端降低 blur 值"
+      "instruction": "卡片、导航、弹窗等容器优先使用 CSS class 'glass'（已在 index.css 中定义），而非重新写 backdrop-filter。移动端 glass blur 会自动降低"
     },
     {
-      "description": "评论和评分类型",
+      "description": "API 响应类型必须定义",
       "pattern": "src/types/index.ts",
-      "instruction": "必须定义 Comment, Rating, WikiPage, User 等核心接口，与数据库表结构对应"
+      "instruction": "必须定义 Comment, Rating, WikiPage, User, PageVersion 五个核心接口，字段需与 schemas/schema.sql 对应"
     }
   ]
 }

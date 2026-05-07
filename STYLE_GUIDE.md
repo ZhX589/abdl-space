@@ -1,124 +1,109 @@
 # ABDL Space Wiki 样式指南
 
-## 品牌色
+> 本文件定义了项目的视觉规范。**所有颜色必须通过 CSS 变量引用，不得硬编码色值。**
 
-### 亮色模式
+## CSS 变量速查表
 
-| 用途 | 色值 | 说明 |
+以下变量已在 `src/index.css` 中定义，直接在代码中使用 `var(--variable-name)`：
+
+### 亮色模式（:root）
+
+| CSS 变量 | 色值 | 用途 |
 | :--- | :--- | :--- |
-| 主色 | `#5BA3E6` | 天蓝，用于导航栏、按钮、链接 |
-| 主色浅 | `#B3D9FF` | 浅蓝，用于背景块、卡片 |
-| 主色淡 | `#E8F4FD` | 极浅蓝，用于页面背景 |
-| 次要色 | `#87CEEB` | 天蓝，用于辅助元素 |
-| 强调色 | `#FF8C94` | 暖粉，用于评分星标、通知徽标 |
-| 强调色2 | `#FFD700` | 金色，用于星级高亮 |
-| 文字主 | `#2C3E50` | 深蓝灰 |
-| 文字次 | `#7F8C8D` | 灰色 |
-| 卡片底 | `rgba(255, 255, 255, 0.7)` | 毛玻璃卡片背景 |
+| `--color-primary` | `#5BA3E6` | 主色：导航栏、按钮、链接 |
+| `--color-primary-light` | `#B3D9FF` | 主色浅：背景块、卡片头 |
+| `--color-primary-lighter` | `#E8F4FD` | 主色淡：页面背景 |
+| `--color-secondary` | `#87CEEB` | 辅助色 |
+| `--color-accent` | `#FF8C94` | 强调色：评分星标、通知 |
+| `--color-star` | `#FFD700` | 星标高亮色 |
+| `--text-primary` | `#2C3E50` | 主文字 |
+| `--text-secondary` | `#7F8C8D` | 辅助文字 |
+| `--text-on-primary` | `#FFFFFF` | 主色背景上的文字 |
+| `--bg-page` | `#E8F4FD` | 页面背景 |
+| `--bg-card` | `rgba(255,255,255,0.7)` | 卡片背景 |
+| `--glass-bg` | `rgba(255,255,255,0.15)` | 毛玻璃基础色 |
+| `--glass-border` | `1px solid rgba(255,255,255,0.2)` | 毛玻璃边框 |
+| `--glass-blur` | `12px` | 毛玻璃模糊度 |
+| `--radius-sm` | `8px` | 小圆角（按钮） |
+| `--radius-lg` | `16px` | 大圆角（卡片） |
 
-### 暗色模式
+### 暗色模式（[data-theme="dark"]）
 
-| 用途 | 色值 | 说明 |
+自动切换，无需手动指定。关键变化：
+
+| CSS 变量 | 暗色值 | 变化方向 |
 | :--- | :--- | :--- |
-| 背景 | `#0f0f23` | 深空蓝 |
-| 卡片底 | `rgba(255, 255, 255, 0.08)` | 半透明白 |
-| 导航底 | `rgba(15, 15, 35, 0.85)` | 深色导航毛玻璃 |
-| 文字主 | `#E8E8F0` | 浅灰白 |
-| 文字次 | `#A0A0B0` | 中灰色 |
+| `--color-primary` | `#87CEEB` | 调亮 |
+| `--bg-page` | `#0f0f23` | 深空蓝底 |
+| `--text-primary` | `#E8E8F0` | 变亮 |
+| `--glass-bg` | `rgba(255,255,255,0.08)` | 更透 |
+| `--glass-border` | `1px solid rgba(255,255,255,0.1)` | 更淡 |
+
+## ✅ 正确 vs ❌ 错误
+
+### 颜色
+
+```css
+/* ✅ 正确：使用 CSS 变量 */
+.button { background: var(--color-primary); }
+
+/* ❌ 错误：硬编码色值 */
+.button { background: #5BA3E6; }
+```
+
+### 毛玻璃
+
+```tsx
+// ✅ 正确：使用 .glass 类
+<div className="glass">内容</div>
+
+// ❌ 错误：重新写一遍 backdrop-filter
+<div style={{ backdropFilter: 'blur(12px)', background: 'rgba(...)' }}>内容</div>
+```
+
+### 主题切换
+
+```css
+/* ✅ 正确：使用 data-theme 属性控制 */
+[data-theme="dark"] .card { background: var(--bg-card); }
+
+/* ❌ 错误：媒体查询无法覆盖手动切换 */
+@media (prefers-color-scheme: dark) { ... }
+```
 
 ## 毛玻璃规范
 
 ```css
-/* 标准毛玻璃卡片 */
 .glass {
-  background: rgba(255, 255, 255, 0.15);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  border-radius: 16px;
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  border: var(--glass-border);
+  border-radius: var(--radius-lg);
 }
 
-/* 暗色模式毛玻璃 */
-[data-theme="dark"] .glass {
-  background: rgba(255, 255, 255, 0.08);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-}
-
-/* 移动端优化（降低 blur 减少性能开销） */
-@media (max-width: 768px) {
-  .glass {
-    backdrop-filter: blur(6px);
-    -webkit-backdrop-filter: blur(6px);
-  }
-}
+/* 移动端自动优化 blur，无需手动处理 */
 ```
 
 ## 圆角体系
 
-| 层级 | 值 | 适用 |
+| 变量名 | 值 | 适用 |
 | :--- | :--- | :--- |
-| 小 | `8px` | 按钮、输入框、小标签 |
-| 中 | `12px` | 卡片、弹窗 |
-| 大 | `16px` | 主卡片、容器 |
-| 圆 | `50%` | 头像、图标 |
-
-## 阴影
-
-```css
-/* 亮色 */
-box-shadow: 0 4px 20px rgba(0, 0, 0, 0.06);
-
-/* 暗色 */
-box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
-
-/* 悬浮提升 */
-box-shadow: 0 8px 30px rgba(0, 0, 0, 0.1);
-```
-
-## 字体
-
-- 中文：系统默认（`-apple-system`, `PingFang SC`, `Microsoft YaHei`）
-- 英文/数字：`Inter` 或系统无衬线
-- 字号：`14px`（小）/ `16px`（默认）/ `20px`（标题）/ `28px`（大标题）
+| `--radius-sm` | `8px` | 按钮、输入框、标签 |
+| `--radius-lg` | `16px` | 卡片、弹窗、容器 |
 
 ## 响应式断点
 
-| 断点 | 宽度 | 布局调整 |
-| :--- | :--- | :--- |
-| xs | `< 640px` | 单列，底部导航，缩小毛玻璃 blur |
-| sm | `640px+` | 双列布局开始 |
-| md | `768px+` | 标准布局 |
-| lg | `1024px+` | 侧边栏固定 |
-| xl | `1280px+` | 最大宽度限制，居中 |
+| 断点 | 说明 |
+| :--- | :--- |
+| `768px` | 移动端 → 平板（此断点下 glass blur 自动减半） |
+| `1024px` | 平板 → 桌面 |
 
 ## 暗亮色切换机制
 
-1. 使用 CSS 变量 + `data-theme` 属性
-2. 默认跟随系统 `prefers-color-scheme`
-3. 手动切换后存储到 `localStorage`
-4. 所有颜色值通过 CSS 变量引用，不硬编码
+1. **HTML 属性驱动**：`<html data-theme="dark">` 或 `data-theme="light"`
+2. **自动跟随**：首次访问根据 `prefers-color-scheme` 设置
+3. **手动切换**：用户点击切换按钮，存入 `localStorage`
+4. **优先级**：`localStorage` > `prefers-color-scheme`
 
-```css
-:root {
-  --bg-primary: #E8F4FD;
-  --bg-card: rgba(255, 255, 255, 0.7);
-  --text-primary: #2C3E50;
-  /* ... */
-}
-
-[data-theme="dark"] {
-  --bg-primary: #0f0f23;
-  --bg-card: rgba(255, 255, 255, 0.08);
-  --text-primary: #E8E8F0;
-  /* ... */
-}
-```
-
-## 组件风格要点
-
-- **导航栏**：顶部固定，毛玻璃效果，包含 logo、搜索、主题切换、用户菜单
-- **卡片**：毛玻璃、大圆角、柔和阴影，适当内边距（`24px`）
-- **按钮**：圆角 `8px`，主色填充或 outline，悬浮有轻微上移效果
-- **评分星标**：五角星，强调色高亮，可点击或只读
-- **评论区**：卡片式排列，嵌套回复缩进，头像圆形
-- **Wiki 内容区**：最大宽度 `800px`，居中，Markdown 渲染
+> 所有颜色值定义在 `src/index.css` 的 `:root` 和 `[data-theme="dark"]` 中，新增组件时引用 CSS 变量即可自动适配双主题。
