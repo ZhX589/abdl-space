@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.1.0-beta.1 (2026-05-08)
+
+### 🏗️ 前端技术栈初始化
+
+- 安装 `tailwindcss` + `@tailwindcss/vite` — TailwindCSS v4，Vite 零配置集成
+- 安装 `react-router-dom` — 前端路由框架
+- `vite.config.ts` — 添加 `@tailwindcss/vite` 插件
+- `src/index.css` — 顶部引入 `@import "tailwindcss"`
+- 创建前端目录结构：`components/`、`pages/`、`lib/`、`hooks/`、`types/`
+
 ## v0.0.2 (2026-05-08)
 
 ### 🛡️ AI 抗干扰加固
