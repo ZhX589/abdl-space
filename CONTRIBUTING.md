@@ -208,6 +208,7 @@ const page = await getPage('getting-started')
 ## 不要做的事
 
 - ❌ 不要直接推送到 `main` 或 `dev`
+- ❌ 不要在本地直接 `git merge dev` 到 `main`，必须走 GitHub PR
 - ❌ 不要在组件里直接写 `fetch`
 - ❌ 不要用 `any` 类型
 - ❌ 不要一个文件写多个组件
