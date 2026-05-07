@@ -66,6 +66,8 @@ git commit -m "feat(模块): 简短描述"
 git push origin feat/你的分支名
 
 # 4. 去 GitHub 创建 PR → 合并到 dev
+#    ⚠️ 所有合并（包括 dev → main）都必须在 GitHub 上走 PR 流程
+#    不要在本地执行 git merge
 ```
 
 ## 代码规范速查
