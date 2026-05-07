@@ -82,7 +82,103 @@ git push origin feat/你的功能名
 3. 提交包含 schema 变更的 PR
 4. 部署时同步执行远程数据库迁移
 
+## 程序员B专属：Git 实操指南（GitHub Desktop）
+
+> 以下步骤专门为使用 GitHub Desktop 的开发者准备，一步一步照着做就行。
+
+### 1. 克隆仓库
+- 打开 GitHub Desktop → `File` → `Clone Repository`
+- 选择 `GitHub.com` → 找到 `abdl-space` → `Clone`
+
+### 2. 开始新功能
+- 确保当前在 `dev` 分支（看左上角分支选择器）
+- 先点 `Fetch origin` 获取最新代码
+- 点 `Current branch` → `New branch` → 输入分支名（如 `feat/frontend-auth`）
+- 确保基于 `dev` → `Create branch`
+
+### 3. 开发中保持最新
+> 如果你的开发周期超过一天，**每天开始前**这样做：
+1. 点 `Fetch origin`
+2. `Current branch` → `Choose a branch to merge into 你的分支名` → 选 `dev`
+3. 如果有冲突，GitHub Desktop 会提示，按「常见问题」里的冲突解决步骤处理
+
+### 4. 提交代码
+- 在编辑器里改完代码后切回 GitHub Desktop
+- 左侧会显示改动的文件列表
+- 勾选要提交的文件 → 底部写 commit 信息
+- 格式：`feat(模块): 简短描述`（如 `feat(auth): 添加登录页面`）
+- 点 `Commit to feat/xxx`
+
+### 5. 推送并创建 PR
+- 点 `Push origin`
+- 点 `Create Pull Request on GitHub`（会自动打开浏览器）
+- 按模板填写 → `Create Pull Request`
+- 通知 A 来 Review
+
+### 6. PR 合并后清理
+- 回到 GitHub Desktop → `Fetch origin`
+- 左上角切回 `dev`
+- `Current branch` → 选旧的 `feat/xxx` → `Delete`（删除本地旧分支）
+
 ## 常见问题
+
+### Git 操作
+
+#### 提交错了怎么办？
+
+```bash
+# 撤回最近一次提交（改动保留在工作区，可以重新提交）
+git reset --soft HEAD~1
+
+# 撤回最近一次提交（彻底丢弃改动，慎用！）
+git reset --hard HEAD~1
+
+# 改最近一次 commit 的消息
+git commit --amend -m "新的提交信息"
+```
+
+> ⚠️ 只有**还没 push** 的提交才能用 `reset`。已经 push 的不要用，会出问题。
+
+#### 你的分支落后于 dev 了怎么办？
+
+```bash
+# 在你的分支上执行：
+git fetch origin
+git merge origin/dev
+```
+
+或者在 GitHub Desktop 里：`Current branch` → `Choose a branch to merge...` → `dev`
+
+#### 冲突了怎么办？
+
+冲突文件里会有这样的标记：
+```
+<<<<<<< HEAD
+你分支上的代码
+=======
+dev 分支上的代码
+>>>>>>> dev
+```
+
+1. 手动编辑文件，**保留想要的内容**，删掉 `<<<<<<<`、`=======`、`>>>>>>>`
+2. 保存文件
+3. `git add . && git commit`
+4. 或者 GitHub Desktop 会显示冲突文件，解决后点 Continue
+
+#### 不小心在 dev 上写代码了怎么办？
+
+```bash
+# 还没 commit：
+git stash
+git checkout feat/xxx
+git stash pop
+
+# 已经 commit 了：
+git checkout feat/xxx
+git merge dev           # 把 dev 的提交带到你的分支
+git checkout dev
+git reset --hard HEAD~1  # dev 回退一个提交
+```
 
 ### 前端怎么调 API？
 

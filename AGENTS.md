@@ -90,15 +90,19 @@ ABDL 主题的 Wiki 社区平台，支持多用户协作编辑产品页面、评
 
 ## Git 工作流
 
-- 默认分支：`dev`
-- 分支从 `dev` 切出
+- 默认分支：`dev`（日常开发）、`main`（稳定版本）
+- 分支从 `dev` 切出，功能完成后 PR → `dev`
 - 分支命名：
   - `feat/xxx` — 新功能（如 `feat/comments-list`）
   - `fix/xxx` — Bug 修复
   - `docs/xxx` — 文档变更
   - `refactor/xxx` — 重构
   - `style/xxx` — 样式调整
-- PR 合并到 `dev`，由全栈开发者审查和合并
+- PR 合并策略：**Squash merge**（压缩成一个 commit，保持历史干净）
+- 分支生命周期：PR 合并后**立即删除远程分支**
+- 版本标签：`git tag v0.x.x`，从 `dev` 打标签
+- Hotfix 流程：从 `main` 切 `fix/xxx` → 修复 → 合并回 `main` 和 `dev`
+- PR 由全栈开发者审查和合并
 - 不要直接推送到 `main`
 
 ## 团队成员分工
