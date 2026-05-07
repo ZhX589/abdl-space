@@ -13,6 +13,13 @@
 	"upload_source_maps": true,
 	"compatibility_flags": [
 		"nodejs_compat"
+	],
+	"d1_databases": [
+		{
+			"binding": "abdl_space_db",
+			"database_name": "abdl-space-db",
+			"database_id": "159f81ba-ea32-4667-a3ce-d72cb1659d93"
+		}
 	]
 	/**
 	 * Smart Placement

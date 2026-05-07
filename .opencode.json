@@ -1,0 +1,36 @@
+{
+  "$schema": "https://opencode.ai/schema.json",
+  "name": "abdl-space-wiki",
+  "language": "typescript",
+  "framework": "react",
+  "buildCommand": "npm run build",
+  "devCommand": "npm run dev",
+  "ignore": [
+    "node_modules",
+    "dist",
+    ".wrangler",
+    "package-lock.json"
+  ],
+  "agents": {
+    "backend": {
+      "description": "后端 API 开发（Hono + D1）",
+      "files": ["src/index.ts", "src/lib/db.ts"]
+    },
+    "frontend": {
+      "description": "前端 React 组件开发",
+      "files": ["src/components/**/*", "src/pages/**/*", "src/lib/api.ts"]
+    }
+  },
+  "rules": [
+    {
+      "description": "API 调用必须在 lib/api.ts 中封装",
+      "pattern": "*.tsx",
+      "instruction": "不要在组件中直接写 fetch，使用 src/lib/api.ts 中的函数"
+    },
+    {
+      "description": "使用 TypeScript 严格模式",
+      "pattern": "*.ts",
+      "instruction": "不要使用 any 类型，未知类型用 unknown"
+    }
+  ]
+}
