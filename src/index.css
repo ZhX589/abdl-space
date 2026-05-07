@@ -1,3 +1,5 @@
+@import "tailwindcss";
+
 :root {
   /* 品牌色 */
   --color-primary: #5BA3E6;
