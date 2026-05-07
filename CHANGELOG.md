@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.0.3 (2026-05-08)
+
+### 🚀 后端基础设施
+
+- 新增 `src/types/index.ts` — 完整 DB 模型类型（User, WikiPage, Comment, Rating, PageVersion）+ API 请求/响应类型
+- 新增 `src/lib/db.ts` — `query` / `run` / `queryOne` 三个参数化 D1 工具函数
+- 新增 `src/index.ts` — Hono Worker 入口，CORS + logger 中间件，`/api/health` 和 `/api/health/db` 端点
+- 新增 `functions/api/[[route]].ts` — Cloudflare Pages Functions 适配到 Hono
+- 修改 `tsconfig.app.json` — 加入 `@cloudflare/workers-types` 类型支持
+
 ## v0.0.2 (2026-05-08)
 
 ### 🛡️ AI 抗干扰加固
