@@ -5,6 +5,7 @@ export interface User {
   password_hash: string
   username: string
   avatar_url: string | null
+  email_verified: number
   created_at: string
 }
 
@@ -97,4 +98,14 @@ export interface CreateRatingRequest {
 /** Cloudflare Worker Env 绑定类型（扩展 wrangler 生成的类型） */
 export interface Env {
   abdl_space_db: D1Database
+  JWT_SECRET: string
+}
+
+/** JWT payload 结构 */
+export interface JWTPayload {
+  sub: number
+  username: string
+  email: string
+  iat: number
+  exp: number
 }

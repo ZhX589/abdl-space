@@ -7,7 +7,8 @@ import type { D1Database } from '@cloudflare/workers-types'
  * @param params - 绑定参数
  * @returns 查询结果行数组
  */
-export async function query<T extends Record<string, unknown>>(
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export async function query<T extends Record<string, any>>(
   db: D1Database,
   sql: string,
   params: unknown[] = []
@@ -47,7 +48,8 @@ export async function run(
  * @param params - 绑定参数
  * @returns 单行记录或 null
  */
-export async function queryOne<T extends Record<string, unknown>>(
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export async function queryOne<T extends Record<string, any>>(
   db: D1Database,
   sql: string,
   params: unknown[] = []
