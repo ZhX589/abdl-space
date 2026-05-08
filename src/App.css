@@ -1,18 +1,18 @@
 .counter {
   font-size: 16px;
   padding: 5px 10px;
-  border-radius: var(--radius-sm);
-  color: var(--color-primary);
-  background: var(--glass-bg);
+  border-radius: 5px;
+  color: var(--accent);
+  background: var(--accent-bg);
   border: 2px solid transparent;
   transition: border-color 0.3s;
   margin-bottom: 24px;
 
   &:hover {
-    border-color: var(--color-primary-light);
+    border-color: var(--accent-border);
   }
   &:focus-visible {
-    outline: 2px solid var(--color-primary);
+    outline: 2px solid var(--accent);
     outline-offset: 2px;
   }
 }
