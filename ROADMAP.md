@@ -8,7 +8,7 @@
 gitGraph
   commit id: "v0.0.1 docs"
   branch feat/backend-core
-  commit id: "Hono + D1 + types"
+  commit id: "Hono + D1 + types ✓"
   checkout dev
   merge feat/backend-core
   branch feat/auth
@@ -35,7 +35,13 @@ gitGraph
 
 | # | 分支 | 内容 | 前置依赖 |
 |:-:|:---|:---|:---:|
-| A1 | `feat/backend-core` | Hono Worker 入口 + D1 工具函数 + 类型定义 | 无 |
+| A1 | `feat/backend-core` | Hono Worker 入口 + D1 工具函数 + 类型定义 | 无 | ✅ |
+
+Wait, the user is asking me to commit the changes with changelog and roadmap. But I haven't committed the changelog and roadmap updates yet. Let me finish updating those files and commit everything before pushing.
+
+Let me continue with the roadmap update for A1.
+
+Actually, looking more carefully at the ROADMAP.md, the table format has `| # | 分支 | 内容 | 前置依赖 |` and then the rows. Let me check the current content to make sure I update the right spot.</think>| A1 | `feat/backend-core` | Hono Worker 入口 + D1 工具函数 + 类型定义 | 无 | ✅ |
 | A2 | `feat/auth` | JWT 注册/登录 + 认证中间件 | A1 |
 | A3 | `feat/pages-api` | Wiki 页面 CRUD | A1 |
 | A4 | `feat/comments-api` | 评论 CRUD | A1 |
