@@ -8,6 +8,8 @@
 2. 克隆仓库：`git clone <仓库地址>`
 3. 安装依赖：`npm install`
 4. 本地初始化数据库：`npx wrangler d1 execute abdl-space-db --local --file schemas/schema.sql`
+5. 导入种子数据：`npx wrangler d1 execute abdl-space-db --local --file schemas/seeds/diapers.sql`
+6. 配置本地环境变量：复制 `.env.example` 为 `.dev.vars` 并填入 JWT_SECRET
 
 ## 日常开发流程
 
@@ -20,7 +22,7 @@ git checkout -b feat/你的功能名
 ```
 
 分支命名规则：
-- `feat/xxx` — 新功能（如 `feat/comments-list`）
+- `feat/xxx` — 新功能（如 `feat/ratings-api`）
 - `fix/xxx` — Bug 修复
 - `docs/xxx` — 文档变更
 - `refactor/xxx` — 重构
@@ -29,13 +31,16 @@ git checkout -b feat/你的功能名
 ### 2. 开发中
 
 - AI 辅助开发时参考 `AGENTS.md` 的代码规范
+- 后端 API 定义参考 [API.md](./API.md)，以文档为准
 - 生成的代码放在对应目录：
+  - 后端路由 → `src/routes/`（如 `diapers.ts`, `ratings.ts`）
+  - 后端中间件 → `src/middleware/`（如 `auth.ts`）
   - 页面组件 → `src/pages/`
   - 通用组件 → `src/components/`
   - API 调用 → 先在 `src/lib/api.ts` 里写函数，再在组件里调用
   - 类型定义写在 `src/types/` 里
 - 样式优先使用 TailwindCSS 类 + CSS 变量
-- 遵循主题风格规范（见 `AGENTS.md` 主题风格章节）
+- 遵循主题风格规范（见 `STYLE_GUIDE.md`）
 
 ### 3. 提交代码
 
@@ -47,7 +52,7 @@ git push origin feat/你的功能名
 
 提交信息格式：`类型(范围): 描述`
 - 类型：feat / fix / docs / refactor / style / chore
-- 范围：component / page / api / db / config 等
+- 范围：diapers / ratings / feelings / posts / wiki / auth / users / terms / admin 等
 
 ### 4. 发起 Pull Request
 
@@ -60,12 +65,15 @@ git push origin feat/你的功能名
 
 | 目录 | 放什么 |
 | :--- | :--- |
-| `src/pages/` | 页面组件（如 HomePage, WikiPage） |
-| `src/components/` | 通用组件（如 Button, CommentList, RatingStars） |
-| `src/lib/` | api.ts（API 调用封装）、utils.ts |
-| `src/hooks/` | 自定义 Hook（如 useAuth, usePage, useTheme） |
-| `src/types/` | TypeScript 类型定义 |
-| `schemas/` | 数据库表结构定义 |
+| `src/routes/` | 后端路由模块（diapers, ratings, posts, wiki 等） |
+| `src/middleware/` | Hono 中间件（auth, admin） |
+| `src/pages/` | 页面组件（如 HomePage, WikiPage, DiaperListPage） |
+| `src/components/` | 通用组件（如 DiaperCard, RatingRadar, CommentList） |
+| `src/lib/` | api.ts（API 调用封装）、auth.ts、db.ts、utils.ts |
+| `src/hooks/` | 自定义 Hook（如 useAuth, useDiapers, useTheme） |
+| `src/types/` | TypeScript 类型定义（14 个模型接口 + API 请求/响应类型） |
+| `schemas/` | 数据库表结构 + 种子数据 |
+| `schemas/seeds/` | 种子数据 SQL（diapers.sql 等） |
 
 ## 样式贡献指南
 
@@ -79,8 +87,36 @@ git push origin feat/你的功能名
 
 1. 修改 `schemas/schema.sql`
 2. 本地测试：`npx wrangler d1 execute abdl-space-db --local --file schemas/schema.sql`
-3. 提交包含 schema 变更的 PR
-4. 部署时同步执行远程数据库迁移
+3. 如有新增种子数据，放在 `schemas/seeds/` 目录
+4. 提交包含 schema 变更的 PR
+5. 部署时同步执行远程数据库迁移
+
+## API 对接指南
+
+所有 API 定义见 [API.md](./API.md)，这是 A/B 两站对接的权威参考。
+
+### 前端怎么调 API？
+
+```typescript
+import { getDiapers, getDiaper, createRating } from '../lib/api'
+
+const { diapers, pagination } = await getDiapers({ brand: 'ABU', sort: 'avg_score' })
+const detail = await getDiaper(1)
+await createRating({ diaper_id: 1, absorption_score: 9, ... })
+```
+
+所有 API 函数都在 `src/lib/api.ts` 中，类型定义在 `src/types/index.ts`。
+
+### 关键约定提醒
+
+| 项目 | 约定 |
+| :--- | :--- |
+| 评分 | **6 维度 1–10 分制**，不是 1-5 星 |
+| 评论 | 帖子评论用 `post_comments`，Wiki 段评用 `wiki_inline_comments` |
+| 登录 | 支持 email 或 username，字段名 `login` |
+| 分页 | `?page=1&limit=20`，响应含 `pagination` 对象 |
+| 错误 | `{ "error": "描述" }` |
+| 用户信息 | 公开接口只返回 `{ id, username, avatar }` |
 
 ## 程序员B专属：Git 实操指南（GitHub Desktop）
 
@@ -106,7 +142,7 @@ git push origin feat/你的功能名
 - 在编辑器里改完代码后切回 GitHub Desktop
 - 左侧会显示改动的文件列表
 - 勾选要提交的文件 → 底部写 commit 信息
-- 格式：`feat(模块): 简短描述`（如 `feat(auth): 添加登录页面`）
+- 格式：`feat(模块): 简短描述`（如 `feat(ratings): 评分表单组件`）
 - 点 `Commit to feat/xxx`
 
 ### 5. 推送并创建 PR
@@ -180,17 +216,6 @@ git checkout dev
 git reset --hard HEAD~1  # dev 回退一个提交
 ```
 
-### 前端怎么调 API？
-
-```typescript
-import { getPages, getPage } from '../lib/api'
-
-const pages = await getPages()
-const page = await getPage('getting-started')
-```
-
-所有 API 函数都在 `src/lib/api.ts` 中，类型定义在 `src/types/index.ts`。
-
 ### 毛玻璃效果怎么用？
 
 ```tsx
@@ -205,6 +230,14 @@ const page = await getPage('getting-started')
 
 使用 `useTheme` hook，返回 `{ theme, toggleTheme }`。主题值存储在 `localStorage` 中。
 
+### 怎么添加新的后端路由？
+
+1. 在 `src/routes/` 下创建模块文件（如 `src/routes/terms.ts`）
+2. 导出 Hono 实例
+3. 在 `src/index.ts` 中 `import` 并 `app.route('/api/terms', terms)`
+
+不要在 `src/index.ts` 中直接写路由逻辑。
+
 ## 不要做的事
 
 - ❌ 不要直接推送到 `main` 或 `dev`
@@ -213,3 +246,5 @@ const page = await getPage('getting-started')
 - ❌ 不要用 `any` 类型
 - ❌ 不要一个文件写多个组件
 - ❌ 不要提交敏感信息（密钥、密码等）
+- ❌ 不要在 `src/index.ts` 堆路由，必须拆到 `src/routes/`
+- ❌ 不要混淆两种评论系统（post_comments vs wiki_inline_comments）
