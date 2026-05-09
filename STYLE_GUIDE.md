@@ -1,4 +1,4 @@
-# ABDL Space Wiki 样式指南
+# ABDL Space 样式指南
 
 > 本文件定义了项目的视觉规范。**所有颜色必须通过 CSS 变量引用，不得硬编码色值。**
 
@@ -89,8 +89,8 @@
 
 | 变量名 | 值 | 适用 |
 | :--- | :--- | :--- |
-| `--radius-sm` | `8px` | 按钮、输入框、标签 |
-| `--radius-lg` | `16px` | 卡片、弹窗、容器 |
+| `--radius-sm` | `8px` | 按钮、输入框、标签、评分维度标签 |
+| `--radius-lg` | `16px` | 卡片、弹窗、容器、纸尿裤卡片 |
 
 ## 响应式断点
 
@@ -107,3 +107,40 @@
 4. **优先级**：`localStorage` > `prefers-color-scheme`
 
 > 所有颜色值定义在 `src/index.css` 的 `:root` 和 `[data-theme="dark"]` 中，新增组件时引用 CSS 变量即可自动适配双主题。
+
+## 组件样式规范
+
+### 纸尿裤卡片
+
+- 外层使用 `glass` 类
+- 品牌名用 `--color-primary`，型号用 `--text-primary`
+- 综合评分用 `--color-star` 高亮
+- 厚度指示器用 `--color-accent` 填充
+- 尺码标签用 `--color-primary-light` 背景 + `--color-primary` 文字
+
+### 评分雷达图
+
+- 6 个维度的雷达图
+- 填充色：`--color-primary-light`（半透明）
+- 边线色：`--color-primary`
+- 维度标签：`--text-secondary`
+- 当前用户评分叠加显示，用 `--color-accent` 区分
+
+### 排行榜
+
+- 前三名使用 `--color-star` 徽章
+- 列表项使用 `glass` 类，hover 时加深 `--glass-bg`
+- 切换按钮组用 `--color-primary` 标识当前选中
+
+### 论坛帖子
+
+- 帖子卡片使用 `glass` 类
+- 置顶标记用 `--color-accent` 背景
+- 关联纸尿裤标签用 `--color-primary-light` 背景
+- 评论嵌套用左侧 `--color-primary-light` 竖线标识层级
+
+### Wiki 段评
+
+- 段落 hover 时右侧显示评论图标（`--color-primary`）
+- 已评论段落左侧显示 `--color-primary` 竖线指示
+- 评论文本框出现在段落右侧，使用 `glass` 类
