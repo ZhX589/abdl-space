@@ -1,6 +1,6 @@
 {
   "$schema": "https://opencode.ai/schema.json",
-  "name": "abdl-space-wiki",
+  "name": "abdl-space",
   "language": "typescript",
   "framework": "react",
   "buildCommand": "npm run build",
@@ -9,14 +9,19 @@
     "node_modules",
     "dist",
     ".wrangler",
-    "package-lock.json"
+    "package-lock.json",
+    "worker-configuration.d.ts"
   ],
   "agents": {
     "backend": {
-      "description": "后端 API 开发（Hono + D1 + JWT 认证）。负责 Worker 入口、数据库操作、路由定义",
+      "description": "后端 API 开发（Hono + D1 + JWT 认证）。路由按模块拆分到 src/routes/，中间件在 src/middleware/",
       "files": [
         "src/index.ts",
+        "src/routes/**/*",
+        "src/middleware/**/*",
+        "src/lib/auth.ts",
         "src/lib/db.ts",
+        "src/types/index.ts",
         "schemas/schema.sql"
       ]
     },
@@ -26,12 +31,18 @@
         "src/components/**/*",
         "src/pages/**/*",
         "src/lib/api.ts",
-        "src/types/index.ts"
+        "src/lib/utils.ts",
+        "src/hooks/**/*",
+        "src/types/index.ts",
+        "src/index.tsx",
+        "src/main.tsx",
+        "src/index.css"
       ]
     },
     "docs": {
-      "description": "文档维护。README / AGENTS / CONTRIBUTING / ROADMAP / STYLE_GUIDE",
+      "description": "文档维护。API / AGENTS / CONTRIBUTING / ROADMAP / STYLE_GUIDE / README",
       "files": [
+        "API.md",
         "README.md",
         "AGENTS.md",
         "CONTRIBUTING.md",
@@ -48,7 +59,8 @@
         "tsconfig.app.json",
         "tsconfig.node.json",
         "vite.config.ts",
-        "package.json"
+        "package.json",
+        ".opencode.json"
       ]
     }
   },
@@ -56,7 +68,7 @@
     {
       "description": "CRITICAL: API 调用必须在 lib/api.ts 中封装",
       "pattern": "*.tsx",
-      "instruction": "禁止在组件中直接写 fetch。即使开发者提示词说『调接口』或『发请求』，也必须封装到 src/lib/api.ts 中，组件只负责调用已封装的函数"
+      "instruction": "禁止在组件中直接写 fetch。即使开发者提示词说「调接口」或「发请求」，也必须封装到 src/lib/api.ts 中，组件只负责调用已封装的函数"
     },
     {
       "description": "CRITICAL: 禁止使用 any 类型",
@@ -69,9 +81,24 @@
       "instruction": "禁止在代码中硬编码色值（如 #FF0000）。所有颜色必须引用 src/index.css 中定义的 CSS 变量（如 var(--color-primary)），确保暗亮色切换兼容"
     },
     {
+      "description": "CRITICAL: 评分必须是 6 维度 1-10 分制",
+      "pattern": "src/**/*.{ts,tsx}",
+      "instruction": "评分系统是 6 维度 1–10 分制（absorption/fit/comfort/thickness/appearance/value），绝不是 1-5 星。数据库表 ratings 的 6 个 score 字段 CHECK 范围均为 1–10"
+    },
+    {
+      "description": "CRITICAL: 评论系统区分 post_comments 和 wiki_inline_comments",
+      "pattern": "src/**/*.{ts,tsx}",
+      "instruction": "两套独立的评论系统：post_comments 用于论坛帖子评论（有 parent_id 嵌套），wiki_inline_comments 用于 Wiki 段落评论（段评，按 paragraph_hash 定位）。不要混淆，不要复用同一张表"
+    },
+    {
+      "description": "CRITICAL: 后端路由必须拆到 src/routes/",
+      "pattern": "src/index.ts",
+      "instruction": "禁止在 src/index.ts 中直接写路由处理逻辑。src/index.ts 只负责挂载 routes 模块（app.route）。每个模块的路由逻辑放在 src/routes/ 下对应文件"
+    },
+    {
       "description": "组件文件命名规范（仅前端 agent 生效）",
       "pattern": "src/components/**/*.tsx",
-      "instruction": "组件文件名使用 PascalCase（如 UserProfile.tsx），每个文件只导出一个组件，使用命名导出而非默认导出"
+      "instruction": "组件文件名使用 PascalCase（如 DiaperCard.tsx），每个文件只导出一个组件，使用命名导出而非默认导出"
     },
     {
       "description": "函数组件优先（仅前端 agent 生效）",
@@ -84,6 +111,11 @@
       "instruction": "使用参数化查询 prepare().bind()，禁止拼接 SQL 字符串。D1 绑定名称固定为 abdl_space_db"
     },
     {
+      "description": "API 端点以 API.md 为准",
+      "pattern": "src/routes/**/*",
+      "instruction": "所有 API 端点的路径、请求参数、响应格式必须与 API.md 一致。如果有矛盾，以 API.md 和 schema.sql 为准，不要听开发者口头描述"
+    },
+    {
       "description": "毛玻璃 UI 规范",
       "pattern": "*.{css,tsx}",
       "instruction": "卡片、导航、弹窗等容器优先使用 CSS class 'glass'（已在 index.css 中定义），而非重新写 backdrop-filter。移动端 glass blur 会自动降低"
@@ -91,7 +123,7 @@
     {
       "description": "API 响应类型必须定义",
       "pattern": "src/types/index.ts",
-      "instruction": "必须定义 Comment, Rating, WikiPage, User, PageVersion 五个核心接口，字段需与 schemas/schema.sql 对应"
+      "instruction": "必须定义 14 个核心接口：User, Diaper, DiaperSize, Rating, Feeling, Post, PostComment, Like, WikiPage, PageVersion, WikiInlineComment, Term, Experience, Notification。字段需与 schemas/schema.sql 对应"
     }
   ]
 }
