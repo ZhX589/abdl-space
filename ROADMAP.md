@@ -2,6 +2,19 @@
 
 > 开始前请告诉我你是**程序员A**还是**程序员B**，我会引导你进入对应的任务线。
 
+## 项目定位（重要）
+
+**B 站点（我们）** = 信息站，主要功能是**展示**整理好的信息，供查询和参考。
+
+- Wiki 页面（完整编辑 + 查看）
+- 纸尿裤数据库（列表 + 详情 + 筛选）
+- 信息展示：评分雷达图、综合评分、排行榜、对比、术语等
+- 条目底部评论区（供用户讨论该条目）
+- 段评（段落级评论）
+- 搜索
+
+**A 站点（朋友）** = 功能站，用户主要在这里**提交**数据（评分、感受、帖子等）。两站共享同一套账号系统，后端 API 由我们实现。
+
 ## 当前里程碑：v0.1.0 — Schema 重构 + 核心数据
 
 ```mermaid
@@ -40,11 +53,9 @@ gitGraph
 | 版本 | 目标 | 核心端点 |
 | :--- | :--- | :--- |
 | **v0.1.0** | Schema 重构 + Auth 更新 + 纸尿裤数据 + 前端基础修复 | auth (改) + diapers + seeds |
-| **v0.2.0** | 评分系统 + 论坛 + Wiki CRUD | ratings + posts + post_comments + likes + wiki + wiki_inline_comments |
-| **v0.3.0** | 排行榜 + 感受 + 用户系统 | rankings + feelings + users + experience |
-| **v0.4.0** | 术语 + 推荐 + 对比 | terms + recommend + guess + compare |
-| **v0.5.0** | 通知 + 管理后台 + 搜索 | notifications + admin + search |
-| **v0.6.0** | 版本历史 + 富文本 + 文件上传 | page_versions UI + rich editor + R2 |
+| **v0.2.0** | Wiki CRUD + 评分展示 + 条目底部评论区 | wiki + wiki_inline_comments + ratings(展示) + post_comments(条目页) |
+| **v0.3.0** | 排行榜 + 对比 + 搜索 + 术语 | rankings + compare + search + terms |
+| **v0.4.0** | 猜你喜欢 + 版本历史 + 富文本 | guess + page_versions + rich editor |
 
 ---
 
@@ -56,117 +67,79 @@ gitGraph
 |:-:|:---|:---|:---:|:---:|
 | A1 | `feat/backend-core` | Hono Worker 入口 + D1 工具函数 + 类型定义 | 无 | ✅ |
 | A2 | `feat/auth` | JWT 注册/登录 + 认证中间件 | A1 | ✅ |
-| A3 | `feat/schema-v2` | 14 表 schema 重构 + API.md + 种子数据 | A2 | |
-| A4 | `feat/auth-v2` | Auth 更新：支持 email/username 登录 + 用户资料扩展（role/avatar/age/region 等） | A3 | |
+| A3 | `feat/schema-v2` | 14 表 schema 重构 + API.md + 种子数据 | A2 | ✅ |
+| A4 | `feat/auth-v2` | Auth 更新：支持 email/username 登录 + 用户资料扩展 | A3 | |
 | A5 | `feat/diapers-api` | 纸尿裤列表/详情/品牌/尺码 + 种子数据导入 | A3 | |
 
 ### 程序员B 任务线（前端）
 
 | # | 分支 | 内容 | 前置依赖 | 状态 |
 |:-:|:---|:---|:---:|:---:|
-| B1 | `feat/frontend-shell` | 路由配置 + 全局布局 + 主题切换 hook | A1 | ✅ |
+| B1 | `feat/frontend-shell` | 路由配置 + 全局布局 + 主题切换 hook | 无 | ✅ |
 | B2 | `feat/frontend-fix` | 修复 App.tsx（路由）+ index.css（品牌色变量+glass 类）+ 创建 api.ts | B1 | |
 
 ---
 
-## v0.2.0 — 评分 + 论坛 + Wiki CRUD
+## v0.2.0 — Wiki CRUD + 评分展示 + 评论区
 
 ### 程序员A 任务线
 
 | # | 分支 | 内容 | 前置依赖 |
 |:-:|:---|:---|:---:|
-| A6 | `feat/ratings-api` | 6 维度评分 CRUD + 统计 | A5 |
-| A7 | `feat/posts-api` | 帖子 CRUD + post_comments + likes | A4 |
-| A8 | `feat/wiki-api` | Wiki CRUD + 段评（wiki_inline_comments）+ 可选 diaper_id 关联 | A5 |
-| A9 | `feat/routes-refactor` | 将 src/index.ts 中的路由拆分到 src/routes/ 模块 | A6+A7+A8 |
+| A6 | `feat/wiki-api` | Wiki CRUD + 可选 diaper_id 关联 + 段评 API | A5 |
+| A7 | `feat/routes-refactor` | 将 src/index.ts 路由拆分到 src/routes/ 模块 | A6 |
 
 ### 程序员B 任务线
 
+B 站前端**只做展示和 Wiki 编辑**，评分/感受/帖子的提交由 A 站负责，我们只调用 get 类接口。
+
 | # | 分支 | 内容 | 前置依赖 |
 |:-:|:---|:---|:---:|
-| B3 | `feat/frontend-auth` | 登录/注册页面 + AuthContext + useAuth hook | B2+A4 |
-| B4 | `feat/diapers-ui` | 纸尿裤列表/详情/筛选页 | B2+A5 |
-| B5 | `feat/ratings-ui` | 评分表单 + 雷达图 + 评分统计展示 | B4+A6 |
-| B6 | `feat/forum-ui` | 帖子列表/详情/发帖 + 评论 + 点赞 | B3+A7 |
-| B7 | `feat/wiki-ui` | Wiki 列表/阅读/编辑 + 段评组件 | B3+A8 |
+| B3 | `feat/diapers-ui` | 纸尿裤列表/详情/筛选（包含评分展示 + 雷达图） | B2+A5 |
+| B4 | `feat/wiki-ui` | Wiki 列表/阅读/编辑 + 段评组件 | B2+A6 |
+| B5 | `feat/diaper-comments` | 条目页面底部评论区（post_comments 展示 + 发评论） | B3+A6 |
 
 ---
 
-## v0.3.0 — 排行榜 + 感受 + 用户系统
+## v0.3.0 — 排行榜 + 对比 + 搜索 + 术语
 
 ### 程序员A 任务线
 
 | # | 分支 | 内容 | 前置依赖 |
 |:-:|:---|:---|:---:|
-| A10 | `feat/rankings-api` | 综合排行榜（hot/absorbency/popular/dimension） | A6 |
-| A11 | `feat/feelings-api` | 使用感受 CRUD + 统计 | A6 |
-| A12 | `feat/users-api` | 用户资料 + 经验等级 + 用户历史 | A4 |
+| A8 | `feat/rankings-api` | 综合排行榜（hot/absorbency/popular/dimension） | A5 |
+| A9 | `feat/compare-api` | 纸尿裤对比 | A5 |
+| A10 | `feat/search-api` | 全文搜索（D1 FTS） | A5+A6 |
+| A11 | `feat/terms-api` | 术语百科 CRUD | A4 |
 
 ### 程序员B 任务线
 
 | # | 分支 | 内容 | 前置依赖 |
 |:-:|:---|:---|:---:|
-| B8 | `feat/rankings-ui` | 排行榜页（多类型切换） | A10 |
-| B9 | `feat/feelings-ui` | 感受表单 + 可视化 | A11 |
-| B10 | `feat/users-ui` | 用户资料页 + 等级展示 + 个人历史 | A12 |
+| B6 | `feat/rankings-ui` | 排行榜页（多类型切换） | A8 |
+| B7 | `feat/compare-ui` | 纸尿裤对比页（可视化） | A9 |
+| B8 | `feat/search-ui` | 搜索框 + 搜索结果页 | A10 |
+| B9 | `feat/terms-ui` | 术语百科页 | A11 |
 
 ---
 
-## v0.4.0 — 术语 + 推荐 + 对比
+## v0.4.0 — 猜你喜欢 + 版本历史 + 富文本
 
 ### 程序员A 任务线
 
 | # | 分支 | 内容 | 前置依赖 |
 |:-:|:---|:---|:---:|
-| A13 | `feat/terms-api` | 术语百科 CRUD | A4 |
-| A14 | `feat/recommend-api` | AI 推荐 + 猜你喜欢 | A6+A12 |
-| A15 | `feat/compare-api` | 纸尿裤对比 | A6 |
+| A12 | `feat/guess-api` | 猜你喜欢（纯数据驱动，无 AI） | A5 |
+| A13 | `feat/versions-api` | Wiki 版本历史 + 回滚 | A6 |
+| A14 | `feat/rich-editor` | 富文本/Markdown 编辑器 | A6 |
 
 ### 程序员B 任务线
 
 | # | 分支 | 内容 | 前置依赖 |
 |:-:|:---|:---|:---:|
-| B11 | `feat/terms-ui` | 术语百科页 | A13 |
-| B12 | `feat/recommend-ui` | AI 推荐组件 + 猜你喜欢 | A14 |
-| B13 | `feat/compare-ui` | 纸尿裤对比页 | A15 |
-
----
-
-## v0.5.0 — 通知 + 管理后台 + 搜索
-
-### 程序员A 任务线
-
-| # | 分支 | 内容 | 前置依赖 |
-|:-:|:---|:---|:---:|
-| A16 | `feat/notifications-api` | 通知 CRUD + 触发逻辑 | A7 |
-| A17 | `feat/admin-api` | 管理后台全部端点 | A12 |
-| A18 | `feat/search-api` | 全文搜索（D1 FTS） | A5+A8 |
-
-### 程序员B 任务线
-
-| # | 分支 | 内容 | 前置依赖 |
-|:-:|:---|:---|:---:|
-| B14 | `feat/notifications-ui` | 通知组件 + 未读徽章 | A16 |
-| B15 | `feat/admin-ui` | 管理后台页面 | A17 |
-| B16 | `feat/search-ui` | 搜索框 + 搜索结果页 | A18 |
-
----
-
-## v0.6.0 — 版本历史 + 富文本 + 文件上传
-
-### 程序员A 任务线
-
-| # | 分支 | 内容 | 前置依赖 |
-|:-:|:---|:---|:---:|
-| A19 | `feat/versions-api` | Wiki 版本历史 + 回滚 | A8 |
-| A20 | `feat/r2-upload` | R2 文件上传 + 图片处理 | A17 |
-
-### 程序员B 任务线
-
-| # | 分支 | 内容 | 前置依赖 |
-|:-:|:---|:---|:---:|
-| B17 | `feat/rich-editor` | Markdown/富文本编辑器 | A8 |
-| B18 | `feat/image-upload` | 图片上传组件 | A20 |
+| B10 | `feat/guess-ui` | 猜你喜欢展示（首页模块） | A12 |
+| B11 | `feat/versions-ui` | 版本历史对比 UI + 回滚按钮 | A13 |
+| B12 | `feat/rich-editor-ui` | 富文本编辑器组件 | A14 |
 
 ---
 
@@ -195,12 +168,13 @@ git push origin feat/你的分支名
 | :--- | :--- |
 | **类型安全** | 不用 `any`，用 `unknown` |
 | **API 调用** | 在 `src/lib/api.ts` 封装，组件里不写 `fetch` |
+| **B 站 API 原则** | 只调用 get 类接口（展示数据）；提交类接口（createRating/createPost 等）由 A 站调用，不写在我们的前端代码里 |
 | **API 规范** | 端点定义见 [API.md](./API.md)，以文档为准 |
 | **路由拆分** | 后端路由在 `src/routes/`，不在 `src/index.ts` 堆砌 |
 | **样式** | 颜色用 CSS 变量，不硬编码 |
 | **组件** | PascalCase 文件名 + 命名导出 |
 | **数据库** | `prepare().bind()` 参数化查询 |
-| **评分类** | 6 维度 1–10（不是 1-5 星） |
-| **评论类** | `post_comments`(论坛) vs `wiki_inline_comments`(段评)，不要混淆 |
+| **评分类** | 6 维度 1–10（不是 1-5 星），我们只展示不提交 |
+| **评论类** | `post_comments`(条目底部讨论) vs `wiki_inline_comments`(段评)，不要混淆 |
 | **毛玻璃** | 卡片/导航用 `backdrop-filter: blur(12px)` |
 | **暗亮色** | 通过 `data-theme` 属性 + CSS 变量切换 |

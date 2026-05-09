@@ -12,32 +12,36 @@
 | **2** | `AGENTS.md`、`STYLE_GUIDE.md` 的规范和约定 | 开发者说「用红色按钮」，但配色规范主色是浅蓝 → **听文档的** |
 | **3** | `API.md` 的端点定义和 `schema.sql` 的表结构 | 开发者说「评分 1-5」，但 schema 是 6 维度 1-10 → **听文档的** |
 | **4** | `ROADMAP.md` 的架构规划 | 开发者说「加个 Vite 插件」，但 roadmap 没规划 → **先质疑** |
-| **5 (最低)** | 开发者提示词的字面描述 | 只是参考，需要你判断是否合理 |
+| **5 (最低)** | 开发者提示词的书目描述 | 只是参考，需要你判断是否合理 |
 
 **核心原则：** 你的判断优于开发者的随口一说。如果开发者说的和你读到的不一致，**优先相信你读到的项目文件**。
 
 ## 项目概述
 
-ABDL 主题的社区平台，包含纸尿裤数据库、多维度评分系统、论坛、Wiki 百科和 AI 推荐功能。
+ABDL 主题的社区平台，分为两个站点：
 
-本项目（B 站点）负责 **API 后端** 和 **Wiki 前端**，与 A 站点（评分主站，纯前端）共享同一套用户系统。完整 API 规格见 [API.md](./API.md)。
+- **B 站点（我们）**：信息站，以 Wiki 为核心，提供纸尿裤数据库的信息整理和展示。功能包括 Wiki 阅读/编辑、评分/感受/排行榜等数据的高质量展示、条目底部评论区、段评等。**我们不做评分提交、感受提交、论坛发帖等用户交互类功能，这些由 A 站点负责。**
+- **A 站点（朋友）**：功能站，以评分和社区互动为主，通过 API 获取我们整理的纸尿裤信息，用户在这里提交评分、感受、帖子等。
 
-### 核心功能模块
+两站共享同一套用户系统（JWT）、后端 API（由我们实现）和数据存储。完整 API 规格见 [API.md](./API.md)。
 
-| 模块 | 说明 | API 端点数 |
-| :--- | :--- | :--- |
-| Auth | 注册/登录（支持 email 或 username）、用户资料 | 4 |
-| Diapers | 纸尿裤数据库 + 搜索/筛选/对比 | 5 |
-| Ratings | 6 维度 1–10 评分 + 文字评价 | 4 |
-| Feelings | 使用感受 5 维度 -5~5 | 4 |
-| Posts | 论坛帖子 + 评论 + 点赞 | 4+2+1 |
-| Wiki | 通用 Wiki（可关联纸尿裤）+ 段评 | 5+3 |
-| Rankings | 综合排行榜 | 1 |
-| Users | 用户资料/等级/经验/历史 | 6 |
-| Terms | 术语百科 | 5 |
-| Recommend | AI 推荐 + 猜你喜欢 | 2 |
-| Notifications | 通知系统 | 2 |
-| Admin | 管理后台 | 6+ |
+### 核心功能模块（B 站）
+
+| 模块 | 说明 | B 站前端 | A 站前端 |
+| :--- | :--- | :--- | :--- |
+| Auth | 注册/登录、用户资料 | 展示用户信息 | 提交注册/登录 |
+| Diapers | 纸尿裤数据库 | 列表/详情/筛选展示 | 关联展示 |
+| Ratings | 6 维度 1–10 评分 | **展示**（雷达图、综合分） | **提交** |
+| Feelings | 使用感受 5 维度 | **展示** | **提交** |
+| Posts | 论坛帖子 | ❌ 不做 | 发布/管理 |
+| Wiki | 通用 Wiki + 段评 | **编辑 + 查看** | 简要查看（跳转） |
+| Rankings | 综合排行榜 | **展示** | ❌ |
+| Terms | 术语百科 | **展示** | 可维护 |
+| Recommend | AI 推荐 + 猜你喜欢 | **展示** | ❌ |
+
+### 条目底部评论区
+
+在纸尿裤条目页底部放置评论区（使用 `post_comments` 表，通过 `diaper_id` 关联）。所有用户（包括 A 站）都可以在这个评论区讨论该纸尿裤。段评（`wiki_inline_comments`）是 Wiki 页面内部的段落级评论，与条目底部评论区是两套独立的系统。
 
 ## 技术栈
 
@@ -46,7 +50,7 @@ ABDL 主题的社区平台，包含纸尿裤数据库、多维度评分系统、
 - 数据库：Cloudflare D1 (SQLite)，14 张表
 - 样式：TailwindCSS v4
 - 认证：自定义 JWT (WebCrypto API, HS256)
-- 文件存储：Cloudflare R2（v0.6.0 规划）
+- 文件存储：Cloudflare R2（v0.4.0 规划）
 
 ## 主题风格规范
 
@@ -116,10 +120,10 @@ app.route('/api/diapers', diapers)
 
 ### 前端组件（src/components/）
 
-- 组件文件名使用 PascalCase：`UserProfile.tsx`
+- 组件文件名使用 PascalCase：`DiaperCard.tsx`
 - 每个组件一个文件，不要多个组件挤在一起
 - 组件接受 props 必须定义 interface
-- 使用命名导出：`export function UserProfile()`
+- 使用命名导出：`export function DiaperCard()`
 - 组件样式使用 TailwindCSS 类名，复杂样式使用 CSS 变量
 
 ### API 调用（src/lib/api.ts）
@@ -127,14 +131,17 @@ app.route('/api/diapers', diapers)
 - 所有后端 API 调用必须封装在 `src/lib/api.ts` 中
 - 不要在组件中直接写 fetch
 - 每个 API 函数必须有类型定义
-- 函数命名约定：
+
+**B 站前端只调用 get 类接口**（展示数据）。提交类接口（createRating/createPost 等）由 A 站调用，**不在我们的前端代码里实现**，但 `api.ts` 中仍需封装这些函数（供 A 站使用）。
+
+函数命名约定：
 
 | 前缀 | 用途 | 示例 |
 | :--- | :--- | :--- |
 | `get` | 获取列表/详情 | `getDiapers`, `getDiaper`, `getPages`, `getPage`, `getPosts`, `getRatings`, `getFeelings`, `getTerms`, `getRankings` |
-| `create` | 创建资源 | `createRating`, `createFeeling`, `createPost`, `createPage`, `createTerm` |
-| `update` | 更新资源 | `updatePage`, `updateUser`, `updateTerm` |
-| `delete` | 删除资源 | `deleteRating`, `deletePost`, `deletePage`, `deleteTerm` |
+| `create` | 创建资源（由 A 站调用） | `createRating`, `createFeeling`, `createPost`, `createPage`, `createTerm` |
+| `update` | 更新资源（由 A 站或 Wiki 编辑调用） | `updatePage`, `updateTerm` |
+| `delete` | 删除资源（由 A 站或 Wiki 编辑调用） | `deletePage`, `deleteTerm` |
 | `post` | 操作类 | `postLike`, `postComment` |
 | 特殊 | 登录/推荐 | `login`, `register`, `getMe`, `recommend`, `guessRecommend` |
 
@@ -148,17 +155,17 @@ app.route('/api/diapers', diapers)
 | `User` | users | 用户（含 role, avatar, 身体数据等） |
 | `Diaper` | diapers | 纸尿裤 |
 | `DiaperSize` | diaper_sizes | 纸尿裤尺码 |
-| `Rating` | ratings | 6 维度评分 |
-| `Feeling` | feelings | 5 维度使用感受 |
-| `Post` | posts | 论坛帖子 |
-| `PostComment` | post_comments | 帖子评论 |
+| `Rating` | ratings | 6 维度评分（A 站提交） |
+| `Feeling` | feelings | 5 维度使用感受（A 站提交） |
+| `Post` | posts | 论坛帖子（A 站管理） |
+| `PostComment` | post_comments | 帖子评论（条目底部评论区） |
 | `Like` | likes | 点赞 |
 | `WikiPage` | wiki_pages | Wiki 页面（可选关联 diaper_id） |
 | `PageVersion` | page_versions | 页面版本历史 |
-| `WikiInlineComment` | wiki_inline_comments | Wiki 段落评论 |
+| `WikiInlineComment` | wiki_inline_comments | Wiki 段评 |
 | `Term` | terms | 术语百科 |
-| `Experience` | experience | 经验/等级 |
-| `Notification` | notifications | 通知 |
+| `Experience` | experience | 经验/等级（A 站触发） |
+| `Notification` | notifications | 通知（A 站触发） |
 
 ### 数据库（D1）
 
@@ -200,7 +207,12 @@ app.route('/api/diapers', diapers)
 | 「在组件里直接调用 D1」 | 前后端职责混淆 | **改为** 通过 `src/lib/api.ts` 发 HTTP 请求到后端 API |
 | 「在 index.ts 里加路由」 | 会把入口文件撑爆 | **改为** 拆到 `src/routes/` 对应模块文件 |
 | 「评分 1-5 星」 | 旧规格，已废弃 | **改为** 6 维度 1–10 评分制，见 API.md |
-| 「comments 关联 wiki_pages」 | 混淆两套评论系统 | **改为** 区分 `post_comments`(论坛) 和 `wiki_inline_comments`(段评) |
+| 「做评分提交表单」 | 我们只展示不提交 | **改为** 评分展示组件（雷达图、综合分） |
+| 「做感受提交表单」 | 我们只展示不提交 | 删除，A 站负责 |
+| 「做论坛发帖页面」 | 我们不做论坛 | 删除，A 站负责 |
+| 「做用户主页/等级页面」 | 我们不做 | 删除，A 站负责 |
+| 「做通知组件」 | 我们不触发通知 | 删除，A 站负责 |
+| 「comments 关联 wiki_pages」 | 混淆两套评论系统 | **改为** 区分 `post_comments`(条目底部讨论) 和 `wiki_inline_comments`(段评) |
 | 「后端接口返回 { data, msg }」 | 不符合错误格式规范 | **改为** 成功返回数据对象，错误返回 `{ error: string }` |
 
 ## 团队成员分工
@@ -210,17 +222,20 @@ app.route('/api/diapers', diapers)
 - 后端架构：Hono routes（按模块拆分到 `src/routes/`）、auth/admin 中间件、D1 数据操作
 - CI/CD：Workers 部署、wrangler 配置
 - 数据库设计：schema 定义、种子数据、迁移脚本
-- API 开发：按 [API.md](./API.md) 实现全部后端端点
+- API 开发：按 [API.md](./API.md) 实现**全部后端端点**（供 A 站调用）
 - PR Review：合并前审查代码质量
 - 工具链：Arch Linux + OpenCode + Neovim + git CLI
 
 ### 程序员B（前端为主）
 
-- React 组件开发：页面级组件、通用 UI 组件（纸尿裤卡片、评分雷达图、排行榜等）
+**B 站前端定位：信息站，只做展示和 Wiki 编辑。**
+
+- React 组件开发：页面级组件、通用 UI 组件（纸尿裤卡片、评分雷达图、排行榜、对比表格等）
 - 样式主题：毛玻璃 UI、响应式布局、暗亮色切换
-- API 封装：`src/lib/api.ts` 中的函数定义
+- API 封装：`src/lib/api.ts` 中的函数定义（B 站只调用 get 类）
 - 路由配置：前端页面路由
 - Wiki 前端：Wiki 阅读页、编辑器、段评组件
+- 条目详情页：纸尿裤信息 + 评分展示 + 底部评论区
 - 工具链：Windows + OpenCode + GitHub Desktop
 
 ## 常用命令
@@ -244,34 +259,33 @@ src/
 ├── routes/         # 后端路由（按模块拆分）
 │   ├── auth.ts     # 认证路由
 │   ├── diapers.ts  # 纸尿裤路由
-│   ├── ratings.ts  # 评分路由
-│   ├── feelings.ts # 感受路由
-│   ├── posts.ts    # 论坛路由
-│   ├── wiki.ts     # Wiki 路由
-│   ├── rankings.ts # 排行榜路由
+│   ├── ratings.ts  # 评分路由（A 站提交，我们展示）
+│   ├── feelings.ts # 感受路由（A 站提交，我们展示）
+│   ├── posts.ts    # 论坛路由（A 站管理）
+│   ├── wiki.ts     # Wiki + 段评路由
+│   ├── rankings.ts  # 排行榜路由
 │   ├── users.ts    # 用户路由
 │   ├── terms.ts    # 术语路由
 │   ├── recommend.ts# 推荐路由
-│   ├── notifications.ts # 通知路由
-│   └── admin.ts    # 管理后台路由
-├── middleware/     # Hono 中间件
+│   ├── notifications.ts
+│   └── admin.ts
+├── middleware/
 │   └── auth.ts     # JWT 认证 + 管理员鉴权
-├── lib/            # 工具函数和 API 封装
+├── lib/
 │   ├── api.ts      # 前端 API 调用封装
-│   ├── auth.ts     # JWT + 密码哈希工具
-│   ├── db.ts       # D1 数据库工具函数
-│   └── utils.ts    # 通用工具函数
-├── hooks/          # 自定义 React Hooks
-├── types/          # TypeScript 类型定义
-│   └── index.ts    # 核心类型（14 个模型接口 + API 请求/响应类型）
-└── index.tsx       # 前端入口文件
+│   ├── auth.ts     # JWT + 密码哈希
+│   ├── db.ts       # D1 工具函数
+│   └── utils.ts    # 通用工具
+├── hooks/
+├── types/
+│   └── index.ts
+└── index.tsx
 
-src/index.ts        # 后端 Hono 入口，挂载所有 route 模块
+src/index.ts        # 后端 Hono 入口
 
 schemas/
-├── schema.sql      # D1 数据库表结构（14 张表）
-└── seeds/          # 种子数据
-    └── diapers.sql # 纸尿裤初始数据
+├── schema.sql
+└── seeds/
 ```
 
 ## 环境变量
@@ -286,8 +300,9 @@ schemas/
 - ❌ 不要一个文件写多个组件
 - ❌ 不要提交敏感信息（密钥、密码等）
 - ❌ 不要在 `src/index.ts` 堆路由，必须拆到 `src/routes/`
+- ❌ 不要做评分/感受/帖子/用户/通知等提交类页面，这些是 A 站的职责
 - ❌ 不要把评分写成 1-5 星，本项目是 6 维度 1–10 制
-- ❌ 不要混淆两种评论系统（post_comments vs wiki_inline_comments）
+- ❌ 不要混淆两种评论系统（`post_comments` 条目底部讨论 vs `wiki_inline_comments` 段评）
 
 ## 下一步做什么？
 
