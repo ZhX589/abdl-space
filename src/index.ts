@@ -5,6 +5,7 @@ import type { Env, RegisterRequest, LoginRequest, LoginResponse, User, JWTPayloa
 import { hashPassword, verifyPassword, signJWT } from './lib/auth.ts'
 import { queryOne, run } from './lib/db.ts'
 import { authMiddleware } from './middleware/auth.ts'
+import diapers from './routes/diapers.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
@@ -25,6 +26,8 @@ app.get('/api/health/db', async (c) => {
     return c.json({ error: 'Database connection failed' }, 500)
   }
 })
+
+app.route('/api/diapers', diapers)
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
@@ -66,7 +69,7 @@ app.post('/api/auth/register', async (c) => {
   )
 
   const userId = result.meta.last_row_id as number
-  const token = await signJWT({ sub: userId, username, email }, c.env.JWT_SECRET)
+  const token = await signJWT({ sub: userId, username, email, role: 'user' }, c.env.JWT_SECRET)
 
   const response: LoginResponse = {
     token,
@@ -74,7 +77,8 @@ app.post('/api/auth/register', async (c) => {
       id: userId,
       email,
       username,
-      avatar_url: null
+      avatar: null,
+      role: 'user'
     }
   }
   return c.json(response, 201)
@@ -82,16 +86,16 @@ app.post('/api/auth/register', async (c) => {
 
 app.post('/api/auth/login', async (c) => {
   const body = await c.req.json<LoginRequest>()
-  const { email, password } = body
+  const { login, password } = body
 
-  if (!email || !password) {
-    return c.json({ error: 'email and password are required' }, 400)
+  if (!login || !password) {
+    return c.json({ error: 'login and password are required' }, 400)
   }
 
   const user = await queryOne<User>(
     c.env.abdl_space_db,
-    'SELECT id, email, username, password_hash, avatar_url FROM users WHERE email = ?',
-    [email]
+    'SELECT id, email, username, password_hash, avatar FROM users WHERE email = ? OR username = ?',
+    [login, login]
   )
   if (!user) {
     return c.json({ error: 'Invalid email or password' }, 401)
@@ -102,7 +106,7 @@ app.post('/api/auth/login', async (c) => {
     return c.json({ error: 'Invalid email or password' }, 401)
   }
 
-  const token = await signJWT({ sub: user.id, username: user.username, email: user.email }, c.env.JWT_SECRET)
+  const token = await signJWT({ sub: user.id, username: user.username, email: user.email, role: user.role }, c.env.JWT_SECRET)
 
   const response: LoginResponse = {
     token,
@@ -110,7 +114,8 @@ app.post('/api/auth/login', async (c) => {
       id: user.id,
       email: user.email,
       username: user.username,
-      avatar_url: user.avatar_url
+      avatar: user.avatar,
+      role: user.role
     }
   }
   return c.json(response)
@@ -120,7 +125,7 @@ app.get('/api/auth/me', authMiddleware, async (c) => {
   const payload = c.get('user')
   const user = await queryOne<User>(
     c.env.abdl_space_db,
-    'SELECT id, email, username, avatar_url, email_verified, created_at FROM users WHERE id = ?',
+    'SELECT id, email, username, avatar, role, email_verified, created_at FROM users WHERE id = ?',
     [payload.sub]
   )
   if (!user) {
@@ -130,7 +135,8 @@ app.get('/api/auth/me', authMiddleware, async (c) => {
     id: user.id,
     email: user.email,
     username: user.username,
-    avatar_url: user.avatar_url,
+    avatar: user.avatar,
+    role: user.role,
     email_verified: user.email_verified,
     created_at: user.created_at
   })
