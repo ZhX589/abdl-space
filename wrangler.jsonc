@@ -5,8 +5,8 @@
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
 	"name": "abdl-space",
-	"main": "src/index.ts",
 	"compatibility_date": "2026-05-07",
+	"pages_build_output_dir": "./dist",
 	"observability": {
 		"enabled": true
 	},
@@ -45,7 +45,7 @@
 	 * Static Assets
 	 * https://developers.cloudflare.com/workers/static-assets/binding/
 	 */
-	"assets": {  "directory": "./dist/",  "binding": "ASSETS" }
+	// "assets": {  "directory": "./public/",  "binding": "ASSETS" }
 	/**
 	 * Service Bindings (communicate between multiple Workers)
 	 * https://developers.cloudflare.com/workers/wrangler/configuration/#service-bindings
