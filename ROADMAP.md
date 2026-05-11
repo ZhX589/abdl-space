@@ -41,7 +41,7 @@ gitGraph
   merge feat/schema-v2
   branch feat/diapers-api
   branch feat/frontend-fix
-  commit id: "api.ts (仅); App.tsx+index.css 待修"
+  commit id: "router.tsx + index.css + api.ts + utils.ts"
   checkout feat/diapers-api
   commit id: "diapers CRUD + seeds"
   checkout dev
@@ -70,7 +70,7 @@ gitGraph
 | A1 | `feat/backend-core` | Hono Worker 入口 + D1 工具函数 + 类型定义 | 无 | ✅ |
 | A2 | `feat/auth` | JWT 注册/登录 + 认证中间件 | A1 | ✅ |
 | A3 | `feat/schema-v2` | 14 表 schema 重构 + API.md + 种子数据 | A2 | ✅ |
-| A4 | `feat/auth-v2` | Auth 更新：支持 email/username 登录 + 用户资料扩展 | A3 | |
+| A4 | `feat/auth-v2` | Auth 更新：支持 email/username 登录 + 用户资料扩展 | A3 | ✅ |
 | A5 | `feat/diapers-api` | 纸尿裤列表/详情/品牌/尺码/对比 + 种子数据导入 | A3 | ✅ |
 
 ### 程序员B 任务线（前端）
@@ -88,8 +88,8 @@ gitGraph
 
 | # | 分支 | 内容 | 前置依赖 |
 |:-:|:---|:---|:---:|
-| A6 | `feat/wiki-api` | Wiki CRUD + 可选 diaper_id 关联 + 段评 API | A5 |
-| A7 | `feat/routes-refactor` | 将 src/index.ts 路由拆分到 src/routes/ 模块 | A6 |
+| A6 | `feat/wiki-api` | Wiki CRUD + 可选 diaper_id 关联 + 段评 API | A5 | ✅ |
+| A7 | `feat/routes-refactor` | 将 src/index.ts 路由拆分到 src/routes/ 模块 | A6 | ✅ |
 
 ### 程序员B 任务线
 
@@ -97,9 +97,9 @@ B 站前端**只做展示和 Wiki 编辑**，评分/感受/帖子的提交由 A 
 
 | # | 分支 | 内容 | 前置依赖 |
 |:-:|:---|:---|:---:|
-| B3 | `feat/diapers-ui` | 纸尿裤列表/详情/筛选（包含评分展示 + 雷达图） | B2+A5 |
-| B4 | `feat/wiki-ui` | Wiki 列表/阅读/编辑 + 段评组件 | B2+A6 |
-| B5 | `feat/diaper-comments` | 条目页面底部评论区（post_comments 展示 + 发评论） | B3+A6 |
+| B3 | `feat/diapers-ui` | 纸尿裤列表/详情/筛选（包含评分展示 + 雷达图） | B2+A5 | ✅ |
+| B4 | `feat/wiki-ui` | Wiki 列表/阅读/编辑 + 段评组件 | B2+A6 | ✅ |
+| B5 | `feat/diaper-comments` | 条目页面底部评论区（post_comments 展示 + 发评论） | B3+A6 | ✅ |
 
 ---
 
@@ -109,10 +109,10 @@ B 站前端**只做展示和 Wiki 编辑**，评分/感受/帖子的提交由 A 
 
 | # | 分支 | 内容 | 前置依赖 |
 |:-:|:---|:---|:---:|
-| A8 | `feat/rankings-api` | 综合排行榜（hot/absorbency/popular/dimension） | A5 |
-| A9 | `feat/compare-api` | 纸尿裤对比 | A5 |
-| A10 | `feat/search-api` | 全文搜索（D1 FTS） | A5+A6 |
-| A11 | `feat/terms-api` | 术语百科 CRUD | A4 |
+| A8 | `feat/rankings-api` | 综合排行榜（hot/absorbency/popular/dimension） | A5 | ✅ |
+| A9 | `feat/compare-api` | 纸尿裤对比 | A5 | ✅ |
+| A10 | `feat/search-api` | 全文搜索（D1 FTS） | A5+A6 | |
+| A11 | `feat/terms-api` | 术语百科 CRUD | A4 | ✅ |
 
 ### 程序员B 任务线
 
@@ -131,8 +131,8 @@ B 站前端**只做展示和 Wiki 编辑**，评分/感受/帖子的提交由 A 
 
 | # | 分支 | 内容 | 前置依赖 |
 |:-:|:---|:---|:---:|
-| A12 | `feat/guess-api` | 猜你喜欢（纯数据驱动，无 AI） | A5 |
-| A13 | `feat/versions-api` | Wiki 版本历史 + 回滚 | A6 |
+| A12 | `feat/guess-api` | 猜你喜欢（纯数据驱动，无 AI） | A5 | ✅ |
+| A13 | `feat/versions-api` | Wiki 版本历史 + 回滚 | A6 | |
 | A14 | `feat/rich-editor` | 富文本/Markdown 编辑器 | A6 |
 
 ### 程序员B 任务线

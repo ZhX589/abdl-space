@@ -9,6 +9,7 @@ export function Navbar() {
 
   const navLinks = [
     { to: '/', label: '首页' },
+    { to: '/diapers', label: '纸尿裤' },
     { to: '/wiki', label: 'Wiki' },
   ]
 

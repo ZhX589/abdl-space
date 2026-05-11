@@ -121,6 +121,9 @@ git push origin dev
 curl https://<your-project>.pages.dev/api/health
 # 期望: {"status":"ok","timestamp":"..."}
 
+curl https://<your-project>.pages.dev/api/health/db
+# 期望: {"status":"ok","db":{"ok":1}}
+
 curl https://<your-project>.pages.dev/api/diapers
 # 期望: 返回 11 条纸尿裤数据
 ```
@@ -212,6 +215,7 @@ curl https://<your-project>.pages.dev/api/diapers
 
 ```bash
 curl https://<your-project>.pages.dev/api/health
+curl https://<your-project>.pages.dev/api/health/db
 curl https://<your-project>.pages.dev/api/diapers
 ```
 
@@ -235,13 +239,15 @@ npx wrangler d1 execute abdl-space-db --remote --command "<逆向SQL>"
 
 | 项 | 值 |
 |:---|:---|
-| Pages 域名 | `https://abdl-space.pages.dev`（确认实际域名后更新） |
+| 生产域名 (latest) | `https://f0614066.abdl-space.pages.dev` |
 | Pages 项目 | `abdl-space` |
-| D1 数据库 | `abdl-space-db` |
+| D1 数据库 | `abdl-space-db` (id: `159f81ba-ea32-4667-a3ce-d72cb1659d93`) |
 | Production 分支 | `dev` |
-| 当前 commit (main/dev) | `3fce82f` |
+| 当前 commit (main/dev) | `23569c2` |
 | 构建命令 | `npm run build` |
 | 输出目录 | `dist` |
+| 本地 API 端口 | `8787` (`npm run api`) |
+| 本地前端端口 | `5173` (`npm run dev`) |
 
 ## 9. 部署日志
 
@@ -261,11 +267,13 @@ npx wrangler d1 execute abdl-space-db --remote --command "<逆向SQL>"
 ### Git 分支状态
 
 ```
-main  @ 3fce82f                     ← 当前所在
-dev   @ 3fce82f (已同步)             ← Cloudflare Pages production 分支
-opencode/cosmic-garden   ← 过期，待清理
-opencode/eager-sailor    ← 过期，待清理
+main  @ 23569c2                     ← 当前所在
+dev   @ 23569c2 (已同步)             ← Cloudflare Pages production 分支
 ```
+
+> 已删除远程/本地: `feat/diapers-api`、`feat/frontend-fix`
+
+> ⚠️ `de98b4b` 的 production 部署曾失败（021cd073），后续 `3fce82f` 部署成功覆盖。
 
 ### 2026-05-11 — B2 完成 + bug 修复 + 端口统一
 
@@ -279,6 +287,8 @@ opencode/eager-sailor    ← 过期，待清理
 | - | fix: 统一本地端口为 8787 + 新增 npm run api 命令 | `c4ebb59` | ✅ |
 | - | fix: 登录 SQL 补充 role 字段 | `3fce82f` | ✅ |
 | - | ROADMAP.md B2 标记 ✅ + API.md 端口修正 | - | ✅ |
+| - | docs: DEPLOYMENT.md 更新清单和日志 | `23569c2` | ✅ |
+| - | Production 部署验证: `/api/health` + `/api/health/db` + `/api/diapers` OK | `23569c2` | ✅ |
 
 ## 10. 常见问题
 

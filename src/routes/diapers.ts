@@ -268,6 +268,120 @@ diapers.get('/compare', async (c) => {
 })
 
 /**
+ * GET /api/diapers/:id/ratings — 某纸尿裤的评分列表 + 分维度统计
+ */
+diapers.get('/:id/ratings', async (c) => {
+  const id = parseInt(c.req.param('id'))
+
+  const reviews = await query<Record<string, unknown>>(
+    c.env.abdl_space_db,
+    `SELECT r.*, u.username, u.role, u.avatar
+     FROM ratings r JOIN users u ON r.user_id = u.id
+     WHERE r.diaper_id = ?
+     ORDER BY r.created_at DESC`,
+    [id]
+  )
+
+  const stats = await query<Record<string, unknown>>(
+    c.env.abdl_space_db,
+    `SELECT
+       ROUND(AVG(absorption_score), 1) as absorption_score,
+       ROUND(AVG(fit_score), 1) as fit_score,
+       ROUND(AVG(comfort_score), 1) as comfort_score,
+       ROUND(AVG(thickness_score), 1) as thickness_score,
+       ROUND(AVG(appearance_score), 1) as appearance_score,
+       ROUND(AVG(value_score), 1) as value_score,
+       ROUND(AVG((absorption_score + fit_score + comfort_score + thickness_score + appearance_score + value_score) / 6.0), 1) as composite,
+       COUNT(*) as count
+     FROM ratings WHERE diaper_id = ?`,
+    [id]
+  )
+
+  const s = stats[0]
+  const dimensionNames = ['absorption_score', 'fit_score', 'comfort_score', 'thickness_score', 'appearance_score', 'value_score'] as const
+  const dimensions = {} as Record<string, { avg: number; count: number }>
+  for (const dim of dimensionNames) {
+    dimensions[dim] = { avg: s?.[dim] != null ? Number(s[dim]) : 0, count: s?.count != null ? Number(s.count) : 0 }
+  }
+
+  return c.json({
+    reviews: reviews.map(r => ({
+      id: r.id,
+      user: { id: r.user_id, username: r.username, avatar: r.avatar || null, role: r.role },
+      diaper_id: r.diaper_id,
+      absorption_score: r.absorption_score,
+      fit_score: r.fit_score,
+      comfort_score: r.comfort_score,
+      thickness_score: r.thickness_score,
+      appearance_score: r.appearance_score,
+      value_score: r.value_score,
+      review: r.review || null,
+      review_status: r.review_status,
+      created_at: r.created_at
+    })),
+    stats: {
+      composite: s?.composite != null ? Number(s.composite) : 0,
+      count: s?.count != null ? Number(s.count) : 0,
+      dimensions
+    }
+  })
+})
+
+/**
+ * GET /api/diapers/:id/feelings — 某纸尿裤的所有感受 + 统计
+ */
+diapers.get('/:id/feelings', async (c) => {
+  const id = parseInt(c.req.param('id'))
+
+  const feelings = await query<Record<string, unknown>>(
+    c.env.abdl_space_db,
+    `SELECT f.*, u.username, u.avatar
+     FROM feelings f JOIN users u ON f.user_id = u.id
+     WHERE f.diaper_id = ?
+     ORDER BY f.created_at DESC`,
+    [id]
+  )
+
+  const stats = await query<Record<string, unknown>>(
+    c.env.abdl_space_db,
+    `SELECT
+       ROUND(AVG(looseness), 1) as looseness,
+       ROUND(AVG(softness), 1) as softness,
+       ROUND(AVG(dryness), 1) as dryness,
+       ROUND(AVG(odor_control), 1) as odor_control,
+       ROUND(AVG(quietness), 1) as quietness,
+       COUNT(*) as count
+     FROM feelings WHERE diaper_id = ?`,
+    [id]
+  )
+
+  const s = stats[0]
+
+  return c.json({
+    feelings: feelings.map(f => ({
+      id: f.id,
+      user: { id: f.user_id, username: f.username, avatar: f.avatar ?? null },
+      diaper_id: f.diaper_id,
+      size: f.size,
+      looseness: f.looseness,
+      softness: f.softness,
+      dryness: f.dryness,
+      odor_control: f.odor_control,
+      quietness: f.quietness,
+      created_at: f.created_at
+    })),
+    stats: s ? {
+      looseness: s.looseness != null ? Number(s.looseness) : 0,
+      softness: s.softness != null ? Number(s.softness) : 0,
+      dryness: s.dryness != null ? Number(s.dryness) : 0,
+      odor_control: s.odor_control != null ? Number(s.odor_control) : 0,
+      quietness: s.quietness != null ? Number(s.quietness) : 0
+    } : { looseness: 0, softness: 0, dryness: 0, odor_control: 0, quietness: 0 },
+    count: s?.count != null ? Number(s.count) : 0
+  })
+})
+
+/**
  * GET /api/diapers/:id — 纸尿裤详情，含尺码 + 评分 + Wiki
  */
 diapers.get('/:id', async (c) => {
