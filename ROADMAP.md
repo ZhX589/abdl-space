@@ -2,6 +2,8 @@
 
 > 开始前请告诉我你是**程序员A**还是**程序员B**，我会引导你进入对应的任务线。
 
+> **⚠️ 文档维护纪律：** 本文件是项目进度的**唯一权威来源**。每完成一个任务、每合并一个 PR、每发现一处代码与文档不一致，**必须同步更新本文件和 AGENTS.md 的对应状态**。Git 提交不代表任务完成——文档里的 ✅ 才代表任务完成。严禁"代码合了但文档没改"。
+
 ## 项目定位（重要）
 
 **B 站点（我们）** = 信息站，主要功能是**展示**整理好的信息，供查询和参考。
@@ -39,7 +41,7 @@ gitGraph
   merge feat/schema-v2
   branch feat/diapers-api
   branch feat/frontend-fix
-  commit id: "App.tsx + index.css + api.ts"
+  commit id: "api.ts (仅); App.tsx+index.css 待修"
   checkout feat/diapers-api
   commit id: "diapers CRUD + seeds"
   checkout dev
@@ -69,14 +71,14 @@ gitGraph
 | A2 | `feat/auth` | JWT 注册/登录 + 认证中间件 | A1 | ✅ |
 | A3 | `feat/schema-v2` | 14 表 schema 重构 + API.md + 种子数据 | A2 | ✅ |
 | A4 | `feat/auth-v2` | Auth 更新：支持 email/username 登录 + 用户资料扩展 | A3 | |
-| A5 | `feat/diapers-api` | 纸尿裤列表/详情/品牌/尺码 + 种子数据导入 | A3 | |
+| A5 | `feat/diapers-api` | 纸尿裤列表/详情/品牌/尺码/对比 + 种子数据导入 | A3 | ✅ |
 
 ### 程序员B 任务线（前端）
 
 | # | 分支 | 内容 | 前置依赖 | 状态 |
 |:-:|:---|:---|:---:|:---:|
 | B1 | `feat/frontend-shell` | 路由配置 + 全局布局 + 主题切换 hook | 无 | ✅ |
-| B2 | `feat/frontend-fix` | 修复 App.tsx（路由）+ index.css（品牌色变量+glass 类）+ 创建 api.ts | B1 | |
+| B2 | `feat/frontend-fix` | 修复路由入口（router.tsx + main.tsx）+ index.css（品牌色变量+glass 类+dark mode）+ 创建 api.ts + utils.ts | B1 | ✅ |
 
 ---
 

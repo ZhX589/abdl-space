@@ -54,18 +54,22 @@ diapers.get('/', async (c) => {
     SELECT d.*,
       COALESCE(avg_scores.avg_score, 0) as avg_score,
       COALESCE(avg_scores.rating_count, 0) as rating_count,
-      COALESCE(avg_scores.feeling_count, 0) as feeling_count
+      COALESCE(feel_cnt.feeling_count, 0) as feeling_count
     FROM diapers d
     LEFT JOIN (
       SELECT r.diaper_id,
         ROUND(AVG(
           (r.absorption_score + r.fit_score + r.comfort_score + r.thickness_score + r.appearance_score + r.value_score) / 6.0
         ), 1) as avg_score,
-        COUNT(*) as rating_count,
-        0 as feeling_count
+        COUNT(*) as rating_count
       FROM ratings r
       GROUP BY r.diaper_id
     ) avg_scores ON avg_scores.diaper_id = d.id
+    LEFT JOIN (
+      SELECT diaper_id, COUNT(*) as feeling_count
+      FROM feelings
+      GROUP BY diaper_id
+    ) feel_cnt ON feel_cnt.diaper_id = d.id
     ${whereClause}
     ORDER BY ${sort === 'avg_score' ? 'avg_score' : `d.${sort}`} ${order}
     LIMIT ? OFFSET ?
@@ -126,91 +130,6 @@ diapers.get('/', async (c) => {
       total,
       totalPages: Math.ceil(total / limit)
     }
-  })
-})
-
-/**
- * GET /api/diapers/:id — 纸尿裤详情，含尺码 + 评分 + Wiki
- */
-diapers.get('/:id', async (c) => {
-  const id = parseInt(c.req.param('id'))
-  if (isNaN(id) || id < 1) return c.json({ error: 'Invalid id' }, 400)
-
-  const diaper = await queryOne<Diaper>(
-    c.env.abdl_space_db,
-    'SELECT * FROM diapers WHERE id = ?',
-    [id]
-  )
-  if (!diaper) return c.json({ error: 'Diaper not found' }, 404)
-
-  const sizes = await query<DiaperSize>(
-    c.env.abdl_space_db,
-    'SELECT * FROM diaper_sizes WHERE diaper_id = ?',
-    [id]
-  )
-
-  const reviews = await query<Record<string, unknown>>(
-    c.env.abdl_space_db,
-    `SELECT r.*, u.username, u.role, u.avatar
-     FROM ratings r JOIN users u ON r.user_id = u.id
-     WHERE r.diaper_id = ?
-     ORDER BY r.created_at DESC`,
-    [id]
-  )
-
-  const wiki = await queryOne<Record<string, unknown>>(
-    c.env.abdl_space_db,
-    'SELECT id, title, content, diaper_id, updated_at FROM wiki_pages WHERE diaper_id = ?',
-    [id]
-  )
-
-  return c.json({
-    diaper: {
-      id: diaper.id,
-      brand: diaper.brand,
-      model: diaper.model,
-      product_type: diaper.product_type,
-      thickness: diaper.thickness,
-      absorbency_mfr: diaper.absorbency_mfr,
-      absorbency_adult: diaper.absorbency_adult,
-      is_baby_diaper: diaper.is_baby_diaper,
-      comfort: diaper.comfort,
-      popularity: diaper.popularity,
-      material: diaper.material,
-      features: diaper.features,
-      avg_price: diaper.avg_price,
-      sizes: sizes.map(s => ({
-        label: s.label,
-        waist_min: s.waist_min,
-        waist_max: s.waist_max,
-        hip_min: s.hip_min,
-        hip_max: s.hip_max
-      })),
-      avg_score: null,
-      rating_count: 0,
-      feeling_count: 0
-    },
-    reviews: reviews.map(r => ({
-      id: r.id,
-      user: { id: r.user_id, username: r.username, avatar: r.avatar || null, role: r.role },
-      diaper_id: r.diaper_id,
-      absorption_score: r.absorption_score,
-      fit_score: r.fit_score,
-      comfort_score: r.comfort_score,
-      thickness_score: r.thickness_score,
-      appearance_score: r.appearance_score,
-      value_score: r.value_score,
-      review: r.review || null,
-      review_status: r.review_status,
-      created_at: r.created_at
-    })),
-    wiki: wiki ? {
-      diaper_id: wiki.diaper_id,
-      category: `${diaper.product_type}/${diaper.brand}`,
-      title: wiki.title,
-      content: wiki.content,
-      updated_at: wiki.updated_at
-    } : null
   })
 })
 
@@ -346,6 +265,108 @@ diapers.get('/compare', async (c) => {
   }))
 
   return c.json({ diapers: compareData })
+})
+
+/**
+ * GET /api/diapers/:id — 纸尿裤详情，含尺码 + 评分 + Wiki
+ */
+diapers.get('/:id', async (c) => {
+  const id = parseInt(c.req.param('id'))
+  if (isNaN(id) || id < 1) return c.json({ error: 'Invalid id' }, 400)
+
+  const diaper = await queryOne<Diaper>(
+    c.env.abdl_space_db,
+    'SELECT * FROM diapers WHERE id = ?',
+    [id]
+  )
+  if (!diaper) return c.json({ error: 'Diaper not found' }, 404)
+
+  const sizes = await query<DiaperSize>(
+    c.env.abdl_space_db,
+    'SELECT * FROM diaper_sizes WHERE diaper_id = ?',
+    [id]
+  )
+
+  const reviews = await query<Record<string, unknown>>(
+    c.env.abdl_space_db,
+    `SELECT r.*, u.username, u.role, u.avatar
+     FROM ratings r JOIN users u ON r.user_id = u.id
+     WHERE r.diaper_id = ?
+     ORDER BY r.created_at DESC`,
+    [id]
+  )
+
+  const avgScore = await queryOne<{ avg_score: number; rating_count: number }>(
+    c.env.abdl_space_db,
+    `SELECT
+       ROUND(AVG(
+         (absorption_score + fit_score + comfort_score + thickness_score + appearance_score + value_score) / 6.0
+       ), 1) as avg_score,
+       COUNT(*) as rating_count
+     FROM ratings WHERE diaper_id = ?`,
+    [id]
+  )
+
+  const feelingCount = await queryOne<{ count: number }>(
+    c.env.abdl_space_db,
+    'SELECT COUNT(*) as count FROM feelings WHERE diaper_id = ?',
+    [id]
+  )
+
+  const wiki = await queryOne<Record<string, unknown>>(
+    c.env.abdl_space_db,
+    'SELECT id, title, content, diaper_id, updated_at FROM wiki_pages WHERE diaper_id = ?',
+    [id]
+  )
+
+  return c.json({
+    diaper: {
+      id: diaper.id,
+      brand: diaper.brand,
+      model: diaper.model,
+      product_type: diaper.product_type,
+      thickness: diaper.thickness,
+      absorbency_mfr: diaper.absorbency_mfr,
+      absorbency_adult: diaper.absorbency_adult,
+      is_baby_diaper: diaper.is_baby_diaper,
+      comfort: diaper.comfort,
+      popularity: diaper.popularity,
+      material: diaper.material,
+      features: diaper.features,
+      avg_price: diaper.avg_price,
+      sizes: sizes.map(s => ({
+        label: s.label,
+        waist_min: s.waist_min,
+        waist_max: s.waist_max,
+        hip_min: s.hip_min,
+        hip_max: s.hip_max
+      })),
+      avg_score: avgScore?.avg_score ?? null,
+      rating_count: avgScore?.rating_count ?? 0,
+      feeling_count: feelingCount?.count ?? 0
+    },
+    reviews: reviews.map(r => ({
+      id: r.id,
+      user: { id: r.user_id, username: r.username, avatar: r.avatar || null, role: r.role },
+      diaper_id: r.diaper_id,
+      absorption_score: r.absorption_score,
+      fit_score: r.fit_score,
+      comfort_score: r.comfort_score,
+      thickness_score: r.thickness_score,
+      appearance_score: r.appearance_score,
+      value_score: r.value_score,
+      review: r.review || null,
+      review_status: r.review_status,
+      created_at: r.created_at
+    })),
+    wiki: wiki ? {
+      diaper_id: wiki.diaper_id,
+      category: `${diaper.product_type}/${diaper.brand}`,
+      title: wiki.title,
+      content: wiki.content,
+      updated_at: wiki.updated_at
+    } : null
+  })
 })
 
 export default diapers

@@ -125,7 +125,7 @@ app.get('/api/auth/me', authMiddleware, async (c) => {
   const payload = c.get('user')
   const user = await queryOne<User>(
     c.env.abdl_space_db,
-    'SELECT id, email, username, avatar, role, email_verified, created_at FROM users WHERE id = ?',
+    'SELECT id, email, username, avatar, role, age, region, weight, waist, hip, style_preference, bio, email_verified, created_at FROM users WHERE id = ?',
     [payload.sub]
   )
   if (!user) {
@@ -137,6 +137,13 @@ app.get('/api/auth/me', authMiddleware, async (c) => {
     username: user.username,
     avatar: user.avatar,
     role: user.role,
+    age: user.age,
+    region: user.region,
+    weight: user.weight,
+    waist: user.waist,
+    hip: user.hip,
+    style_preference: user.style_preference,
+    bio: user.bio,
     email_verified: user.email_verified,
     created_at: user.created_at
   })
