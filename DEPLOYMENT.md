@@ -136,10 +136,13 @@ curl https://<your-project>.pages.dev/api/diapers
 | 14 表 Schema | D1 手动 | ✅ |
 | 11 条纸尿裤种子 | D1 手动 | ✅ |
 | JWT_SECRET | Secret | ✅ |
-| 后端路由 (13 模块) | 代码 | ✅ |
-| 前端基础页面 | 代码 | ✅ |
-| A4 `feat/auth-v2` | 代码 | ⬜ |
-| B2 `feat/frontend-fix` | 代码 | ⬜ |
+| A1 `feat/backend-core` — Hono + D1 + 类型 | 代码 | ✅ |
+| A2 `feat/auth` — JWT 注册/登录 + 中间件 | 代码 | ✅ |
+| A3 `feat/schema-v2` — Schema + API.md | 文档 | ✅ |
+| A5 `feat/diapers-api` — 5 个 API 端点 | 代码 | ✅ |
+| B1 `feat/frontend-shell` — 路由 + 布局 + 主题 | 代码 | ✅ |
+| B2 `feat/frontend-fix` — router.tsx + index.css + api.ts + utils.ts | 代码 | ✅ |
+| A4 `feat/auth-v2` — PATCH /api/users/me + 用户资料扩展 | 代码 | ⬜ |
 
 ### v0.2.0 — Wiki + 评分展示 + 评论区
 
@@ -236,7 +239,7 @@ npx wrangler d1 execute abdl-space-db --remote --command "<逆向SQL>"
 | Pages 项目 | `abdl-space` |
 | D1 数据库 | `abdl-space-db` |
 | Production 分支 | `dev` |
-| 当前 commit (main/dev) | `da94234` |
+| 当前 commit (main/dev) | `3fce82f` |
 | 构建命令 | `npm run build` |
 | 输出目录 | `dist` |
 
@@ -258,11 +261,24 @@ npx wrangler d1 execute abdl-space-db --remote --command "<逆向SQL>"
 ### Git 分支状态
 
 ```
-main  @ da94234 juck               ← 当前所在
-dev   @ da94234 (已同步)            ← Cloudflare Pages production 分支
+main  @ 3fce82f                     ← 当前所在
+dev   @ 3fce82f (已同步)             ← Cloudflare Pages production 分支
 opencode/cosmic-garden   ← 过期，待清理
 opencode/eager-sailor    ← 过期，待清理
 ```
+
+### 2026-05-11 — B2 完成 + bug 修复 + 端口统一
+
+| 时间 | 操作 | Commit | 状态 |
+|:---|:---|:---|:---:|
+| - | docs: AGENTS.md 新增「文档与 Git 状态维护纪律」 | `de98b4b` | ✅ |
+| - | fix: 创建 router.tsx + 重写 index.css (品牌色+glass+dark) | `de98b4b` | ✅ |
+| - | fix: diapers.ts 路由顺序修复 + avg_score/feeling_count 实时计算 | `de98b4b` | ✅ |
+| - | fix: GET /api/auth/me 补充 body 字段 | `de98b4b` | ✅ |
+| - | feat: 新增 src/lib/utils.ts | `de98b4b` | ✅ |
+| - | fix: 统一本地端口为 8787 + 新增 npm run api 命令 | `c4ebb59` | ✅ |
+| - | fix: 登录 SQL 补充 role 字段 | `3fce82f` | ✅ |
+| - | ROADMAP.md B2 标记 ✅ + API.md 端口修正 | - | ✅ |
 
 ## 10. 常见问题
 
