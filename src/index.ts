@@ -94,7 +94,7 @@ app.post('/api/auth/login', async (c) => {
 
   const user = await queryOne<User>(
     c.env.abdl_space_db,
-    'SELECT id, email, username, password_hash, avatar FROM users WHERE email = ? OR username = ?',
+    'SELECT id, email, username, password_hash, avatar, role FROM users WHERE email = ? OR username = ?',
     [login, login]
   )
   if (!user) {
