@@ -254,13 +254,24 @@ app.route('/api/diapers', diapers)
 
 | 命令 | 说明 |
 | :--- | :--- |
-| `npm run dev` | 启动前端开发服务器 |
-| `npx wrangler dev` | 启动本地 Worker API |
+| `npm run dev` | 启动前端开发服务器（Vite, port 5173, /api 代理到 8787） |
+| `npm run api` | 启动本地后端（wrangler pages dev, port 8787） |
 | `npm run build` | 构建生产版本 |
+| `npm run preview` | 构建 + wrangler pages dev 预览（port 8787, 前后端一体） |
 | `npm run lint` | ESLint 检查 |
 | `npx wrangler d1 execute abdl-space-db --local --file schemas/schema.sql` | 本地导入数据库表 |
 | `npx wrangler d1 execute abdl-space-db --local --file schemas/seeds/diapers.sql` | 导入纸尿裤种子数据 |
 | `npx wrangler types` | 生成 Worker 类型定义 |
+
+### 本地开发端口约定
+
+| 端口 | 用途 | 启动方式 |
+| :--- | :--- | :--- |
+| **8787** | 后端 API | `npm run api` 或 `npm run preview` |
+| **5173** | 前端 Vite HMR | `npm run dev`（/api 请求代理到 8787） |
+
+> 全栈开发需要同时运行 `npm run api` + `npm run dev` 两个终端。
+> 如果想要单终端同时在 8787 上提供前后端，用 `npm run preview`（无 HMR）。
 
 ## 项目结构
 
