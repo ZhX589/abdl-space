@@ -11,6 +11,7 @@ export function Navbar() {
     { to: '/', label: '首页' },
     { to: '/diapers', label: '纸尿裤' },
     { to: '/wiki', label: 'Wiki' },
+    { to: '/rankings', label: '排行榜' },
   ]
 
   const linkClass = ({ isActive }: { isActive: boolean }) =>
