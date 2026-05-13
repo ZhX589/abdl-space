@@ -10,6 +10,8 @@ import { DiapersListPage } from './pages/DiapersListPage'
 import { DiaperDetailPage } from './pages/DiaperDetailPage'
 import { RankingsPage } from './pages/RankingsPage'
 import { ComparePage } from './pages/ComparePage'
+import { SearchPage } from './pages/SearchPage'
+import { TermsPage } from './pages/TermsPage'
 import { NotFoundPage } from './pages/NotFoundPage'
 
 /** 前端路由入口 */
@@ -28,6 +30,8 @@ export function AppRouter() {
           <Route path="diapers/:id" element={<DiaperDetailPage />} />
           <Route path="rankings" element={<RankingsPage />} />
           <Route path="compare" element={<ComparePage />} />
+          <Route path="search" element={<SearchPage />} />
+          <Route path="terms" element={<TermsPage />} />
           <Route path="*" element={<NotFoundPage />} />
         </Route>
       </Routes>

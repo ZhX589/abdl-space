@@ -13,6 +13,8 @@ export function Navbar() {
     { to: '/wiki', label: 'Wiki' },
     { to: '/rankings', label: '排行榜' },
     { to: '/compare', label: '对比' },
+    { to: '/search', label: '搜索' },
+    { to: '/terms', label: '术语' },
   ]
 
   const linkClass = ({ isActive }: { isActive: boolean }) =>
