@@ -1034,3 +1034,49 @@ export async function deleteAdminDiaper(
     headers: getAuthHeader(token),
   })
 }
+
+// === Search（搜索）===
+
+export interface SearchDiaperResult {
+  id: number
+  brand: string
+  model: string
+  avg_score: number
+  rating_count: number
+}
+
+export interface SearchWikiResult {
+  id: number
+  slug: string
+  title: string
+  content_preview: string
+}
+
+export interface SearchTermResult {
+  id: number
+  term: string
+  abbreviation: string | null
+  category: string | null
+}
+
+export interface SearchResults {
+  diapers: SearchDiaperResult[]
+  wiki: SearchWikiResult[]
+  terms: SearchTermResult[]
+}
+
+export interface SearchResponse {
+  query: string
+  type: string
+  total: number
+  results: SearchResults
+}
+
+export async function getSearch(
+  params: { q: string; type?: string; limit?: number }
+): Promise<SearchResponse> {
+  const sp = new URLSearchParams({ q: params.q })
+  if (params.type) sp.set('type', params.type)
+  if (params.limit) sp.set('limit', String(params.limit))
+  return fetchApi<SearchResponse>(`/api/search?${sp.toString()}`)
+}
