@@ -195,6 +195,7 @@ git push origin feat/你的分支名
 | 2026-05-14 | `fix/admin-and-bugs` | 新增: `POST /admin_reset/password`（admin 改自己密码） | ✅ |
 | 2026-05-14 | `fix/admin-and-bugs` | 新增: `POST /admin/add`（admin 提升用户为管理员） | ✅ |
 | 2026-05-14 | `fix/admin-and-bugs` | 新增: `schemas/seeds/admin.sql` 默认管理员种子数据 | ✅ |
+| 2026-05-14 | `fix/admin-and-bugs` | P1: 17 个 TS build errors 修复（c.req.param() undefined + unused var + ReactNode） | ✅ |
 
 ### 默认管理员账号
 
