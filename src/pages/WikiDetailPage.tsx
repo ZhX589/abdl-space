@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useParams, Link } from 'react-router-dom'
-import { getPage, getInlineComments, createInlineComment, type PageResponse, type InlineComment } from '../lib/api.ts'
+import { getPage, getInlineComments, createInlineComment, getPageVersions, rollbackPage, type PageResponse, type InlineComment, type PageVersion } from '../lib/api.ts'
 import { formatDate, paragraphHash } from '../lib/utils.ts'
 
 /** 渲染 Markdown 为简单段落（非富文本） */
@@ -21,6 +21,10 @@ export function WikiDetailPage() {
   const [activeHash, setActiveHash] = useState<string | null>(null)
   const [newComment, setNewComment] = useState('')
   const [submitting, setSubmitting] = useState(false)
+  const [showVersions, setShowVersions] = useState(false)
+  const [versions, setVersions] = useState<PageVersion[]>([])
+  const [loadingVersions, setLoadingVersions] = useState(false)
+  const [rollbackLoading, setRollbackLoading] = useState<number | null>(null)
 
   useEffect(() => {
     if (!slug) return
@@ -40,6 +44,15 @@ export function WikiDetailPage() {
     })
     return () => { cancelled = true }
   }, [slug])
+
+  useEffect(() => {
+    if (!slug || !showVersions) return
+    setLoadingVersions(true)
+    getPageVersions(slug)
+      .then(data => setVersions(data.versions))
+      .catch(() => {})
+      .finally(() => setLoadingVersions(false))
+  }, [slug, showVersions])
 
   const paragraphs = page ? renderMarkdownAsParagraphs(page.content) : []
 
@@ -67,6 +80,31 @@ export function WikiDetailPage() {
     }
   }
 
+  async function handleRollback(version: number) {
+    if (!slug || !confirm(`确定要回滚到 v${version} 吗？`)) return
+    setRollbackLoading(version)
+    try {
+      const token = localStorage.getItem('token')
+      if (!token) {
+        alert('请先登录')
+        return
+      }
+      await rollbackPage(slug, version, token)
+      const [pageData, versionsData] = await Promise.all([
+        getPage(slug),
+        getPageVersions(slug)
+      ])
+      setPage(pageData)
+      setVersions(versionsData.versions)
+      setShowVersions(false)
+      alert('回滚成功')
+    } catch (e) {
+      alert(e instanceof Error ? e.message : '回滚失败')
+    } finally {
+      setRollbackLoading(null)
+    }
+  }
+
   if (loading) return <div className="glass px-8 py-12 text-center text-[var(--text-secondary)]">加载中...</div>
   if (error) return <div className="glass px-8 py-4 text-center text-[var(--color-accent)]">{error}</div>
   if (!page) return <div className="glass px-8 py-12 text-center text-[var(--text-secondary)]">页面未找到</div>
@@ -77,13 +115,54 @@ export function WikiDetailPage() {
         <Link to="/wiki" className="text-sm text-[var(--text-secondary)] transition-colors hover:text-[var(--color-primary)]">
           ← 返回列表
         </Link>
-        <Link
-          to={`/wiki/${slug}/edit`}
-          className="rounded-[var(--radius-sm)] bg-[var(--color-primary)] px-4 py-2 text-sm font-medium text-[var(--text-on-primary)] transition-all duration-200 hover:opacity-90"
-        >
-          编辑
-        </Link>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowVersions(!showVersions)}
+            className="rounded-[var(--radius-sm)] border border-[var(--color-primary)] px-4 py-2 text-sm font-medium text-[var(--color-primary)] transition-all duration-200 hover:bg-[var(--color-primary)] hover:bg-opacity-10"
+          >
+            {showVersions ? '收起历史' : '版本历史'}
+          </button>
+          <Link
+            to={`/wiki/${slug}/edit`}
+            className="rounded-[var(--radius-sm)] bg-[var(--color-primary)] px-4 py-2 text-sm font-medium text-[var(--text-on-primary)] transition-all duration-200 hover:opacity-90"
+          >
+            编辑
+          </Link>
+        </div>
       </div>
+
+      {showVersions && (
+        <div className="glass mb-6 p-4">
+          <h3 className="mb-3 text-sm font-semibold text-[var(--text-primary)]">版本历史</h3>
+          {loadingVersions ? (
+            <p className="text-sm text-[var(--text-secondary)]">加载中...</p>
+          ) : versions.length === 0 ? (
+            <p className="text-sm text-[var(--text-secondary)]">暂无版本记录</p>
+          ) : (
+            <div className="space-y-2">
+              {versions.map(v => (
+                <div key={v.id} className="flex items-center justify-between rounded-[var(--radius-sm)] bg-[var(--color-primary-lighter)] p-3">
+                  <div>
+                    <span className="text-sm font-medium text-[var(--text-primary)]">v{v.version}</span>
+                    <span className="ml-2 text-xs text-[var(--text-secondary)]">
+                      {v.author ? v.author.username : '未知'} · {formatDate(v.created_at)}
+                    </span>
+                  </div>
+                  {v.version < page.version && (
+                    <button
+                      onClick={() => handleRollback(v.version)}
+                      disabled={rollbackLoading === v.version}
+                      className="rounded-[4px] bg-[var(--color-accent)] px-3 py-1 text-xs font-medium text-white transition-opacity hover:opacity-80 disabled:opacity-40"
+                    >
+                      {rollbackLoading === v.version ? '回滚中...' : '回滚此版本'}
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="glass mb-6 p-6">
         <h1 className="mb-2 text-2xl font-bold text-[var(--text-primary)]">{page.title}</h1>
