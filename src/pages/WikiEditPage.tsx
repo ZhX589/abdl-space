@@ -1,6 +1,10 @@
 import { useState, useEffect } from 'react'
 import { useParams, Link, useNavigate } from 'react-router-dom'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { getPage, createPage, updatePage } from '../lib/api.ts'
+
+type Mode = 'edit' | 'preview'
 
 /** Wiki 编辑页 */
 export function WikiEditPage() {
@@ -13,6 +17,7 @@ export function WikiEditPage() {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
+  const [mode, setMode] = useState<Mode>('edit')
 
   const isNew = slug === 'new'
 
@@ -31,6 +36,20 @@ export function WikiEditPage() {
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
   }, [slug])
+
+  function insertMarkdown(before: string, after: string = '') {
+    const textarea = document.querySelector<HTMLTextAreaElement>('.wiki-editor')
+    if (!textarea) return
+    const start = textarea.selectionStart
+    const end = textarea.selectionEnd
+    const selected = content.substring(start, end)
+    const newContent = content.substring(0, start) + before + selected + after + content.substring(end)
+    setContent(newContent)
+    setTimeout(() => {
+      textarea.focus()
+      textarea.setSelectionRange(start + before.length, start + before.length + selected.length)
+    }, 0)
+  }
 
   async function handleSave() {
     if (!title.trim() || !content.trim() || !pageSlug.trim()) {
@@ -102,14 +121,69 @@ export function WikiEditPage() {
         </div>
 
         <div className="mb-4">
-          <label className="mb-1 block text-sm font-medium text-[var(--text-primary)]">内容 (Markdown)</label>
-          <textarea
-            value={content}
-            onChange={e => setContent(e.target.value)}
-            rows={20}
-            placeholder="编写 Wiki 内容..."
-            className="w-full rounded-[var(--radius-sm)] border border-[rgba(0,0,0,0.1)] bg-[var(--bg-page)] px-3 py-2 text-sm text-[var(--text-primary)] outline-none focus:border-[var(--color-primary)]"
-          />
+          <div className="mb-2 flex items-center justify-between">
+            <label className="block text-sm font-medium text-[var(--text-primary)]">内容 (Markdown)</label>
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={() => setMode('edit')}
+                className={`rounded-[4px] px-3 py-1 text-xs transition-colors ${mode === 'edit' ? 'bg-[var(--color-primary)] text-white' : 'text-[var(--text-secondary)] hover:bg-[var(--color-primary-lighter)]'}`}
+              >
+                编辑
+              </button>
+              <button
+                type="button"
+                onClick={() => setMode('preview')}
+                className={`rounded-[4px] px-3 py-1 text-xs transition-colors ${mode === 'preview' ? 'bg-[var(--color-primary)] text-white' : 'text-[var(--text-secondary)] hover:bg-[var(--color-primary-lighter)]'}`}
+              >
+                预览
+              </button>
+            </div>
+          </div>
+
+          {mode === 'edit' ? (
+            <>
+              <div className="mb-2 flex flex-wrap gap-1">
+                {[
+                  { label: 'B', before: '**', after: '**', title: '粗体' },
+                  { label: 'I', before: '_', after: '_', title: '斜体' },
+                  { label: 'H2', before: '## ', after: '', title: '二级标题' },
+                  { label: 'H3', before: '### ', after: '', title: '三级标题' },
+                  { label: 'ul', before: '- ', after: '', title: '无序列表' },
+                  { label: 'ol', before: '1. ', after: '', title: '有序列表' },
+                  { label: 'code', before: '`', after: '`', title: '行内代码' },
+                  { label: '```', before: '```\n', after: '\n```', title: '代码块' },
+                  { label: '>', before: '> ', after: '', title: '引用' },
+                  { label: '---', before: '\n---\n', after: '', title: '分割线' },
+                ].map(btn => (
+                  <button
+                    key={btn.label}
+                    type="button"
+                    title={btn.title}
+                    onClick={() => insertMarkdown(btn.before, btn.after)}
+                    className="rounded-[4px] border border-[rgba(0,0,0,0.15)] bg-[var(--bg-page)] px-2 py-1 text-xs font-mono text-[var(--text-primary)] transition-colors hover:bg-[var(--color-primary-lighter)]"
+                  >
+                    {btn.label}
+                  </button>
+                ))}
+              </div>
+              <textarea
+                value={content}
+                onChange={e => setContent(e.target.value)}
+                rows={20}
+                placeholder="编写 Wiki 内容..."
+                className="wiki-editor w-full rounded-[var(--radius-sm)] border border-[rgba(0,0,0,0.1)] bg-[var(--bg-page)] px-3 py-2 text-sm font-mono text-[var(--text-primary)] outline-none focus:border-[var(--color-primary)]"
+              />
+            </>
+          ) : (
+            <div className="prose prose-sm max-w-none rounded-[var(--radius-sm)] border border-[rgba(0,0,0,0.1)] bg-[var(--bg-page)] p-4 min-h-[400px]">
+              {content ? (
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+              ) : (
+                <p className="text-sm text-[var(--text-secondary)]">无内容预览</p>
+              )}
+            </div>
+          )}
         </div>
 
         <div className="flex gap-3">
