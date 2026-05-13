@@ -9,6 +9,7 @@ import { WikiEditPage } from './pages/WikiEditPage'
 import { DiapersListPage } from './pages/DiapersListPage'
 import { DiaperDetailPage } from './pages/DiaperDetailPage'
 import { RankingsPage } from './pages/RankingsPage'
+import { ComparePage } from './pages/ComparePage'
 import { NotFoundPage } from './pages/NotFoundPage'
 
 /** 前端路由入口 */
@@ -26,6 +27,7 @@ export function AppRouter() {
           <Route path="diapers" element={<DiapersListPage />} />
           <Route path="diapers/:id" element={<DiaperDetailPage />} />
           <Route path="rankings" element={<RankingsPage />} />
+          <Route path="compare" element={<ComparePage />} />
           <Route path="*" element={<NotFoundPage />} />
         </Route>
       </Routes>
