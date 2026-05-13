@@ -180,3 +180,29 @@ git push origin feat/你的分支名
 | **评论类** | `post_comments`(条目底部讨论) vs `wiki_inline_comments`(段评)，不要混淆 |
 | **毛玻璃** | 卡片/导航用 `backdrop-filter: blur(12px)` |
 | **暗亮色** | 通过 `data-theme` 属性 + CSS 变量切换 |
+---
+
+## Bug 修复 & 新增端点
+
+### v0.1.x 补丁
+
+| 日期 | 分支 | 修改 | 状态 |
+|:---:|:---|:---|:---:|
+| 2026-05-14 | `fix/admin-and-bugs` | P1: `sort=rating_count` 500 错误（JOIN 别名排序修复） | ✅ |
+| 2026-05-14 | `fix/admin-and-bugs` | P3: `avg_score` 计算公式修正（rating×0.9 + feeling×0.1，符合 API.md §6） | ✅ |
+| 2026-05-14 | `fix/admin-and-bugs` | P2: `PATCH /api/users/me` 输入校验（age/weight/waist/hip/bio 等字段范围校验） | ✅ |
+| 2026-05-14 | `fix/admin-and-bugs` | P2: `GET /api/users/:id/posts` like_count/comment_count 从 DB 真实查询 | ✅ |
+| 2026-05-14 | `fix/admin-and-bugs` | 新增: `POST /admin_reset/password`（admin 改自己密码） | ✅ |
+| 2026-05-14 | `fix/admin-and-bugs` | 新增: `POST /admin/add`（admin 提升用户为管理员） | ✅ |
+| 2026-05-14 | `fix/admin-and-bugs` | 新增: `schemas/seeds/admin.sql` 默认管理员种子数据 | ✅ |
+
+### 默认管理员账号
+
+```
+username: admin
+email: admin@abdl.space
+password: admin@ZhX&ZYongX
+role: admin
+
+导入命令: npx wrangler d1 execute abdl-space-db --local --file schemas/seeds/admin.sql
+```

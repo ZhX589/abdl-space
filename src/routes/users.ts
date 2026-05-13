@@ -69,12 +69,61 @@ users.patch('/me', authMiddleware, async (c) => {
   const updates: string[] = []
   const params: unknown[] = []
 
-  const fields: (keyof UpdateUserRequest)[] = ['avatar', 'age', 'region', 'weight', 'waist', 'hip', 'style_preference', 'bio']
-  for (const field of fields) {
-    if (body[field] !== undefined) {
-      updates.push(`${field} = ?`)
-      params.push(body[field])
+  if (body.avatar !== undefined) {
+    if (typeof body.avatar === 'string' && body.avatar.length > 2048) {
+      return c.json({ error: 'Avatar URL must be 2048 characters or less' }, 400)
     }
+    updates.push('avatar = ?')
+    params.push(body.avatar)
+  }
+  if (body.age !== undefined) {
+    if (body.age !== null && (typeof body.age !== 'number' || body.age < 1 || body.age > 150)) {
+      return c.json({ error: 'Age must be 1-150 or null' }, 400)
+    }
+    updates.push('age = ?')
+    params.push(body.age)
+  }
+  if (body.region !== undefined) {
+    if (typeof body.region === 'string' && body.region.length > 50) {
+      return c.json({ error: 'Region must be 50 characters or less' }, 400)
+    }
+    updates.push('region = ?')
+    params.push(body.region)
+  }
+  if (body.weight !== undefined) {
+    if (body.weight !== null && (typeof body.weight !== 'number' || body.weight <= 0 || body.weight > 500)) {
+      return c.json({ error: 'Weight must be >0 and <=500, or null' }, 400)
+    }
+    updates.push('weight = ?')
+    params.push(body.weight)
+  }
+  if (body.waist !== undefined) {
+    if (body.waist !== null && (typeof body.waist !== 'number' || body.waist <= 0 || body.waist > 300)) {
+      return c.json({ error: 'Waist must be >0 and <=300, or null' }, 400)
+    }
+    updates.push('waist = ?')
+    params.push(body.waist)
+  }
+  if (body.hip !== undefined) {
+    if (body.hip !== null && (typeof body.hip !== 'number' || body.hip <= 0 || body.hip > 300)) {
+      return c.json({ error: 'Hip must be >0 and <=300, or null' }, 400)
+    }
+    updates.push('hip = ?')
+    params.push(body.hip)
+  }
+  if (body.style_preference !== undefined) {
+    if (typeof body.style_preference === 'string' && body.style_preference.length > 100) {
+      return c.json({ error: 'Style preference must be 100 characters or less' }, 400)
+    }
+    updates.push('style_preference = ?')
+    params.push(body.style_preference)
+  }
+  if (body.bio !== undefined) {
+    if (typeof body.bio === 'string' && body.bio.length > 500) {
+      return c.json({ error: 'Bio must be 500 characters or less' }, 400)
+    }
+    updates.push('bio = ?')
+    params.push(body.bio)
   }
 
   if (updates.length === 0) {
@@ -146,17 +195,29 @@ users.get('/:id/posts', async (c) => {
     [id, limit]
   )
 
-  const postsList = await Promise.all(posts.map(async (r) => ({
-    id: r.id,
-    user: { id: r.user_id, username: r.username, avatar: r.avatar ?? null, role: r.role },
-    content: r.content,
-    diaper_id: r.diaper_id ?? null,
-    pinned: !!r.pinned,
-    like_count: 0,
-    has_liked: false,
-    comment_count: 0,
-    created_at: r.created_at
-  })))
+  const postsList = await Promise.all(posts.map(async (r) => {
+    const likeCount = await queryOne<{ count: number }>(
+      c.env.abdl_space_db,
+      "SELECT COUNT(*) as count FROM likes WHERE target_type = 'post' AND target_id = ?",
+      [r.id]
+    )
+    const commentCount = await queryOne<{ count: number }>(
+      c.env.abdl_space_db,
+      'SELECT COUNT(*) as count FROM post_comments WHERE post_id = ?',
+      [r.id]
+    )
+    return {
+      id: r.id,
+      user: { id: r.user_id, username: r.username, avatar: r.avatar ?? null, role: r.role },
+      content: r.content,
+      diaper_id: r.diaper_id ?? null,
+      pinned: !!r.pinned,
+      like_count: likeCount?.count ?? 0,
+      has_liked: false,
+      comment_count: commentCount?.count ?? 0,
+      created_at: r.created_at
+    }
+  }))
 
   return c.json({ posts: postsList, pagination: { page: 1, limit, total: postsList.length, totalPages: 1 } })
 })

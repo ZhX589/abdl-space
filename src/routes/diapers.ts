@@ -7,6 +7,21 @@ type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 const diapers = new Hono<AppType>()
 
 const VALID_SORT = ['id', 'avg_score', 'rating_count', 'thickness']
+const JOIN_ALIAS_SORT = new Set(['avg_score', 'rating_count'])
+
+/**
+ * Compute composite avg_score per API.md §6 formula:
+ * IF feeling_count > 0:
+ *   avg_score = round(rating_avg * 0.9 + feeling_avg * 0.1, 1)
+ * ELSE:
+ *   avg_score = round(rating_avg, 1)
+ */
+function computeAvgScore(ratingAvg: number, ratingCount: number, feelingAvg: number | null, feelingCount: number): number {
+  if (feelingCount > 0 && feelingAvg !== null) {
+    return Math.round((ratingAvg * 0.9 + (feelingAvg + 5) * 0.1) * 10) / 10
+  }
+  return Math.round(ratingAvg * 10) / 10
+}
 
 /**
  * GET /api/diapers — 纸尿裤列表，支持搜索/筛选/排序/分页
@@ -52,26 +67,27 @@ diapers.get('/', async (c) => {
 
   const dbQuery = `
     SELECT d.*,
-      COALESCE(avg_scores.avg_score, 0) as avg_score,
+      COALESCE(avg_scores.rating_avg, 0) as rating_avg,
       COALESCE(avg_scores.rating_count, 0) as rating_count,
-      COALESCE(feel_cnt.feeling_count, 0) as feeling_count
+      COALESCE(feel_cnt.feeling_count, 0) as feeling_count,
+      COALESCE(feel_cnt.feeling_avg, 0) as feeling_avg
     FROM diapers d
     LEFT JOIN (
       SELECT r.diaper_id,
-        ROUND(AVG(
-          (r.absorption_score + r.fit_score + r.comfort_score + r.thickness_score + r.appearance_score + r.value_score) / 6.0
-        ), 1) as avg_score,
+        AVG((r.absorption_score + r.fit_score + r.comfort_score + r.thickness_score + r.appearance_score + r.value_score) / 6.0) as rating_avg,
         COUNT(*) as rating_count
       FROM ratings r
       GROUP BY r.diaper_id
     ) avg_scores ON avg_scores.diaper_id = d.id
     LEFT JOIN (
-      SELECT diaper_id, COUNT(*) as feeling_count
+      SELECT diaper_id,
+        AVG((looseness + 5 + softness + 5 + dryness + 5 + odor_control + 5 + quietness + 5) / 5.0) as feeling_avg,
+        COUNT(*) as feeling_count
       FROM feelings
       GROUP BY diaper_id
     ) feel_cnt ON feel_cnt.diaper_id = d.id
     ${whereClause}
-    ORDER BY ${sort === 'avg_score' ? 'avg_score' : `d.${sort}`} ${order}
+    ORDER BY ${JOIN_ALIAS_SORT.has(sort) ? sort : `d.${sort}`} ${order}
     LIMIT ? OFFSET ?
   `
 
@@ -81,7 +97,7 @@ diapers.get('/', async (c) => {
     [...params, limit, offset]
   )
 
-  const diaperIds = diaperRows.map(r => r.id)
+  const diaperIds = diaperRows.map(r => r.id as number)
   const sizesMap = new Map<number, DiaperSize[]>()
   if (diaperIds.length > 0) {
     const placeholders = diaperIds.map(() => '?').join(',')
@@ -96,31 +112,39 @@ diapers.get('/', async (c) => {
     }
   }
 
-  const diapersList = diaperRows.map(r => ({
-    id: r.id,
-    brand: r.brand,
-    model: r.model,
-    product_type: r.product_type,
-    thickness: r.thickness,
-    absorbency_mfr: r.absorbency_mfr,
-    absorbency_adult: r.absorbency_adult,
-    is_baby_diaper: r.is_baby_diaper,
-    comfort: r.comfort,
-    popularity: r.popularity,
-    material: r.material,
-    features: r.features,
-    avg_price: r.avg_price,
-    sizes: (sizesMap.get(r.id as number) || []).map(s => ({
-      label: s.label,
-      waist_min: s.waist_min,
-      waist_max: s.waist_max,
-      hip_min: s.hip_min,
-      hip_max: s.hip_max
-    })),
-    avg_score: r.avg_score,
-    rating_count: r.rating_count,
-    feeling_count: r.feeling_count
-  }))
+  const diapersList = diaperRows.map(r => {
+    const ratingAvg = Number(r.rating_avg) || 0
+    const ratingCount = Number(r.rating_count) || 0
+    const feelingAvg = Number(r.feeling_avg) || null
+    const feelingCount = Number(r.feeling_count) || 0
+    const avgScore = computeAvgScore(ratingAvg, ratingCount, feelingAvg, feelingCount)
+
+    return {
+      id: r.id,
+      brand: r.brand,
+      model: r.model,
+      product_type: r.product_type,
+      thickness: r.thickness,
+      absorbency_mfr: r.absorbency_mfr,
+      absorbency_adult: r.absorbency_adult,
+      is_baby_diaper: r.is_baby_diaper,
+      comfort: r.comfort,
+      popularity: r.popularity,
+      material: r.material,
+      features: r.features,
+      avg_price: r.avg_price,
+      sizes: (sizesMap.get(r.id as number) || []).map(s => ({
+        label: s.label,
+        waist_min: s.waist_min,
+        waist_max: s.waist_max,
+        hip_min: s.hip_min,
+        hip_max: s.hip_max
+      })),
+      avg_score: avgScore,
+      rating_count: ratingCount,
+      feeling_count: feelingCount
+    }
+  })
 
   return c.json({
     diapers: diapersList,
@@ -173,18 +197,25 @@ diapers.get('/compare', async (c) => {
   const placeholders = ids.map(() => '?').join(',')
   const diapersQuery = `
     SELECT d.*,
-      COALESCE(avg_scores.avg_score, 0) as avg_score,
-      COALESCE(avg_scores.rating_count, 0) as rating_count
+      COALESCE(avg_scores.rating_avg, 0) as rating_avg,
+      COALESCE(avg_scores.rating_count, 0) as rating_count,
+      COALESCE(feel_cnt.feeling_count, 0) as feeling_count,
+      COALESCE(feel_cnt.feeling_avg, 0) as feeling_avg
     FROM diapers d
     LEFT JOIN (
       SELECT r.diaper_id,
-        ROUND(AVG(
-          (r.absorption_score + r.fit_score + r.comfort_score + r.thickness_score + r.appearance_score + r.value_score) / 6.0
-        ), 1) as avg_score,
+        AVG((r.absorption_score + r.fit_score + r.comfort_score + r.thickness_score + r.appearance_score + r.value_score) / 6.0) as rating_avg,
         COUNT(*) as rating_count
       FROM ratings r
       GROUP BY r.diaper_id
     ) avg_scores ON avg_scores.diaper_id = d.id
+    LEFT JOIN (
+      SELECT diaper_id,
+        AVG((looseness + 5 + softness + 5 + dryness + 5 + odor_control + 5 + quietness + 5) / 5.0) as feeling_avg,
+        COUNT(*) as feeling_count
+      FROM feelings
+      GROUP BY diaper_id
+    ) feel_cnt ON feel_cnt.diaper_id = d.id
     WHERE d.id IN (${placeholders})
   `
 
@@ -221,9 +252,9 @@ diapers.get('/compare', async (c) => {
         AVG(thickness_score) as thickness_score,
         AVG(appearance_score) as appearance_score,
         AVG(value_score) as value_score
-      FROM ratings
-      WHERE diaper_id IN (${dimPlaceholders})
-      GROUP BY diaper_id`,
+       FROM ratings
+       WHERE diaper_id IN (${dimPlaceholders})
+       GROUP BY diaper_id`,
       diaperIds
     )
     for (const d of dimensions) {
@@ -238,31 +269,39 @@ diapers.get('/compare', async (c) => {
     }
   }
 
-  const compareData = diaperRows.map(r => ({
-    id: r.id,
-    brand: r.brand,
-    model: r.model,
-    thickness: r.thickness,
-    absorbency_adult: r.absorbency_adult,
-    avg_price: r.avg_price,
-    sizes: (sizesMap.get(r.id as number) || []).map(s => ({
-      label: s.label,
-      waist_min: s.waist_min,
-      waist_max: s.waist_max,
-      hip_min: s.hip_min,
-      hip_max: s.hip_max
-    })),
-    dimensions: dimensionsMap.get(r.id as number) || {
-      absorption_score: { avg: 0 },
-      fit_score: { avg: 0 },
-      comfort_score: { avg: 0 },
-      thickness_score: { avg: 0 },
-      appearance_score: { avg: 0 },
-      value_score: { avg: 0 }
-    },
-    avg_score: r.avg_score,
-    rating_count: r.rating_count
-  }))
+  const compareData = diaperRows.map(r => {
+    const ratingAvg = Number(r.rating_avg) || 0
+    const ratingCount = Number(r.rating_count) || 0
+    const feelingAvg = Number(r.feeling_avg) || null
+    const feelingCount = Number(r.feeling_count) || 0
+    const avgScore = computeAvgScore(ratingAvg, ratingCount, feelingAvg, feelingCount)
+
+    return {
+      id: r.id,
+      brand: r.brand,
+      model: r.model,
+      thickness: r.thickness,
+      absorbency_adult: r.absorbency_adult,
+      avg_price: r.avg_price,
+      sizes: (sizesMap.get(r.id as number) || []).map(s => ({
+        label: s.label,
+        waist_min: s.waist_min,
+        waist_max: s.waist_max,
+        hip_min: s.hip_min,
+        hip_max: s.hip_max
+      })),
+      dimensions: dimensionsMap.get(r.id as number) || {
+        absorption_score: { avg: 0 },
+        fit_score: { avg: 0 },
+        comfort_score: { avg: 0 },
+        thickness_score: { avg: 0 },
+        appearance_score: { avg: 0 },
+        value_score: { avg: 0 }
+      },
+      avg_score: avgScore,
+      rating_count: ratingCount
+    }
+  })
 
   return c.json({ diapers: compareData })
 })
@@ -272,6 +311,7 @@ diapers.get('/compare', async (c) => {
  */
 diapers.get('/:id/ratings', async (c) => {
   const id = parseInt(c.req.param('id'))
+  if (isNaN(id) || id < 1) return c.json({ error: 'Invalid id' }, 400)
 
   const reviews = await query<Record<string, unknown>>(
     c.env.abdl_space_db,
@@ -332,6 +372,7 @@ diapers.get('/:id/ratings', async (c) => {
  */
 diapers.get('/:id/feelings', async (c) => {
   const id = parseInt(c.req.param('id'))
+  if (isNaN(id) || id < 1) return c.json({ error: 'Invalid id' }, 400)
 
   const feelings = await query<Record<string, unknown>>(
     c.env.abdl_space_db,
@@ -410,20 +451,21 @@ diapers.get('/:id', async (c) => {
     [id]
   )
 
-  const avgScore = await queryOne<{ avg_score: number; rating_count: number }>(
+  const ratingStats = await queryOne<Record<string, unknown>>(
     c.env.abdl_space_db,
     `SELECT
-       ROUND(AVG(
-         (absorption_score + fit_score + comfort_score + thickness_score + appearance_score + value_score) / 6.0
-       ), 1) as avg_score,
+       AVG((absorption_score + fit_score + comfort_score + thickness_score + appearance_score + value_score) / 6.0) as rating_avg,
        COUNT(*) as rating_count
      FROM ratings WHERE diaper_id = ?`,
     [id]
   )
 
-  const feelingCount = await queryOne<{ count: number }>(
+  const feelingStats = await queryOne<Record<string, unknown>>(
     c.env.abdl_space_db,
-    'SELECT COUNT(*) as count FROM feelings WHERE diaper_id = ?',
+    `SELECT
+       AVG((looseness + 5 + softness + 5 + dryness + 5 + odor_control + 5 + quietness + 5) / 5.0) as feeling_avg,
+       COUNT(*) as feeling_count
+     FROM feelings WHERE diaper_id = ?`,
     [id]
   )
 
@@ -432,6 +474,12 @@ diapers.get('/:id', async (c) => {
     'SELECT id, title, content, diaper_id, updated_at FROM wiki_pages WHERE diaper_id = ?',
     [id]
   )
+
+  const ratingAvg = Number(ratingStats?.rating_avg) || 0
+  const ratingCount = Number(ratingStats?.rating_count) || 0
+  const feelingAvg = Number(feelingStats?.feeling_avg) || null
+  const feelingCount = Number(feelingStats?.feeling_count) || 0
+  const avgScore = computeAvgScore(ratingAvg, ratingCount, feelingAvg, feelingCount)
 
   return c.json({
     diaper: {
@@ -455,9 +503,9 @@ diapers.get('/:id', async (c) => {
         hip_min: s.hip_min,
         hip_max: s.hip_max
       })),
-      avg_score: avgScore?.avg_score ?? null,
-      rating_count: avgScore?.rating_count ?? 0,
-      feeling_count: feelingCount?.count ?? 0
+      avg_score: avgScore,
+      rating_count: ratingCount,
+      feeling_count: feelingCount
     },
     reviews: reviews.map(r => ({
       id: r.id,
