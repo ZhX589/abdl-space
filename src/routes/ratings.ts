@@ -58,7 +58,7 @@ ratings.post('/', authMiddleware, async (c) => {
  */
 ratings.get('/me/:diaperId', authMiddleware, async (c) => {
   const user = c.get('user')
-  const diaperId = parseInt(c.req.param('diaperId'))
+  const diaperId = parseInt(c.req.param('diaperId') || '')
 
   const row = await queryOne<Record<string, unknown>>(
     c.env.abdl_space_db,
@@ -93,7 +93,7 @@ ratings.get('/me/:diaperId', authMiddleware, async (c) => {
  */
 ratings.delete('/:id', authMiddleware, async (c) => {
   const user = c.get('user')
-  const id = parseInt(c.req.param('id'))
+  const id = parseInt(c.req.param('id') || '')
 
   const rating = await queryOne<{ id: number; user_id: number }>(
     c.env.abdl_space_db, 'SELECT id, user_id FROM ratings WHERE id = ?', [id]

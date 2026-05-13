@@ -158,7 +158,7 @@ export function DiaperDetailPage() {
                         } as Record<string, string>).map(([key, label]) => (
                           <div key={key} className="flex justify-between">
                             <span className="text-[var(--text-secondary)]">{label}</span>
-                            <span className="text-[var(--text-primary)]">{review[key as keyof typeof review]}/10</span>
+                            <span className="text-[var(--text-primary)]">{String(review[key as keyof typeof review])}/10</span>
                           </div>
                         ))}
                       </div>

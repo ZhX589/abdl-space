@@ -85,7 +85,7 @@ terms.post('/', adminMiddleware, async (c) => {
  * PATCH /api/terms/:id — 编辑术语（需管理员）
  */
 terms.patch('/:id', adminMiddleware, async (c) => {
-  const id = parseInt(c.req.param('id'))
+  const id = parseInt(c.req.param('id') || '')
   const body = await c.req.json<Partial<CreateTermRequest>>()
 
   const existing = await queryOne<{ id: number }>(
@@ -119,7 +119,7 @@ terms.patch('/:id', adminMiddleware, async (c) => {
  * DELETE /api/terms/:id — 删除术语（需管理员）
  */
 terms.delete('/:id', adminMiddleware, async (c) => {
-  const id = parseInt(c.req.param('id'))
+  const id = parseInt(c.req.param('id') || '')
 
   const existing = await queryOne<{ id: number }>(
     c.env.abdl_space_db, 'SELECT id FROM terms WHERE id = ?', [id]

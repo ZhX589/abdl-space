@@ -16,7 +16,7 @@ const JOIN_ALIAS_SORT = new Set(['avg_score', 'rating_count'])
  * ELSE:
  *   avg_score = round(rating_avg, 1)
  */
-function computeAvgScore(ratingAvg: number, ratingCount: number, feelingAvg: number | null, feelingCount: number): number {
+function computeAvgScore(ratingAvg: number, _ratingCount: number, feelingAvg: number | null, feelingCount: number): number {
   if (feelingCount > 0 && feelingAvg !== null) {
     return Math.round((ratingAvg * 0.9 + (feelingAvg + 5) * 0.1) * 10) / 10
   }

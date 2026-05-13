@@ -203,7 +203,7 @@ posts.post('/', authMiddleware, async (c) => {
  */
 posts.delete('/:id', authMiddleware, async (c) => {
   const user = c.get('user')
-  const id = parseInt(c.req.param('id'))
+  const id = parseInt(c.req.param('id') || '')
 
   const post = await queryOne<{ id: number; user_id: number }>(
     c.env.abdl_space_db, 'SELECT id, user_id FROM posts WHERE id = ?', [id]
@@ -222,7 +222,7 @@ posts.delete('/:id', authMiddleware, async (c) => {
  */
 posts.post('/:id/comments', authMiddleware, async (c) => {
   const user = c.get('user')
-  const postId = parseInt(c.req.param('id'))
+  const postId = parseInt(c.req.param('id') || '')
 
   const post = await queryOne<{ id: number }>(
     c.env.abdl_space_db, 'SELECT id FROM posts WHERE id = ?', [postId]

@@ -54,7 +54,7 @@ feelings.post('/', authMiddleware, async (c) => {
  */
 feelings.get('/me/:diaperId/:size', authMiddleware, async (c) => {
   const user = c.get('user')
-  const diaperId = parseInt(c.req.param('diaperId'))
+  const diaperId = parseInt(c.req.param('diaperId') || '')
   const size = c.req.param('size')
 
   const row = await queryOne<Record<string, unknown>>(
@@ -88,7 +88,7 @@ feelings.get('/me/:diaperId/:size', authMiddleware, async (c) => {
  */
 feelings.delete('/:id', authMiddleware, async (c) => {
   const user = c.get('user')
-  const id = parseInt(c.req.param('id'))
+  const id = parseInt(c.req.param('id') || '')
 
   const feeling = await queryOne<{ id: number; user_id: number }>(
     c.env.abdl_space_db, 'SELECT id, user_id FROM feelings WHERE id = ?', [id]

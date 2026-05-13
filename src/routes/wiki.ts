@@ -303,7 +303,7 @@ wiki.post('/:slug/inline-comments', authMiddleware, async (c) => {
 wiki.delete('/:slug/inline-comments/:id', authMiddleware, async (c) => {
   const user = c.get('user')
   const slug = c.req.param('slug')
-  const commentId = parseInt(c.req.param('id'))
+  const commentId = parseInt(c.req.param('id') || '')
 
   const page = await queryOne<{ id: number }>(
     c.env.abdl_space_db,

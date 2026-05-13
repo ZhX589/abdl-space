@@ -54,7 +54,7 @@ admin.get('/users', adminMiddleware, async (c) => {
  * DELETE /api/admin/users/:id — 删除用户
  */
 admin.delete('/users/:id', adminMiddleware, async (c) => {
-  const id = parseInt(c.req.param('id'))
+  const id = parseInt(c.req.param('id') || '')
 
   const user = await queryOne<{ id: number }>(c.env.abdl_space_db, 'SELECT id FROM users WHERE id = ?', [id])
   if (!user) return c.json({ error: 'User not found' }, 404)
@@ -74,7 +74,7 @@ admin.post('/users/:id/ban', adminMiddleware, async (c) => {
  * POST /api/admin/posts/:id/pin — 置顶/取消置顶
  */
 admin.post('/posts/:id/pin', adminMiddleware, async (c) => {
-  const id = parseInt(c.req.param('id'))
+  const id = parseInt(c.req.param('id') || '')
 
   const post = await queryOne<{ id: number; pinned: number }>(
     c.env.abdl_space_db, 'SELECT id, pinned FROM posts WHERE id = ?', [id]
@@ -91,7 +91,7 @@ admin.post('/posts/:id/pin', adminMiddleware, async (c) => {
  * DELETE /api/admin/posts/:id — 删除帖子
  */
 admin.delete('/posts/:id', adminMiddleware, async (c) => {
-  const id = parseInt(c.req.param('id'))
+  const id = parseInt(c.req.param('id') || '')
 
   const post = await queryOne<{ id: number }>(c.env.abdl_space_db, 'SELECT id FROM posts WHERE id = ?', [id])
   if (!post) return c.json({ error: 'Post not found' }, 404)
@@ -104,7 +104,7 @@ admin.delete('/posts/:id', adminMiddleware, async (c) => {
  * DELETE /api/admin/comments/:id — 删除评论
  */
 admin.delete('/comments/:id', adminMiddleware, async (c) => {
-  const id = parseInt(c.req.param('id'))
+  const id = parseInt(c.req.param('id') || '')
 
   const comment = await queryOne<{ id: number }>(c.env.abdl_space_db, 'SELECT id FROM post_comments WHERE id = ?', [id])
   if (!comment) return c.json({ error: 'Comment not found' }, 404)
@@ -117,7 +117,7 @@ admin.delete('/comments/:id', adminMiddleware, async (c) => {
  * DELETE /api/admin/diapers/:id — 删除纸尿裤
  */
 admin.delete('/diapers/:id', adminMiddleware, async (c) => {
-  const id = parseInt(c.req.param('id'))
+  const id = parseInt(c.req.param('id') || '')
 
   const diaper = await queryOne<{ id: number }>(c.env.abdl_space_db, 'SELECT id FROM diapers WHERE id = ?', [id])
   if (!diaper) return c.json({ error: 'Diaper not found' }, 404)
