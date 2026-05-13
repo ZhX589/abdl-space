@@ -352,6 +352,22 @@ export interface UpdatePageResponse {
   version: number
 }
 
+export interface PageVersion {
+  id: number
+  version: number
+  content: string
+  author: { id: number; username: string; avatar: string | null } | null
+  created_at: string
+}
+
+export interface PageVersionsResponse {
+  versions: PageVersion[]
+}
+
+export interface PageVersionResponse {
+  version: PageVersion
+}
+
 export interface InlineCommentAuthor {
   id: number
   username: string
@@ -765,6 +781,25 @@ export async function updatePage(
 export async function deletePage(slug: string, token: string): Promise<DeleteResponse> {
   return fetchApi<DeleteResponse>(`/api/pages/${slug}`, {
     method: 'DELETE',
+    headers: getAuthHeader(token),
+  })
+}
+
+export async function getPageVersions(slug: string): Promise<PageVersionsResponse> {
+  return fetchApi<PageVersionsResponse>(`/api/pages/${slug}/versions`)
+}
+
+export async function getPageVersion(slug: string, version: number): Promise<PageVersionResponse> {
+  return fetchApi<PageVersionResponse>(`/api/pages/${slug}/versions/${version}`)
+}
+
+export async function rollbackPage(
+  slug: string,
+  version: number,
+  token: string
+): Promise<UpdatePageResponse> {
+  return fetchApi<UpdatePageResponse>(`/api/pages/${slug}/rollback/${version}`, {
+    method: 'POST',
     headers: getAuthHeader(token),
   })
 }

@@ -328,4 +328,121 @@ wiki.delete('/:slug/inline-comments/:id', authMiddleware, async (c) => {
   return c.json({ message: '已删除' })
 })
 
+/**
+ * GET /api/pages/:slug/versions — 版本历史列表
+ */
+wiki.get('/:slug/versions', async (c) => {
+  const slug = c.req.param('slug')
+
+  const page = await queryOne<{ id: number }>(
+    c.env.abdl_space_db,
+    'SELECT id FROM wiki_pages WHERE slug = ?',
+    [slug]
+  )
+  if (!page) return c.json({ error: 'Page not found' }, 404)
+
+  const versions = await query<Record<string, unknown>>(
+    c.env.abdl_space_db,
+    `SELECT pv.id, pv.version, pv.content, pv.created_at,
+            u.id as author_id, u.username, u.avatar
+     FROM page_versions pv
+     LEFT JOIN users u ON pv.author_id = u.id
+     WHERE pv.page_id = ?
+     ORDER BY pv.version DESC`,
+    [page.id]
+  )
+
+  return c.json({
+    versions: versions.map(v => ({
+      id: v.id,
+      version: v.version,
+      content: v.content,
+      author: v.author_id ? { id: v.author_id, username: v.username, avatar: v.avatar ?? null } : null,
+      created_at: v.created_at
+    }))
+  })
+})
+
+/**
+ * GET /api/pages/:slug/versions/:version — 获取指定版本内容
+ */
+wiki.get('/:slug/versions/:version', async (c) => {
+  const slug = c.req.param('slug')
+  const version = parseInt(c.req.param('version') || '')
+
+  if (isNaN(version) || version < 1) {
+    return c.json({ error: 'Invalid version number' }, 400)
+  }
+
+  const page = await queryOne<{ id: number }>(
+    c.env.abdl_space_db,
+    'SELECT id FROM wiki_pages WHERE slug = ?',
+    [slug]
+  )
+  if (!page) return c.json({ error: 'Page not found' }, 404)
+
+  const record = await queryOne<Record<string, unknown>>(
+    c.env.abdl_space_db,
+    `SELECT pv.id, pv.version, pv.content, pv.created_at,
+            u.id as author_id, u.username, u.avatar
+     FROM page_versions pv
+     LEFT JOIN users u ON pv.author_id = u.id
+     WHERE pv.page_id = ? AND pv.version = ?`,
+    [page.id, version]
+  )
+  if (!record) return c.json({ error: 'Version not found' }, 404)
+
+  return c.json({
+    version: {
+      id: record.id,
+      version: record.version,
+      content: record.content,
+      author: record.author_id ? { id: record.author_id, username: record.username, avatar: record.avatar ?? null } : null,
+      created_at: record.created_at
+    }
+  })
+})
+
+/**
+ * POST /api/pages/:slug/rollback/:version — 回滚到指定版本
+ */
+wiki.post('/:slug/rollback/:version', authMiddleware, async (c) => {
+  const user = c.get('user')
+  const slug = c.req.param('slug')
+  const targetVersion = parseInt(c.req.param('version') || '')
+
+  if (isNaN(targetVersion) || targetVersion < 1) {
+    return c.json({ error: 'Invalid version number' }, 400)
+  }
+
+  const page = await queryOne<{ id: number; version: number; content: string }>(
+    c.env.abdl_space_db,
+    'SELECT id, version, content FROM wiki_pages WHERE slug = ?',
+    [slug]
+  )
+  if (!page) return c.json({ error: 'Page not found' }, 404)
+
+  const oldVersion = await queryOne<{ id: number; content: string }>(
+    c.env.abdl_space_db,
+    'SELECT id, content FROM page_versions WHERE page_id = ? AND version = ?',
+    [page.id, targetVersion]
+  )
+  if (!oldVersion) return c.json({ error: 'Target version not found' }, 404)
+
+  const newVersion = page.version + 1
+  await run(
+    c.env.abdl_space_db,
+    'INSERT INTO page_versions (page_id, content, version, author_id) VALUES (?, ?, ?, ?)',
+    [page.id, page.content, newVersion, user.sub]
+  )
+
+  await run(
+    c.env.abdl_space_db,
+    'UPDATE wiki_pages SET content = ?, version = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+    [oldVersion.content, newVersion, page.id]
+  )
+
+  return c.json({ message: '回滚成功', version: newVersion })
+})
+
 export default wiki
