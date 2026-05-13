@@ -132,7 +132,7 @@ B 站前端**只做展示和 Wiki 编辑**，评分/感受/帖子的提交由 A 
 | # | 分支 | 内容 | 前置依赖 |
 |:-:|:---|:---|:---:|
 | A12 | `feat/guess-api` | 猜你喜欢（纯数据驱动，无 AI） | A5 | ✅ |
-| A13 | `feat/versions-api` | Wiki 版本历史 + 回滚 | A6 | |
+| A13 | `feat/wiki-versions-api` | Wiki 版本历史 + 回滚 | A6 | ✅ |
 | A14 | `feat/rich-editor` | 富文本/Markdown 编辑器 | A6 |
 
 ### 程序员B 任务线
@@ -140,7 +140,7 @@ B 站前端**只做展示和 Wiki 编辑**，评分/感受/帖子的提交由 A 
 | # | 分支 | 内容 | 前置依赖 |
 |:-:|:---|:---|:---:|
 | B10 | `feat/guess-ui` | 猜你喜欢展示（首页模块） | A12 |
-| B11 | `feat/versions-ui` | 版本历史对比 UI + 回滚按钮 | A13 |
+| B11 | `feat/wiki-versions-ui` | 版本历史对比 UI + 回滚按钮 | A13 | ✅ |
 | B12 | `feat/rich-editor-ui` | 富文本编辑器组件 | A14 |
 
 ---
@@ -196,6 +196,7 @@ git push origin feat/你的分支名
 | 2026-05-14 | `fix/admin-and-bugs` | 新增: `POST /admin/add`（admin 提升用户为管理员） | ✅ |
 | 2026-05-14 | `fix/admin-and-bugs` | 新增: `schemas/seeds/admin.sql` 默认管理员种子数据 | ✅ |
 | 2026-05-14 | `fix/admin-and-bugs` | P1: 17 个 TS build errors 修复（c.req.param() undefined + unused var + ReactNode） | ✅ |
+| 2026-05-14 | `feat/wiki-versions-api` + `feat/wiki-versions-ui` | A13+B11: Wiki 版本历史 + 回滚（API + UI） | ✅ |
 
 ### 默认管理员账号
 
