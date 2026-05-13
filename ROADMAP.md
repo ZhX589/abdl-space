@@ -111,7 +111,7 @@ B 站前端**只做展示和 Wiki 编辑**，评分/感受/帖子的提交由 A 
 |:-:|:---|:---|:---:|
 | A8 | `feat/rankings-api` | 综合排行榜（hot/absorbency/popular/dimension） | A5 | ✅ |
 | A9 | `feat/compare-api` | 纸尿裤对比 | A5 | ✅ |
-| A10 | `feat/search-api` | 全文搜索（D1 FTS） | A5+A6 | |
+| A10 | `feat/search-api` | 全文搜索（D1 FTS） | A5+A6 | ✅ |
 | A11 | `feat/terms-api` | 术语百科 CRUD | A4 | ✅ |
 
 ### 程序员B 任务线
@@ -119,9 +119,9 @@ B 站前端**只做展示和 Wiki 编辑**，评分/感受/帖子的提交由 A 
 | # | 分支 | 内容 | 前置依赖 |
 |:-:|:---|:---|:---:|
 | B6 | `feat/rankings-compare-ui` | 排行榜页（多类型切换） | A8 | ✅ |
-| B7 | `feat/compare-ui` | 纸尿裤对比页（可视化） | A9 |
-| B8 | `feat/search-ui` | 搜索框 + 搜索结果页 | A10 |
-| B9 | `feat/terms-ui` | 术语百科页 | A11 |
+| B7 | `feat/compare-ui` | 纸尿裤对比页（可视化） | A9 | ✅ |
+| B8 | `feat/search-terms-ui` | 搜索框 + 搜索结果页 | A10 | ✅ |
+| B9 | `feat/search-terms-ui` | 术语百科页 | A11 | ✅ |
 
 ---
 
@@ -199,6 +199,9 @@ git push origin feat/你的分支名
 | 2026-05-14 | `feat/wiki-versions-api` + `feat/wiki-versions-ui` | A13+B11: Wiki 版本历史 + 回滚（API + UI） | ✅ |
 | 2026-05-14 | `feat/rich-editor-ui` | A14+B12: Markdown 富文本编辑器（工具栏 + 编辑/预览切换） | ✅ |
 | 2026-05-14 | `feat/rankings-compare-ui` | B6: 排行榜页面 UI（4 类型切换 + 分维度切换） | ✅ |
+| 2026-05-14 | `feat/search-api` | A10: 统一搜索 API（纸尿裤 + Wiki + 术语） | ✅ |
+| 2026-05-14 | `feat/compare-ui` | B7: 纸尿裤对比页面（可视化表格 + 最优高亮） | ✅ |
+| 2026-05-14 | `feat/search-terms-ui` | B8+B9: 搜索结果页 + 术语百科页 | ✅ |
 
 ### 默认管理员账号
 
