@@ -10,6 +10,8 @@ const auth = new Hono<AppType>()
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
+const tokenCookieOptions = 'HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=604800'
+
 /**
  * POST /api/auth/register — 注册新用户
  */
@@ -25,6 +27,9 @@ auth.post('/register', async (c) => {
   }
   if (password.length < 8) {
     return c.json({ error: 'Password must be at least 8 characters' }, 400)
+  }
+  if (!/(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{8,}/.test(password)) {
+    return c.json({ error: 'Password must contain uppercase, lowercase, and number' }, 400)
   }
   if (username.length < 2 || username.length > 32) {
     return c.json({ error: 'Username must be 2-32 characters' }, 400)
@@ -50,6 +55,8 @@ auth.post('/register', async (c) => {
   const userId = result.meta.last_row_id as number
   const token = await signJWT({ sub: userId, username, email, role: 'user' }, c.env.JWT_SECRET)
 
+  c.header('Set-Cookie', `token=${token}; ${tokenCookieOptions}`)
+
   const response: LoginResponse = {
     token,
     user: { id: userId, email, username, avatar: null, role: 'user' }
@@ -74,15 +81,17 @@ auth.post('/login', async (c) => {
     [login, login]
   )
   if (!user) {
-    return c.json({ error: 'Invalid email or password' }, 401)
+    return c.json({ error: 'Invalid credentials' }, 401)
   }
 
   const valid = await verifyPassword(password, user.password_hash)
   if (!valid) {
-    return c.json({ error: 'Invalid email or password' }, 401)
+    return c.json({ error: 'Invalid credentials' }, 401)
   }
 
   const token = await signJWT({ sub: user.id, username: user.username, email: user.email, role: user.role }, c.env.JWT_SECRET)
+
+  c.header('Set-Cookie', `token=${token}; ${tokenCookieOptions}`)
 
   const response: LoginResponse = {
     token,

@@ -274,6 +274,7 @@ export interface UpdateUserRequest {
 export interface Env {
   abdl_space_db: D1Database
   JWT_SECRET: string
+  FRONTEND_ORIGIN?: string
 }
 
 /** JWT payload 结构 */

@@ -36,6 +36,7 @@ async function fetchApi<T>(
   const url = `${BASE_URL}${endpoint}`
   const response = await fetch(url, {
     ...options,
+    credentials: 'include',
     headers: {
       'Content-Type': 'application/json',
       ...options.headers,

@@ -2,6 +2,7 @@ import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import { logger } from 'hono/logger'
 import type { Env, JWTPayload } from './types/index.ts'
+import type { Context, Next } from 'hono'
 import { hashPassword, verifyPassword } from './lib/auth.ts'
 import { authMiddleware, adminMiddleware } from './middleware/auth.ts'
 import { queryOne, run } from './lib/db.ts'
@@ -24,8 +25,14 @@ type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
 const app = new Hono<AppType>()
 
-app.use('*', cors())
+app.use('*', corsWithOrigin)
 app.use('*', logger())
+
+async function corsWithOrigin(c: Context<AppType>, next: Next) {
+  const origin = c.env.FRONTEND_ORIGIN || 'http://localhost:5173'
+  const corsFn = cors({ origin, credentials: true })
+  return corsFn(c, next)
+}
 
 app.get('/', (c) => c.json({ message: 'ABDL Space API' }))
 
