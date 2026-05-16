@@ -133,7 +133,7 @@ B 站前端**只做展示和 Wiki 编辑**，评分/感受/帖子的提交由 A 
 |:-:|:---|:---|:---:|
 | A12 | `feat/guess-api` | 猜你喜欢（纯数据驱动，无 AI） | A5 | ✅ |
 | A13 | `feat/wiki-versions-api` | Wiki 版本历史 + 回滚 | A6 | ✅ |
-| A14 | `feat/rich-editor` | 富文本/Markdown 编辑器 | A6 |
+| A14 | `feat/rich-editor` | 富文本/Markdown 编辑器 | A6 | ✅（后端存根，前端完整）|
 
 ### 程序员B 任务线
 
@@ -205,6 +205,8 @@ git push origin feat/你的分支名
 | 2026-05-16 | `fix/security-hardening` | 安全加固：JWT httpOnly Cookie + CORS 严格域名 + 密码复杂度校验 + Cookie 鉴权兜背 | ✅ |
 | 2026-05-16 | `feat/ai-recommend` | DeepSeek AI 推荐（POST /api/recommend）+ /api_set 管理页面 + api_keys 表 | ✅ |
 | 2026-05-16 | `fix/ratelimit-error` | P3: 频率限制（auth/login + auth/register，5次/分钟/IP）+ 错误信息脱敏（DB 错误不暴露） | ✅ |
+| 2026-05-16 | `fix/complete-all` | fix: avg_score 计算修正（rankings + search + recommend 使用统一的 computeAvgScore 函数） | ✅ |
+| 2026-05-16 | `fix/complete-all` | fix: GET /api/terms/:id 缺失实现 + admin ban endpoint 实现（动态添加 banned 列） | ✅ |
 
 ### 默认管理员账号
 
