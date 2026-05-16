@@ -64,10 +64,31 @@ admin.delete('/users/:id', adminMiddleware, async (c) => {
 })
 
 /**
- * POST /api/admin/users/:id/ban — 封禁/解封（toggle，需 users 表有 banned 字段）
+ * POST /api/admin/users/:id/ban — 封禁/解封（toggle）
  */
 admin.post('/users/:id/ban', adminMiddleware, async (c) => {
-  return c.json({ error: 'Ban function not yet implemented' }, 501)
+  const id = parseInt(c.req.param('id') || '')
+
+  const user = await queryOne<{ id: number; email: string }>(
+    c.env.abdl_space_db, 'SELECT id, email FROM users WHERE id = ?', [id]
+  )
+  if (!user) return c.json({ error: 'User not found' }, 404)
+
+  const hasBannedColumn = await queryOne<{ cid: number }>(
+    c.env.abdl_space_db,
+    "SELECT cid FROM pragma_table_info('users') WHERE name = 'banned'"
+  )
+  if (!hasBannedColumn) {
+    await run(c.env.abdl_space_db, 'ALTER TABLE users ADD COLUMN banned INTEGER DEFAULT 0')
+  }
+
+  const current = await queryOne<{ banned: number }>(
+    c.env.abdl_space_db, 'SELECT banned FROM users WHERE id = ?', [id]
+  )
+  const newBanned = current?.banned ? 0 : 1
+  await run(c.env.abdl_space_db, 'UPDATE users SET banned = ? WHERE id = ?', [newBanned, id])
+
+  return c.json({ banned: !!newBanned })
 })
 
 /**

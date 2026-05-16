@@ -59,6 +59,29 @@ terms.get('/categories', async (c) => {
 })
 
 /**
+ * GET /api/terms/:id — 获取单个术语
+ */
+terms.get('/:id', async (c) => {
+  const id = parseInt(c.req.param('id') || '')
+  if (!id) return c.json({ error: 'Invalid ID' }, 400)
+
+  const row = await queryOne<Record<string, unknown>>(
+    c.env.abdl_space_db, 'SELECT * FROM terms WHERE id = ?', [id]
+  )
+  if (!row) return c.json({ error: 'Term not found' }, 404)
+
+  return c.json({
+    id: row.id,
+    term: row.term,
+    abbreviation: row.abbreviation ?? null,
+    definition: row.definition,
+    category: row.category ?? null,
+    created_by: row.created_by ?? null,
+    created_at: row.created_at
+  })
+})
+
+/**
  * POST /api/terms — 创建术语（需管理员）
  */
 terms.post('/', adminMiddleware, async (c) => {
