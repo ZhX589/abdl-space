@@ -23,6 +23,13 @@ interface DiaperInfo {
   absorbency_adult: string
 }
 
+function computeAvgScore(ratingAvg: number, _ratingCount: number, feelingAvg: number | null, feelingCount: number): number {
+  if (feelingCount > 0 && feelingAvg !== null) {
+    return Math.round((ratingAvg * 0.9 + (feelingAvg + 5) * 0.1) * 10) / 10
+  }
+  return Math.round(ratingAvg * 10) / 10
+}
+
 const recommend = new Hono<AppType>()
 
 async function callDeepSeekAI(apiKey: string, prompt: string): Promise<string> {
@@ -141,18 +148,37 @@ recommend.post('/', authMiddleware, async (c) => {
     [user.sub]
   )) as Record<string, unknown>[]
 
-  const diapers = (await query(
+  const diapersRaw = (await query(
     c.env.abdl_space_db,
     `SELECT d.id, d.brand, d.model, d.thickness,
-      COALESCE(ROUND(AVG((r.absorption_score + r.fit_score + r.comfort_score + r.thickness_score + r.appearance_score + r.value_score) / 6.0), 1), 0) as avg_score,
+      ROUND(AVG((r.absorption_score + r.fit_score + r.comfort_score + r.thickness_score + r.appearance_score + r.value_score) / 6.0), 1) as rating_avg,
       COUNT(r.id) as rating_count,
+      COALESCE(ROUND(AVG((f.looseness + 5 + f.softness + 5 + f.dryness + 5 + f.odor_control + 5 + f.quietness + 5) / 5.0), 0) as feeling_avg,
+      COUNT(DISTINCT f.id) as feeling_count,
       d.absorbency_adult
      FROM diapers d
      LEFT JOIN ratings r ON r.diaper_id = d.id
+     LEFT JOIN feelings f ON f.diaper_id = d.id
      GROUP BY d.id
-     ORDER BY avg_score DESC
+     ORDER BY rating_avg DESC
      LIMIT 20`
-  )) as DiaperInfo[]
+  )) as Record<string, unknown>[]
+
+  const diapers: DiaperInfo[] = diapersRaw.map(d => {
+    const ratingAvg = Number(d.rating_avg) || 0
+    const ratingCount = Number(d.rating_count) || 0
+    const feelingAvg = Number(d.feeling_avg) || null
+    const feelingCount = Number(d.feeling_count) || 0
+    return {
+      id: Number(d.id),
+      brand: String(d.brand),
+      model: String(d.model),
+      thickness: Number(d.thickness),
+      avg_score: computeAvgScore(ratingAvg, ratingCount, feelingAvg, feelingCount),
+      rating_count: ratingCount,
+      absorbency_adult: String(d.absorbency_adult)
+    }
+  })
 
   const apiKeyRow = await queryOne<{ key_value: string }>(
     c.env.abdl_space_db,
@@ -209,27 +235,37 @@ recommend.get('/guess', async (c) => {
   const rows = await query<Record<string, unknown>>(
     c.env.abdl_space_db,
     `SELECT d.id, d.brand, d.model, d.thickness,
-      ROUND(AVG((r.absorption_score + r.fit_score + r.comfort_score + r.thickness_score + r.appearance_score + r.value_score) / 6.0), 1) as avg_score,
-      COUNT(*) as rating_count
+      ROUND(AVG((r.absorption_score + r.fit_score + r.comfort_score + r.thickness_score + r.appearance_score + r.value_score) / 6.0), 1) as rating_avg,
+      COUNT(r.id) as rating_count,
+      COALESCE(ROUND(AVG((f.looseness + 5 + f.softness + 5 + f.dryness + 5 + f.odor_control + 5 + f.quietness + 5) / 5.0), 0) as feeling_avg,
+      COUNT(DISTINCT f.id) as feeling_count
      FROM diapers d
      LEFT JOIN ratings r ON r.diaper_id = d.id
+     LEFT JOIN feelings f ON f.diaper_id = d.id
      GROUP BY d.id
-     ORDER BY avg_score DESC
+     ORDER BY rating_avg DESC
      LIMIT 5`
   )
 
   return c.json({
-    recommendations: rows.map(r => ({
-      id: r.id,
-      brand: r.brand,
-      model: r.model,
-      avg_score: r.avg_score ?? 0,
-      rating_count: r.rating_count ?? 0,
-      thickness: r.thickness,
-      reason: (r.avg_score as number) >= 8 ? '综合评分超高，社区力荐' :
-              (r.thickness as number) <= 2 ? '超薄设计，适合日常穿着' :
-              '热门之选'
-    }))
+    recommendations: rows.map(r => {
+      const ratingAvg = Number(r.rating_avg) || 0
+      const ratingCount = Number(r.rating_count) || 0
+      const feelingAvg = Number(r.feeling_avg) || null
+      const feelingCount = Number(r.feeling_count) || 0
+      const avgScore = computeAvgScore(ratingAvg, ratingCount, feelingAvg, feelingCount)
+      return {
+        id: r.id,
+        brand: r.brand,
+        model: r.model,
+        avg_score: avgScore,
+        rating_count: ratingCount,
+        thickness: r.thickness,
+        reason: avgScore >= 8 ? '综合评分超高，社区力荐' :
+                Number(r.thickness) <= 2 ? '超薄设计，适合日常穿着' :
+                '热门之选'
+      }
+    })
   })
 })
 
