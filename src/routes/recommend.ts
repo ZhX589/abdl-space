@@ -134,18 +134,14 @@ recommend.post('/', authMiddleware, async (c) => {
   if (selected?.prefs && userData.style_preference) profile.style_preference = userData.style_preference
   if (selected?.bio && userData.bio) profile.bio = userData.bio
 
-  const feelings: Record<string, unknown>[] = []
-  if (selected?.feelings) {
-    const rows = await query<Record<string, unknown>>(
-      c.env.abdl_space_db,
-      `SELECT f.looseness, f.softness, f.dryness, f.odor_control, f.quietness
-       FROM feelings f WHERE f.user_id = ?`,
-      [user.sub]
-    )
-    feelings.push(...rows)
-  }
+  const feelings = (await query(
+    c.env.abdl_space_db,
+    `SELECT f.looseness, f.softness, f.dryness, f.odor_control, f.quietness
+     FROM feelings f WHERE f.user_id = ?`,
+    [user.sub]
+  )) as Record<string, unknown>[]
 
-  const diapers = await query<DiaperInfo>(
+  const diapers = (await query(
     c.env.abdl_space_db,
     `SELECT d.id, d.brand, d.model, d.thickness,
       COALESCE(ROUND(AVG((r.absorption_score + r.fit_score + r.comfort_score + r.thickness_score + r.appearance_score + r.value_score) / 6.0), 1), 0) as avg_score,
@@ -156,7 +152,7 @@ recommend.post('/', authMiddleware, async (c) => {
      GROUP BY d.id
      ORDER BY avg_score DESC
      LIMIT 20`
-  )
+  )) as DiaperInfo[]
 
   const apiKeyRow = await queryOne<{ key_value: string }>(
     c.env.abdl_space_db,

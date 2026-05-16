@@ -5,6 +5,31 @@ const SALT_LENGTH = 16
 const KEY_LENGTH = 64
 const JWT_EXPIRES_IN = 7 * 24 * 60 * 60 * 1000
 
+const rateLimitMap = new Map<string, { count: number; resetAt: number }>()
+const RATE_LIMIT_WINDOW = 60_000
+const RATE_LIMIT_MAX = 5
+
+function checkRateLimit(ip: string): { allowed: boolean; remaining: number; resetIn: number } {
+  const now = Date.now()
+  const entry = rateLimitMap.get(ip)
+
+  if (!entry || now > entry.resetAt) {
+    rateLimitMap.set(ip, { count: 1, resetAt: now + RATE_LIMIT_WINDOW })
+    return { allowed: true, remaining: RATE_LIMIT_MAX - 1, resetIn: RATE_LIMIT_WINDOW }
+  }
+
+  if (entry.count >= RATE_LIMIT_MAX) {
+    return { allowed: false, remaining: 0, resetIn: entry.resetAt - now }
+  }
+
+  entry.count++
+  return { allowed: true, remaining: RATE_LIMIT_MAX - entry.count, resetIn: entry.resetAt - now }
+}
+
+function getClientIp(c: { req: { header: (name: string) => string | undefined } }): string {
+  return c.req.header('CF-Connecting-IP') || c.req.header('X-Forwarded-For')?.split(',')[0]?.trim() || 'unknown'
+}
+
 function arrayBufferToBase64url(data: ArrayBuffer | Uint8Array): string {
   const bytes = data instanceof Uint8Array ? data : new Uint8Array(data)
   let binary = ''
@@ -179,3 +204,5 @@ export async function verifyJWT(token: string, secret: string): Promise<JWTPaylo
     return null
   }
 }
+
+export { checkRateLimit, getClientIp }

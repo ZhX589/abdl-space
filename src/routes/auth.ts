@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import type { Env, JWTPayload, RegisterRequest, LoginRequest, LoginResponse, User } from '../types/index.ts'
-import { hashPassword, verifyPassword, signJWT } from '../lib/auth.ts'
+import { hashPassword, verifyPassword, signJWT, checkRateLimit, getClientIp } from '../lib/auth.ts'
 import { queryOne, run } from '../lib/db.ts'
 import { authMiddleware } from '../middleware/auth.ts'
 
@@ -16,6 +16,13 @@ const tokenCookieOptions = 'HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=6
  * POST /api/auth/register — 注册新用户
  */
 auth.post('/register', async (c) => {
+  const ip = getClientIp(c)
+  const rateLimit = checkRateLimit(ip)
+  if (!rateLimit.allowed) {
+    c.header('Retry-After', String(Math.ceil(rateLimit.resetIn / 1000)))
+    return c.json({ error: '操作太频繁，请稍后再试' }, 429)
+  }
+
   const body = await c.req.json<RegisterRequest>()
   const { email, password, username } = body
 
@@ -68,6 +75,13 @@ auth.post('/register', async (c) => {
  * POST /api/auth/login — 登录（支持 email 或 username）
  */
 auth.post('/login', async (c) => {
+  const ip = getClientIp(c)
+  const rateLimit = checkRateLimit(ip)
+  if (!rateLimit.allowed) {
+    c.header('Retry-After', String(Math.ceil(rateLimit.resetIn / 1000)))
+    return c.json({ error: '操作太频繁，请稍后再试' }, 429)
+  }
+
   const body = await c.req.json<LoginRequest>()
   const { login, password } = body
 
