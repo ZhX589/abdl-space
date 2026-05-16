@@ -20,6 +20,7 @@ import recommend from './routes/recommend.ts'
 import notifications from './routes/notifications.ts'
 import admin from './routes/admin.ts'
 import search from './routes/search.ts'
+import apiKeys from './routes/api_keys.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
@@ -61,6 +62,7 @@ app.route('/api/recommend', recommend)
 app.route('/api/notifications', notifications)
 app.route('/api/admin', admin)
 app.route('/api/search', search)
+app.route('/api/api_keys', apiKeys)
 
 /**
  * POST /admin_reset/password — admin 只能改自己的密码（需鉴权）

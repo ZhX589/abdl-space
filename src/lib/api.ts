@@ -1081,3 +1081,45 @@ export async function getSearch(
   if (params.limit) sp.set('limit', String(params.limit))
   return fetchApi<SearchResponse>(`/api/search?${sp.toString()}`)
 }
+
+// === API Keys（管理员）===
+
+export interface ApiKeyItem {
+  id: number
+  provider: string
+  label: string | null
+  has_key: boolean
+  created_at: string
+  updated_at: string
+}
+
+export interface ApiKeysResponse {
+  keys: ApiKeyItem[]
+}
+
+export async function getApiKeys(token: string): Promise<ApiKeysResponse> {
+  return fetchApi<ApiKeysResponse>('/api/api_keys', {
+    headers: getAuthHeader(token),
+  })
+}
+
+export async function setApiKey(
+  data: { provider: string; key_value: string; label?: string },
+  token: string
+): Promise<{ message: string }> {
+  return fetchApi<{ message: string }>('/api/api_keys', {
+    method: 'POST',
+    body: JSON.stringify(data),
+    headers: getAuthHeader(token),
+  })
+}
+
+export async function deleteApiKey(
+  provider: string,
+  token: string
+): Promise<{ message: string }> {
+  return fetchApi<{ message: string }>(`/api/api_keys/${provider}`, {
+    method: 'DELETE',
+    headers: getAuthHeader(token),
+  })
+}

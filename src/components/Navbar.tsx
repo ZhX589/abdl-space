@@ -1,11 +1,27 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { Link, NavLink } from 'react-router-dom'
 import { useTheme } from '../hooks/useTheme'
+
+function decodeTokenRole(): string | null {
+  try {
+    const match = document.cookie.match(/(?:^|;\s*)token=([^;]+)/)
+    if (!match) return null
+    const parts = match[1].split('.')
+    if (parts.length !== 3) return null
+    const payload = JSON.parse(atob(parts[1]))
+    return payload.role || null
+  } catch { return null }
+}
 
 /** 全局导航栏 */
 export function Navbar() {
   const { theme, toggleTheme } = useTheme()
   const [menuOpen, setMenuOpen] = useState(false)
+  const [isAdmin, setIsAdmin] = useState(false)
+
+  useEffect(() => {
+    setIsAdmin(decodeTokenRole() === 'admin')
+  }, [])
 
   const navLinks = [
     { to: '/', label: '首页' },
@@ -15,6 +31,7 @@ export function Navbar() {
     { to: '/compare', label: '对比' },
     { to: '/search', label: '搜索' },
     { to: '/terms', label: '术语' },
+    ...(isAdmin ? [{ to: '/api_set', label: 'API Key' }] : []),
   ]
 
   const linkClass = ({ isActive }: { isActive: boolean }) =>

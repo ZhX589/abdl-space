@@ -198,6 +198,18 @@ CREATE TABLE IF NOT EXISTS notifications (
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
+-- API Keys（管理员存储第三方 API 密钥）
+CREATE TABLE IF NOT EXISTS api_keys (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  provider TEXT NOT NULL,                   -- 'deepseek' | 'openai' etc.
+  key_value TEXT NOT NULL,                  -- 加密存储或明文（由管理员设置）
+  label TEXT,                               -- 管理员备注
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_provider ON api_keys(provider);
+
 -- ============================================================
 -- 索引
 -- ============================================================

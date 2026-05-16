@@ -12,6 +12,7 @@ import { RankingsPage } from './pages/RankingsPage'
 import { ComparePage } from './pages/ComparePage'
 import { SearchPage } from './pages/SearchPage'
 import { TermsPage } from './pages/TermsPage'
+import { ApiSetPage } from './pages/ApiSetPage'
 import { NotFoundPage } from './pages/NotFoundPage'
 
 /** 前端路由入口 */
@@ -32,6 +33,7 @@ export function AppRouter() {
           <Route path="compare" element={<ComparePage />} />
           <Route path="search" element={<SearchPage />} />
           <Route path="terms" element={<TermsPage />} />
+          <Route path="api_set" element={<ApiSetPage />} />
           <Route path="*" element={<NotFoundPage />} />
         </Route>
       </Routes>
