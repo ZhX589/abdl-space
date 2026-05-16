@@ -204,6 +204,7 @@ git push origin feat/你的分支名
 | 2026-05-14 | `feat/search-terms-ui` | B8+B9: 搜索结果页 + 术语百科页 | ✅ |
 | 2026-05-16 | `fix/security-hardening` | 安全加固：JWT httpOnly Cookie + CORS 严格域名 + 密码复杂度校验 + Cookie 鉴权兜背 | ✅ |
 | 2026-05-16 | `feat/ai-recommend` | DeepSeek AI 推荐（POST /api/recommend）+ /api_set 管理页面 + api_keys 表 | ✅ |
+| 2026-05-16 | `fix/ratelimit-error` | P3: 频率限制（auth/login + auth/register，5次/分钟/IP）+ 错误信息脱敏（DB 错误不暴露） | ✅ |
 
 ### 默认管理员账号
 
