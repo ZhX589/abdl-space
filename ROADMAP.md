@@ -202,6 +202,7 @@ git push origin feat/你的分支名
 | 2026-05-14 | `feat/search-api` | A10: 统一搜索 API（纸尿裤 + Wiki + 术语） | ✅ |
 | 2026-05-14 | `feat/compare-ui` | B7: 纸尿裤对比页面（可视化表格 + 最优高亮） | ✅ |
 | 2026-05-14 | `feat/search-terms-ui` | B8+B9: 搜索结果页 + 术语百科页 | ✅ |
+| 2026-05-16 | `fix/security-hardening` | 安全加固：JWT httpOnly Cookie + CORS 严格域名 + 密码复杂度校验 + Cookie 鉴权兜背 | ✅ |
 
 ### 默认管理员账号
 
