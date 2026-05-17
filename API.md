@@ -909,6 +909,16 @@ Wiki 页面详情（含 Markdown 正文）。
 - **鉴权**：需管理员
 - **请求 body**：同 POST，所有字段可选
 
+#### GET /api/terms/:id
+
+获取单个术语详情。
+
+- **鉴权**：否
+- **响应 200**：
+```json
+{ "id": 1, "term": "ABDL", "abbreviation": "Adult Baby / Diaper Lover", "definition": "...", "category": "基本概念", "created_by": 1, "created_at": "..." }
+```
+
 #### DELETE /api/terms/:id
 
 删除术语。
@@ -920,9 +930,11 @@ Wiki 页面详情（含 Markdown 正文）。
 
 ### 5.13 Recommend（推荐）
 
+> **DeepSeek AI 驱动**：POST /api/recommend 需要管理员在 `/api_set` 页面配置 DeepSeek API Key。配置后 AI Key 存储在 `api_keys` 表中。
+
 #### POST /api/recommend
 
-AI 推荐，根据用户信息 + 纸尿裤数据库返回推荐。
+AI 推荐，根据用户信息 + 纸尿裤数据库返回推荐（DeepSeek 模型驱动）。
 
 - **鉴权**：是
 - **请求 body**：
@@ -951,7 +963,8 @@ AI 推荐，根据用户信息 + 纸尿裤数据库返回推荐。
 }
 ```
 
-3–5 条推荐，matchScore 1–100。
+- **错误**：503（API Key 未配置）、502（DeepSeek 调用失败）
+- **限制**：返回 3–5 条推荐，matchScore 1–100
 
 #### GET /api/recommend/guess
 
@@ -1056,6 +1069,225 @@ AI 推荐，根据用户信息 + 纸尿裤数据库返回推荐。
 #### DELETE /api/admin/diapers/:id
 
 删除纸尿裤。
+
+---
+
+### 5.16 API Keys（第三方 API 密钥管理）
+
+管理员存储第三方 AI 服务（DeepSeek/OpenAI/Anthropic）的 API Key，供 AI 推荐等功能使用。
+
+#### GET /api/api_keys
+
+获取所有 API Key（不返回 key_value 明文）。
+
+- **鉴权**：需管理员
+- **响应 200**：
+```json
+{
+  "keys": [
+    { "id": 1, "provider": "deepseek", "label": "生产环境", "has_key": true, "created_at": "...", "updated_at": "..." }
+  ]
+}
+```
+
+#### POST /api/api_keys
+
+设置或更新 API Key。
+
+- **鉴权**：需管理员
+- **请求 body**：
+
+| 字段 | 类型 | 必填 | 约束 |
+|------|------|------|------|
+| provider | string | 是 | `deepseek` / `openai` / `anthropic` |
+| key_value | string | 是 | API Key 实际值 |
+| label | string | 否 | 管理员备注 |
+
+- **响应 200**：`{ "message": "deepseek API key updated" }`
+- **错误**：400（provider 不合法）、401
+
+#### DELETE /api/api_keys/:provider
+
+删除 API Key。
+
+- **鉴权**：需管理员
+- **响应 200**：`{ "message": "deepseek API key deleted" }`
+- **错误**：404（Key 不存在）
+
+---
+
+### 5.17 Wiki Pages（Wiki 页面）
+
+#### GET /api/pages
+
+Wiki 列表。
+
+- **鉴权**：否
+- **请求 query**：
+
+| 字段 | 类型 | 默认 | 说明 |
+|------|------|------|------|
+| diaper_id | integer | — | 筛选关联某纸尿裤的 Wiki |
+| page | integer | 1 | |
+| limit | integer | 20 | |
+
+- **响应 200**：
+```json
+{
+  "pages": [
+    {
+      "id": 1, "slug": "little-kings", "title": "Little Kings",
+      "diaper_id": 1, "version": 3, "is_published": 1,
+      "author_id": 1, "created_at": "...", "updated_at": "..."
+    }
+  ],
+  "pagination": { "page": 1, "limit": 20, "total": 5, "totalPages": 1 }
+}
+```
+
+#### GET /api/pages/:slug
+
+Wiki 页面详情（含 Markdown 正文）。
+
+- **鉴权**：否
+- **响应 200**：
+```json
+{
+  "id": 1, "slug": "little-kings", "title": "Little Kings",
+  "content": "# Little Kings\nABU 旗舰产品…",
+  "diaper_id": 1, "version": 3, "is_published": 1,
+  "author_id": 1, "created_at": "...", "updated_at": "..."
+}
+```
+
+#### POST /api/pages
+
+创建 Wiki 页面。
+
+- **鉴权**：是
+- **请求 body**：
+
+| 字段 | 类型 | 必填 | 约束 |
+|------|------|------|------|
+| slug | string | 是 | URL 友好标识，全局唯一 |
+| title | string | 是 | |
+| content | string | 是 | Markdown |
+| diaper_id | integer | 否 | 关联纸尿裤 id（设则自动生成 slug 的参考）|
+
+- **响应 201**：`{ "id": 1, "slug": "little-kings", "message": "创建成功" }`
+- **错误**：409（slug 已存在）、400（diaper_id 已绑定其他 Wiki）
+
+#### PUT /api/pages/:slug
+
+编辑 Wiki 页面。
+
+- **鉴权**：是
+- **请求 body**：
+
+| 字段 | 类型 | 必填 |
+|------|------|------|
+| title | string | 否 |
+| content | string | 否 |
+| is_published | integer | 否 |
+
+- **响应 200**：`{ "message": "更新成功", "version": 4 }`
+
+#### DELETE /api/pages/:slug
+
+删除 Wiki 页面。
+
+- **鉴权**：是（仅作者或管理员）
+- **响应 200**：`{ "message": "已删除" }`
+
+---
+
+### 5.18 Wiki Inline Comments（Wiki 段评）
+
+段评是段落级评论，类似 oi-wiki 风格。每条评论关联一个 Wiki 页面的具体段落。
+
+`paragraph_hash` 由前端根据段落文本内容计算（如取前 50 字符 + 段落长度做简单 hash），用于定位段落。
+
+#### GET /api/pages/:slug/inline-comments
+
+获取 Wiki 页面的段评。
+
+- **鉴权**：否
+- **请求 query**：
+
+| 字段 | 类型 | 默认 | 说明 |
+|------|------|------|------|
+| paragraph_hash | string | — | 筛选某段落的评论；不传则返回全部 |
+
+- **响应 200**：
+```json
+{
+  "comments": [
+    {
+      "id": 1, "paragraph_hash": "abc123",
+      "author": { "id": 1, "username": "ZhX", "avatar": "..." },
+      "content": "这段写得不错", "created_at": "..."
+    }
+  ]
+}
+```
+
+#### POST /api/pages/:slug/inline-comments
+
+发表段评。
+
+- **鉴权**：是
+- **请求 body**：
+
+| 字段 | 类型 | 必填 | 约束 |
+|------|------|------|------|
+| paragraph_hash | string | 是 | 段落定位标识 |
+| content | string | 是 | 1–1000 字符 |
+
+- **响应 201**：`{ "id": 1, "message": "评论成功" }`
+
+#### DELETE /api/pages/:slug/inline-comments/:id
+
+删除段评。
+
+- **鉴权**：是（仅作者或管理员）
+- **响应 200**：`{ "message": "已删除" }`
+
+---
+
+### 5.19 Page Versions（Wiki 版本历史）
+
+#### GET /api/pages/:slug/versions
+
+获取 Wiki 页面的版本历史列表。
+
+- **鉴权**：否
+- **响应 200**：
+```json
+{
+  "versions": [
+    { "id": 1, "version": 3, "content": "...", "author": { "id": 1, "username": "ZhX", "avatar": null }, "created_at": "..." }
+  ]
+}
+```
+
+#### GET /api/pages/:slug/versions/:version
+
+获取特定版本的详细内容。
+
+- **鉴权**：否
+- **响应 200**：
+```json
+{
+  "version": { "id": 1, "version": 2, "content": "...", "author": { ... }, "created_at": "..." }
+}
+```
+
+#### POST /api/pages/:slug/rollback/:version
+
+回滚到指定版本（创建新版本，content 替换为旧版本内容）。
+
+- **鉴权**：是
+- **响应 200**：`{ "message": "已回滚", "version": 4 }`
 
 ---
 
