@@ -247,7 +247,8 @@ npx wrangler d1 execute abdl-space-db --remote --command "<逆向SQL>"
 | Pages 项目 | `abdl-space` |
 | D1 数据库 | `abdl-space-db` (id: `159f81ba-ea32-4667-a3ce-d72cb1659d93`) |
 | Production 分支 | `dev` |
-| 当前 commit (main/dev) | `64118fd` |
+| 当前 commit (main) | `64118fd` |
+| 当前 commit (dev) | `d5184be` |
 | 构建命令 | `npm run build` |
 | 输出目录 | `dist` |
 | 本地 API 端口 | `8787` (`npm run api`) |
@@ -271,13 +272,22 @@ npx wrangler d1 execute abdl-space-db --remote --command "<逆向SQL>"
 ### Git 分支状态
 
 ```
-main  @ 64118fd                     ← 当前所在
-dev   @ 64118fd (已同步)             ← Cloudflare Pages production 分支
+main  @ 64118fd                     ← 当前所在（落后）
+dev   @ d5184be                     ← Cloudflare Pages production 分支（最新）
 ```
 
-> 已删除远程/本地: `feat/diapers-api`、`feat/frontend-fix`
+> 已删除远程分支: `feat/ai-recommend`, `feat/backend-api-complete`, `feat/compare-ui`, `feat/rankings-compare-ui`, `feat/rich-editor-ui`, `feat/search-api`, `feat/search-terms-ui`, `feat/wiki-versions-api`, `feat/wiki-versions-ui`, `fix/admin-and-bugs`, `fix/ratelimit-error`, `fix/security-hardening`
 
-> ⚠️ `de98b4b` 的 production 部署曾失败（021cd073），后续 `3fce82f` 部署成功覆盖。
+### 2026-05-17 — Bug 修复 + 生产环境验证
+
+| 时间 | 操作 | Commit | 状态 |
+|:---|:---|:---|:---:|
+| - | fix: SQL语法错误 (COALESCE ROUND) + computeAvgScore统一函数 + terms验证 | `d5184be` | ✅ |
+| - | 推送 dev → origin/dev | `d5184be` | ✅ |
+| - | 生产验证: /api/health OK, /api/diapers OK, /api/auth/register OK | - | ✅ |
+| - | ⚠️ 生产问题: /api/rankings, /api/search, /api/terms, /api/pages 等返回 404 | - | ⚠️ 需调查 |
+
+> ⚠️ **生产环境部分端点 404**: diapers/auth/health 正常，但 rankings/search/terms/pages 等返回 404。推测是 Cloudflare Pages 部署新代码但某些路由未正确加载。
 
 ### 2026-05-11 — B2 完成 + bug 修复 + 端口统一
 
