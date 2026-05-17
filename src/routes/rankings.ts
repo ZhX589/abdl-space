@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import type { Env, JWTPayload } from '../types/index.ts'
-import { query } from '../lib/db.ts'
+import { query, computeAvgScore } from '../lib/db.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
@@ -8,13 +8,6 @@ const rankings = new Hono<AppType>()
 
 const VALID_TYPES = ['hot', 'absorbency', 'popular', 'dimension'] as const
 const VALID_DIMENSIONS = ['absorption_score', 'fit_score', 'comfort_score', 'thickness_score', 'appearance_score', 'value_score'] as const
-
-function computeAvgScore(ratingAvg: number, _ratingCount: number, feelingAvg: number | null, feelingCount: number): number {
-  if (feelingCount > 0 && feelingAvg !== null) {
-    return Math.round((ratingAvg * 0.9 + (feelingAvg + 5) * 0.1) * 10) / 10
-  }
-  return Math.round(ratingAvg * 10) / 10
-}
 
 /**
  * GET /api/rankings — 综合排行榜
@@ -38,7 +31,7 @@ rankings.get('/', async (c) => {
   switch (type) {
     case 'hot':
       joinRating = true
-      orderBy = 'avg_score DESC'
+      orderBy = 'rating_avg DESC'
       break
     case 'absorbency':
       orderBy = "CAST(REPLACE(REPLACE(d.absorbency_adult, 'ml', ''), ',', '') AS REAL) DESC"
@@ -61,7 +54,7 @@ rankings.get('/', async (c) => {
         AVG(r.${dimension}) as dim_avg,
         ROUND(AVG((r.absorption_score + r.fit_score + r.comfort_score + r.thickness_score + r.appearance_score + r.value_score) / 6.0), 1) as rating_avg,
         COUNT(*) as rating_count,
-        COALESCE(ROUND(AVG((f.looseness + 5 + f.softness + 5 + f.dryness + 5 + f.odor_control + 5 + f.quietness + 5) / 5.0), 0) as feeling_avg,
+        COALESCE(ROUND(AVG((f.looseness + 5 + f.softness + 5 + f.dryness + 5 + f.odor_control + 5 + f.quietness + 5) / 5.0), 1), 0) as feeling_avg,
         COUNT(DISTINCT f.id) as feeling_count
       FROM diapers d
       JOIN ratings r ON r.diaper_id = d.id
@@ -77,7 +70,7 @@ rankings.get('/', async (c) => {
       SELECT d.id, d.brand, d.model, d.thickness, d.absorbency_adult,
         ROUND(AVG((r.absorption_score + r.fit_score + r.comfort_score + r.thickness_score + r.appearance_score + r.value_score) / 6.0), 1) as rating_avg,
         COUNT(r.id) as rating_count,
-        COALESCE(ROUND(AVG((f.looseness + 5 + f.softness + 5 + f.dryness + 5 + f.odor_control + 5 + f.quietness + 5) / 5.0), 0) as feeling_avg,
+        COALESCE(ROUND(AVG((f.looseness + 5 + f.softness + 5 + f.dryness + 5 + f.odor_control + 5 + f.quietness + 5) / 5.0), 1), 0) as feeling_avg,
         COUNT(DISTINCT f.id) as feeling_count
       FROM diapers d
       LEFT JOIN ratings r ON r.diaper_id = d.id

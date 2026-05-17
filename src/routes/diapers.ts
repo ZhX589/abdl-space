@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import type { Env, JWTPayload, Diaper, DiaperSize } from '../types/index.ts'
-import { query, queryOne } from '../lib/db.ts'
+import { query, queryOne, computeAvgScore } from '../lib/db.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
@@ -8,20 +8,6 @@ const diapers = new Hono<AppType>()
 
 const VALID_SORT = ['id', 'avg_score', 'rating_count', 'thickness']
 const JOIN_ALIAS_SORT = new Set(['avg_score', 'rating_count'])
-
-/**
- * Compute composite avg_score per API.md §6 formula:
- * IF feeling_count > 0:
- *   avg_score = round(rating_avg * 0.9 + feeling_avg * 0.1, 1)
- * ELSE:
- *   avg_score = round(rating_avg, 1)
- */
-function computeAvgScore(ratingAvg: number, _ratingCount: number, feelingAvg: number | null, feelingCount: number): number {
-  if (feelingCount > 0 && feelingAvg !== null) {
-    return Math.round((ratingAvg * 0.9 + (feelingAvg + 5) * 0.1) * 10) / 10
-  }
-  return Math.round(ratingAvg * 10) / 10
-}
 
 /**
  * GET /api/diapers — 纸尿裤列表，支持搜索/筛选/排序/分页

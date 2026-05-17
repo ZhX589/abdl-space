@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import type { Env, JWTPayload } from '../types/index.ts'
-import { query, queryOne } from '../lib/db.ts'
+import { query, queryOne, computeAvgScore } from '../lib/db.ts'
 import { authMiddleware } from '../middleware/auth.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
@@ -21,13 +21,6 @@ interface DiaperInfo {
   avg_score: number
   rating_count: number
   absorbency_adult: string
-}
-
-function computeAvgScore(ratingAvg: number, _ratingCount: number, feelingAvg: number | null, feelingCount: number): number {
-  if (feelingCount > 0 && feelingAvg !== null) {
-    return Math.round((ratingAvg * 0.9 + (feelingAvg + 5) * 0.1) * 10) / 10
-  }
-  return Math.round(ratingAvg * 10) / 10
 }
 
 const recommend = new Hono<AppType>()

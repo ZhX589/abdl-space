@@ -1,6 +1,20 @@
 import type { D1Database } from '@cloudflare/workers-types'
 
 /**
+ * Compute composite avg_score per API.md §6 formula:
+ * IF feeling_count > 0:
+ *   avg_score = round(rating_avg × 0.9 + feeling_avg × 0.1, 1)
+ * ELSE:
+ *   avg_score = round(rating_avg, 1)
+ */
+export function computeAvgScore(ratingAvg: number, _ratingCount: number, feelingAvg: number | null, feelingCount: number): number {
+  if (feelingCount > 0 && feelingAvg !== null) {
+    return Math.round((ratingAvg * 0.9 + feelingAvg * 0.1) * 10) / 10
+  }
+  return Math.round(ratingAvg * 10) / 10
+}
+
+/**
  * 执行 D1 查询并返回结果行
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

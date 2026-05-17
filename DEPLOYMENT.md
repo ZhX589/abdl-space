@@ -142,49 +142,53 @@ curl https://<your-project>.pages.dev/api/diapers
 | A1 `feat/backend-core` — Hono + D1 + 类型 | 代码 | ✅ |
 | A2 `feat/auth` — JWT 注册/登录 + 中间件 | 代码 | ✅ |
 | A3 `feat/schema-v2` — Schema + API.md | 文档 | ✅ |
+| A4 `feat/auth-v2` — PATCH /api/users/me + 用户资料扩展 | 代码 | ✅ |
 | A5 `feat/diapers-api` — 5 个 API 端点 | 代码 | ✅ |
 | B1 `feat/frontend-shell` — 路由 + 布局 + 主题 | 代码 | ✅ |
 | B2 `feat/frontend-fix` — router.tsx + index.css + api.ts + utils.ts | 代码 | ✅ |
-| A4 `feat/auth-v2` — PATCH /api/users/me + 用户资料扩展 | 代码 | ⬜ |
 
-### v0.2.0 — Wiki + 评分展示 + 评论区
+### v0.2.0 — Wiki + 评分展示 + 评论区（✅ 已完成）
 
-| 任务 | 类型 | 操作 |
-|:---|:---|:---|
-| A6 `feat/wiki-api` | 代码 | PR 合并到 dev → 自动部署 |
-| A7 `feat/routes-refactor` | 代码 | PR 合并到 dev → 自动部署 |
-| B3 `feat/diapers-ui` | 代码 | PR 合并到 dev → 自动部署 |
-| B4 `feat/wiki-ui` | 代码 | PR 合并到 dev → 自动部署 |
-| B5 `feat/diaper-comments` | 代码 | PR 合并到 dev → 自动部署 |
+| 任务 | 类型 | 状态 |
+|:---|:---|:---:|
+| A6 `feat/wiki-api` — Wiki CRUD + 段评 API | 代码 | ✅ |
+| A7 `feat/routes-refactor` — 路由拆分到 src/routes/ | 代码 | ✅ |
+| B3 `feat/diapers-ui` — 纸尿裤列表/详情/筛选 | 代码 | ✅ |
+| B4 `feat/wiki-ui` — Wiki 列表/阅读/编辑 + 段评 | 代码 | ✅ |
+| B5 `feat/diaper-comments` — 条目底部评论区 | 代码 | ✅ |
 
 > 所有表已在 v0.1.0 建立，**无需 schema 变更**。纯代码部署。
 
-### v0.3.0 — 排行榜 + 对比 + 搜索 + 术语
+### v0.3.0 — 排行榜 + 对比 + 搜索 + 术语（✅ 已完成）
 
-| 任务 | 类型 | 操作 |
-|:---|:---|:---|
-| A8 `feat/rankings-api` | 代码 | PR 合并到 dev → 自动部署 |
-| A9 `feat/compare-api` | 代码 | PR 合并到 dev → 自动部署 |
-| A10 `feat/search-api` | 代码 + 可能 Schema | 见下方说明 |
-| A11 `feat/terms-api` | 代码 | PR 合并到 dev → 自动部署 |
-| B6-B9 前端页面 | 代码 | PR 合并到 dev → 自动部署 |
+| 任务 | 类型 | 状态 |
+|:---|:---|:---:|
+| A8 `feat/rankings-api` — 综合排行榜 | 代码 | ✅ |
+| A9 `feat/compare-api` — 纸尿裤对比 | 代码 | ✅ |
+| A10 `feat/search-api` — 统一搜索 API | 代码 | ✅ |
+| A11 `feat/terms-api` — 术语百科 CRUD | 代码 | ✅ |
+| B6 `feat/rankings-compare-ui` — 排行榜页面 | 代码 | ✅ |
+| B7 `feat/compare-ui` — 纸尿裤对比页面 | 代码 | ✅ |
+| B8 `feat/search-terms-ui` — 搜索框 + 搜索结果页 | 代码 | ✅ |
+| B9 `feat/search-terms-ui` — 术语百科页 | 代码 | ✅ |
 
-> **搜索 (A10) 注意**: 如果使用 D1 FTS（全文搜索），需要先创建 FTS 虚拟表，再部署代码。
+### v0.4.0 — 猜你喜欢 + 版本历史 + 富文本 + AI推荐（✅ 已完成）
 
-### v0.4.0 — 猜你喜欢 + 版本历史 + 富文本
+| 任务 | 类型 | 状态 |
+|:---|:---|:---:|
+| A12 `feat/guess-api` — 猜你喜欢（纯数据驱动） | 代码 | ✅ |
+| A13 `feat/wiki-versions-api` — Wiki 版本历史 + 回滚 | 代码 | ✅ |
+| A14 `feat/rich-editor` — 富文本/Markdown 编辑器（后端存根） | 代码 | ✅ |
+| B10 `feat/guess-ui` — 猜你喜欢展示 | 代码 | ✅ |
+| B11 `feat/wiki-versions-ui` — 版本历史对比 UI + 回滚 | 代码 | ✅ |
+| B12 `feat/rich-editor-ui` — 富文本编辑器组件 | 代码 | ✅ |
+| `feat/ai-recommend` — DeepSeek AI 推荐 + api_keys 表 | 代码 | ✅ |
+| API Key 管理页面 | 前端页面 | ✅ |
+| 频率限制 + 安全加固 | 代码 | ✅ |
+| R2 Bucket | wrangler.jsonc + Dashboard | ❌ 未规划 |
+| 频率限制 + 安全加固 | 代码 | ✅ |
 
-| 任务 | 类型 | 操作 |
-|:---|:---|:---|
-| A12 `feat/guess-api` | 代码 | PR 合并到 dev → 自动部署 |
-| A13 `feat/versions-api` | 代码 | PR 合并到 dev → 自动部署 |
-| A14 `feat/rich-editor` | 代码 | PR 合并到 dev → 自动部署 |
-| B10-B12 前端页面 | 代码 | PR 合并到 dev → 自动部署 |
-| AI_API_KEY | Secret | 需要手动设置 |
-| R2 Bucket | wrangler.jsonc + Dashboard | 需要手动配置 |
-
-> **AI 推荐**: 部署代码前先设置 `AI_API_KEY` Secret，再在 Dashboard 重新部署。
->
-> **R2 存储**: 先在 Dashboard 创建 R2 bucket，更新 `wrangler.jsonc` 添加 binding，再部署代码。
+> ⚠️ **AI 推荐**: 需要管理员在 `/api_set` 页面设置 DeepSeek API Key 后才能使用 AI 推荐功能。
 
 ## 5. 部署顺序规则
 
@@ -243,7 +247,7 @@ npx wrangler d1 execute abdl-space-db --remote --command "<逆向SQL>"
 | Pages 项目 | `abdl-space` |
 | D1 数据库 | `abdl-space-db` (id: `159f81ba-ea32-4667-a3ce-d72cb1659d93`) |
 | Production 分支 | `dev` |
-| 当前 commit (main/dev) | `23569c2` |
+| 当前 commit (main/dev) | `64118fd` |
 | 构建命令 | `npm run build` |
 | 输出目录 | `dist` |
 | 本地 API 端口 | `8787` (`npm run api`) |
@@ -267,8 +271,8 @@ npx wrangler d1 execute abdl-space-db --remote --command "<逆向SQL>"
 ### Git 分支状态
 
 ```
-main  @ 23569c2                     ← 当前所在
-dev   @ 23569c2 (已同步)             ← Cloudflare Pages production 分支
+main  @ 64118fd                     ← 当前所在
+dev   @ 64118fd (已同步)             ← Cloudflare Pages production 分支
 ```
 
 > 已删除远程/本地: `feat/diapers-api`、`feat/frontend-fix`
@@ -289,6 +293,30 @@ dev   @ 23569c2 (已同步)             ← Cloudflare Pages production 分支
 | - | ROADMAP.md B2 标记 ✅ + API.md 端口修正 | - | ✅ |
 | - | docs: DEPLOYMENT.md 更新清单和日志 | `23569c2` | ✅ |
 | - | Production 部署验证: `/api/health` + `/api/health/db` + `/api/diapers` OK | `23569c2` | ✅ |
+
+### 2026-05-14 — v0.2.0 ~ v0.4.0 功能完成
+
+| 时间 | 操作 | Commit | 状态 |
+|:---|:---|:---|:---:|
+| - | fix: sort=rating_count 500错误 + avg_score公式修正 + admin端点 + 输入校验 | `ce68bea` | ✅ |
+| - | fix: 17个TS build errors修复 | `7ef75d4` | ✅ |
+| - | feat: Wiki版本历史API+UI (A13+B11) | `788f156` + `c65be71` | ✅ |
+| - | feat: Markdown富文本编辑器UI (A14+B12) | `831b371` | ✅ |
+| - | feat: 排行榜页面UI (B6) — 4类型切换 + 分维度切换 | `48aa9f7` | ✅ |
+| - | feat: 统一搜索API (A10) — diapers + wiki + terms | `93bd256` | ✅ |
+| - | feat: 纸尿裤对比页面UI (B7) — 可视化表格 + 最优高亮 | `c305dc7` | ✅ |
+| - | feat: 搜索结果页 + 术语百科页 (B8+B9) | `b715b00` | ✅ |
+| - | docs: ROADMAP 更新所有完成项 | `15e624e` | ✅ |
+
+### 2026-05-16 — 安全加固 + AI推荐 + 频率限制
+
+| 时间 | 操作 | Commit | 状态 |
+|:---|:---|:---|:---:|
+| - | fix: JWT httpOnly Cookie + 严格CORS + 密码复杂度校验 + Cookie鉴权兜底 | `4289b1a` | ✅ |
+| - | feat: DeepSeek AI推荐 + api_keys表 + /api_set管理页面 | `960489a` | ✅ |
+| - | fix: rate limiting on auth端点 + 错误信息脱敏 | `6e92a4d` | ✅ |
+| - | fix: avg_score计算统一 + GET /api/terms/:id + admin ban endpoint | `bfef0f0` | ✅ |
+| - | docs: ROADMAP 更新 A14 ✅ + bug fixes logged | `64118fd` | ✅ |
 
 ## 10. 常见问题
 

@@ -88,7 +88,7 @@ terms.post('/', adminMiddleware, async (c) => {
   const body = await c.req.json<CreateTermRequest>()
   const { term, abbreviation, definition, category } = body
 
-  if (!term || term.length > 50) {
+  if (!term || typeof term !== 'string' || term.length < 1 || term.length > 50) {
     return c.json({ error: 'Term must be 1-50 characters' }, 400)
   }
   if (!definition || definition.length < 10 || definition.length > 2000) {
