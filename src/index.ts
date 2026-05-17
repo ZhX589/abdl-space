@@ -32,6 +32,8 @@ app.use('*', logger())
 const ALLOWED_ORIGINS = [
   'http://localhost:5173',
   'https://wiki.abdl-space.top',
+  'https://www.abdl-space.top',
+  'https://abdl-space.top',
 ]
 
 async function corsWithOrigin(c: Context<AppType>, next: Next) {
