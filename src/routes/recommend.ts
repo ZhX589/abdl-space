@@ -230,7 +230,7 @@ recommend.get('/guess', async (c) => {
     `SELECT d.id, d.brand, d.model, d.thickness,
       ROUND(AVG((r.absorption_score + r.fit_score + r.comfort_score + r.thickness_score + r.appearance_score + r.value_score) / 6.0), 1) as rating_avg,
       COUNT(r.id) as rating_count,
-      COALESCE(ROUND(AVG((f.looseness + 5 + f.softness + 5 + f.dryness + 5 + f.odor_control + 5 + f.quietness + 5) / 5.0), 0) as feeling_avg,
+      ROUND(COALESCE(AVG((f.looseness + 5 + f.softness + 5 + f.dryness + 5 + f.odor_control + 5 + f.quietness + 5) / 5.0), 0), 0) as feeling_avg,
       COUNT(DISTINCT f.id) as feeling_count
      FROM diapers d
      LEFT JOIN ratings r ON r.diaper_id = d.id
