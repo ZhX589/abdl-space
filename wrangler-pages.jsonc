@@ -15,5 +15,8 @@
 	"upload_source_maps": true,
 	"compatibility_flags": [
 		"nodejs_compat"
-	]
+	],
+	"vars": {
+		"VITE_API_BASE_URL": "https://api.abdl-space.top"
+	}
 }
