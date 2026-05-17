@@ -1,0 +1,19 @@
+/**
+ * Pages config for frontend (wiki.abdl-space.top)
+ * Cloudflare Pages — 纯静态托管，不含 API Functions
+ *
+ * 生产部署: npm run deploy:pages 或直接 push dev 分支
+ */
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "abdl-space",
+	"compatibility_date": "2026-05-07",
+	"pages_build_output_dir": "./dist",
+	"observability": {
+		"enabled": true
+	},
+	"upload_source_maps": true,
+	"compatibility_flags": [
+		"nodejs_compat"
+	]
+}

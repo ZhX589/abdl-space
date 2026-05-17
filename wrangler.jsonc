@@ -1,19 +1,31 @@
 /**
- * Pages config for frontend (wiki.abdl-space.top)
- * Cloudflare Pages — 纯静态托管，不含 API Functions
+ * Workers config for API (api.abdl-space.top)
+ * Hono 后端独立部署到 Cloudflare Workers
  *
- * 生产部署: npm run deploy:pages 或直接 push dev 分支
+ * 本地开发: npm run api
+ * 生产部署: npm run deploy:api
+ * 设置密钥: npx wrangler secret put JWT_SECRET --name abdl-space-api
  */
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
-	"name": "abdl-space",
+	"name": "abdl-space-api",
+	"main": "src/api-worker.ts",
 	"compatibility_date": "2026-05-07",
-	"pages_build_output_dir": "./dist",
 	"observability": {
 		"enabled": true
 	},
 	"upload_source_maps": true,
 	"compatibility_flags": [
 		"nodejs_compat"
-	]
+	],
+	"d1_databases": [
+		{
+			"binding": "abdl_space_db",
+			"database_name": "abdl-space-db",
+			"database_id": "159f81ba-ea32-4667-a3ce-d72cb1659d93"
+		}
+	],
+	"vars": {
+		"FRONTEND_ORIGIN": "https://wiki.abdl-space.top"
+	}
 }

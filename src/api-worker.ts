@@ -2,8 +2,7 @@
  * API Worker 独立入口
  * 用于部署到 api.abdl-space.top (Cloudflare Workers)
  *
- * 部署命令:
- *   npx wrangler deploy --config wrangler-api.jsonc
+ * 部署命令: npm run deploy:api
  */
 import app from './index'
 import type { Env, JWTPayload } from './types/index'

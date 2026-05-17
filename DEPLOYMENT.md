@@ -28,6 +28,8 @@
 
 **触发**: 推送到 `dev` 分支（直接 push 或合并 PR）
 
+> ⚠️ **Pages Dashboard 设置**: 构建命令必须为 `npm run build && wrangler pages deploy --config wrangler-pages.jsonc`（指定 Pages 配置，避免与 Worker 默认配置冲突）
+
 Cloudflare Pages 自动执行：
 1. `npm install`
 2. `npm run build`（tsc + vite build → `dist/`）
@@ -35,16 +37,12 @@ Cloudflare Pages 自动执行：
 
 ### 2.2 后端 API 部署（手动）
 
-**触发**: 后端代码变更后手动部署
+**触发**: Workers 项目 `abdl-space-api` 连接 GitHub → 构建命令 `npm run deploy:api`
+
+> Workers 自动读取默认配置 `wrangler.jsonc`（`name: "abdl-space-api"`），无需额外指定。
 
 ```bash
 npm run deploy:api
-```
-
-或指定配置：
-
-```bash
-npx wrangler deploy --config wrangler-api.jsonc
 ```
 
 ### 2.3 数据库 Schema 部署（手动）
