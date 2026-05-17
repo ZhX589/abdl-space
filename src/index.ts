@@ -30,8 +30,19 @@ app.use('*', corsWithOrigin)
 app.use('*', logger())
 
 async function corsWithOrigin(c: Context<AppType>, next: Next) {
-  const origin = c.env.FRONTEND_ORIGIN || 'http://localhost:5173'
-  const corsFn = cors({ origin, credentials: true })
+  const allowedOrigins = [
+    'http://localhost:5173',
+    'https://wiki.abdl-space.top',
+    'http://localhost:8787',
+  ]
+  const origin = c.req.header('origin') || ''
+  const isAllowed = allowedOrigins.includes(origin) || allowedOrigins.some(o => origin.endsWith(o.replace('https://', '').replace('http://', '')))
+  const corsFn = cors({
+    origin: isAllowed ? origin : allowedOrigins[0],
+    credentials: true,
+    allowHeaders: ['Content-Type', 'Authorization'],
+    allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  })
   return corsFn(c, next)
 }
 

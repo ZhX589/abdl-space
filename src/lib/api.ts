@@ -21,7 +21,7 @@ import type {
   UpdateUserRequest,
 } from '../types/index.ts'
 
-const BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8787'
+const BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8787'
 
 // === 通用工具 ===
 
@@ -36,7 +36,6 @@ async function fetchApi<T>(
   const url = `${BASE_URL}${endpoint}`
   const response = await fetch(url, {
     ...options,
-    credentials: 'include',
     headers: {
       'Content-Type': 'application/json',
       ...options.headers,

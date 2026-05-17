@@ -1,0 +1,32 @@
+/**
+ * Wrangler config for API Worker (api.abdl-space.top)
+ * 后端 API 独立部署到 Cloudflare Workers
+ */
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "abdl-space-api",
+	"compatibility_date": "2026-05-07",
+	"observability": {
+		"enabled": true
+	},
+	"upload_source_maps": true,
+	"compatibility_flags": [
+		"nodejs_compat"
+	],
+	"d1_databases": [
+		{
+			"binding": "abdl_space_db",
+			"database_name": "abdl-space-db",
+			"database_id": "159f81ba-ea32-4667-a3ce-d72cb1659d93"
+		}
+	],
+	"vars": {
+		"FRONTEND_ORIGIN": "https://wiki.abdl-space.top"
+	},
+	"secrets": [
+		{
+			"name": "JWT_SECRET",
+			"description": "JWT signing secret - generate with: openssl rand -base64 32"
+		}
+	]
+}

@@ -4,33 +4,50 @@
 
 ## 1. 部署架构概述
 
-| 组件 | 平台 | 触发方式 |
-|:---|:---|:---|
-| 前端 + Workers API | Cloudflare Pages | 推送到 `dev` 分支 → 自动构建部署 |
-| D1 数据库 | Cloudflare D1 | 手动 `wrangler d1 execute --remote` |
-| 环境变量 / 密钥 | Cloudflare Pages Secrets | 手动 `wrangler pages secret put` 或 Dashboard |
+### 当前架构（前后端分离）
 
-- **Pages 项目名**: `abdl-space`
-- **Production 分支**: `dev`（推送即触发部署）
-- **构建命令**: `npm run build`
-- **输出目录**: `dist`
-- **Functions 目录**: `functions/`（`functions/api/[[route]].ts` 作为 Workers 入口）
+| 组件 | 域名 | 平台 | 触发方式 |
+|:---|:---|:---|:---|
+| 前端 (Wiki) | `wiki.abdl-space.top` | Cloudflare Pages | 推送到 `dev` 分支 → 自动构建 |
+| 后端 (API) | `api.abdl-space.top` | Cloudflare Workers | 手动 `wrangler deploy` |
+| D1 数据库 | — | Cloudflare D1 | 手动 `wrangler d1 execute --remote` |
+| 环境变量 / 密钥 | — | Cloudflare Workers Secrets | 手动 `wrangler secret put` |
+
+- **Pages 项目名**: `abdl-space`（前端）
+- **Workers 项目名**: `abdl-space-api`（后端 API）
+- **Production 分支**: `dev`（前端自动部署）
 - **D1 数据库**: `abdl-space-db`（binding 名 `abdl_space_db`）
+
+### 旧架构（已废弃）
+
+前端和后端都部署在同一个 Cloudflare Pages 项目里，通过 `functions/` 目录提供 API。
 
 ## 2. 部署类型与触发条件
 
-### 2.1 代码部署（自动）
+### 2.1 前端部署（自动）
 
 **触发**: 推送到 `dev` 分支（直接 push 或合并 PR）
 
 Cloudflare Pages 自动执行：
 1. `npm install`
 2. `npm run build`（tsc + vite build → `dist/`）
-3. 部署前端静态资源 + Functions
+3. 部署前端静态资源到 `wiki.abdl-space.top`
 
-**无需手动操作**，只需确保代码已合并到 `dev`。
+### 2.2 后端 API 部署（手动）
 
-### 2.2 数据库 Schema 部署（手动）
+**触发**: 后端代码变更后手动部署
+
+```bash
+npm run deploy:api
+```
+
+或指定配置：
+
+```bash
+npx wrangler deploy --config wrangler-api.jsonc
+```
+
+### 2.3 数据库 Schema 部署（手动）
 
 **触发**: `schemas/schema.sql` 有变更（新增表、新字段、新索引、FTS 虚拟表等）
 
@@ -42,7 +59,7 @@ npx wrangler d1 execute abdl-space-db --remote --file schemas/schema.sql
 
 **必须在依赖新 schema 的代码部署之前执行**，否则新代码会因查不到表/字段而报错。
 
-### 2.3 种子数据部署（手动）
+### 2.4 种子数据部署（手动）
 
 **触发**: `schemas/seeds/` 目录下新增或更新了 SQL 文件
 
@@ -52,17 +69,25 @@ npx wrangler d1 execute abdl-space-db --remote --file schemas/seeds/<name>.sql
 
 种子数据可在代码部署前后任意时间执行，不影响已有功能。
 
-### 2.4 环境变量 / 密钥部署（手动）
+### 2.5 环境变量 / 密钥部署（手动）
 
 **触发**: 新增或修改了密钥（如 `JWT_SECRET`、`AI_API_KEY` 等）
 
+**Workers API (api.abdl-space.top):**
+
 ```bash
-echo "your-secret-value" | npx wrangler pages secret put <KEY_NAME> --project-name abdl-space
+echo "your-secret-value" | npx wrangler secret put JWT_SECRET --name abdl-space-api
+```
+
+**前端 (wiki.abdl-space.top):**
+
+```bash
+echo "https://api.abdl-space.top" | npx wrangler pages secret put API_BASE_URL --project-name abdl-space
 ```
 
 或在 Cloudflare Dashboard: **Workers & Pages → abdl-space → Settings → Variables and Secrets**。
 
-**必须在依赖该密钥的代码部署之前设置**。设置后需要**重新部署**才会被 Functions 读取（在 Dashboard 中点击 Retry deploy，或推送任意 commit 到 `dev`）。
+设置后需要**重新部署**才会生效。
 
 ## 3. 首次部署完整流程
 

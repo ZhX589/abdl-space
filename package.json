@@ -10,6 +10,8 @@
     "lint": "eslint .",
     "preview": "npm run build && wrangler pages dev --port 8787",
     "deploy": "npm run build && wrangler pages deploy",
+    "deploy:api": "npx wrangler deploy --config wrangler-api.jsonc",
+    "deploy:pages": "npm run build && wrangler pages deploy",
     "cf-typegen": "wrangler types"
   },
   "dependencies": {
