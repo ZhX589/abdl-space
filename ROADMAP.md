@@ -52,12 +52,13 @@ gitGraph
 
 ## 版本规划
 
-| 版本 | 目标 | 核心端点 |
-| :--- | :--- | :--- |
-| **v0.1.0** | Schema 重构 + Auth 更新 + 纸尿裤数据 + 前端基础修复 | auth (改) + diapers + seeds |
-| **v0.2.0** | Wiki CRUD + 评分展示 + 条目底部评论区 | wiki + wiki_inline_comments + ratings(展示) + post_comments(条目页) |
-| **v0.3.0** | 排行榜 + 对比 + 搜索 + 术语 | rankings + compare + search + terms |
-| **v0.4.0** | 猜你喜欢 + 版本历史 + 富文本 | guess + page_versions + rich editor |
+| 版本 | 目标 | 核心端点 | 状态 |
+| :--- | :--- | :--- | :--- |
+| **v0.1.0** | Schema 重构 + Auth 更新 + 纸尿裤数据 + 前端基础修复 | auth (改) + diapers + seeds | ✅ 完成 |
+| **v0.2.0** | Wiki CRUD + 评分展示 + 条目底部评论区 | wiki + wiki_inline_comments + ratings(展示) + post_comments(条目页) | ✅ 完成 |
+| **v0.3.0** | 排行榜 + 对比 + 搜索 + 术语 | rankings + compare + search + terms | ✅ 完成 |
+| **v0.4.0** | 猜你喜欢 + 版本历史 + 富文本 + AI推荐 | guess + page_versions + rich editor + DeepSeek AI | ✅ 完成 |
+| **v0.5.0** | 待规划 | - | ⬜ 待定 |
 
 ---
 
@@ -184,7 +185,7 @@ git push origin feat/你的分支名
 
 ## Bug 修复 & 新增端点
 
-### v0.1.x 补丁
+### v0.1.0 ~ v0.4.0 补丁（全部已合并到 dev）
 
 | 日期 | 分支 | 修改 | 状态 |
 |:---:|:---|:---|:---:|
@@ -207,6 +208,13 @@ git push origin feat/你的分支名
 | 2026-05-16 | `fix/ratelimit-error` | P3: 频率限制（auth/login + auth/register，5次/分钟/IP）+ 错误信息脱敏（DB 错误不暴露） | ✅ |
 | 2026-05-16 | `fix/complete-all` | fix: avg_score 计算修正（rankings + search + recommend 使用统一的 computeAvgScore 函数） | ✅ |
 | 2026-05-16 | `fix/complete-all` | fix: GET /api/terms/:id 缺失实现 + admin ban endpoint 实现（动态添加 banned 列） | ✅ |
+| 2026-05-17 | `fix/prod-bugs` | fix: SQL语法错误 (COALESCE ROUND 0→1) + computeAvgScore统一 + terms验证 | ✅ |
+
+### 生产环境问题
+
+| 日期 | 问题 | 状态 |
+|:---:|:---|:---:|
+| 2026-05-17 | 部分端点 404（/api/rankings, /api/search, /api/terms, /api/pages 等）| ⚠️ 调查中 |
 
 ### 默认管理员账号
 
