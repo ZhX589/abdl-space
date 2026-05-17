@@ -29,21 +29,22 @@ const app = new Hono<AppType>()
 app.use('*', corsWithOrigin)
 app.use('*', logger())
 
+const ALLOWED_ORIGINS = [
+  'http://localhost:5173',
+  'https://wiki.abdl-space.top',
+]
+
 async function corsWithOrigin(c: Context<AppType>, next: Next) {
-  const allowedOrigins = [
-    'http://localhost:5173',
-    'https://wiki.abdl-space.top',
-    'http://localhost:8787',
-  ]
-  const origin = c.req.header('origin') || ''
-  const isAllowed = allowedOrigins.includes(origin) || allowedOrigins.some(o => origin.endsWith(o.replace('https://', '').replace('http://', '')))
-  const corsFn = cors({
-    origin: isAllowed ? origin : allowedOrigins[0],
+  const incomingOrigin = c.req.header('origin') || ''
+  const allowed = ALLOWED_ORIGINS.includes(incomingOrigin)
+    ? incomingOrigin
+    : ALLOWED_ORIGINS[0]
+  return cors({
+    origin: allowed,
     credentials: true,
     allowHeaders: ['Content-Type', 'Authorization'],
     allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  })
-  return corsFn(c, next)
+  })(c, next)
 }
 
 app.get('/', (c) => c.json({ message: 'ABDL Space API' }))

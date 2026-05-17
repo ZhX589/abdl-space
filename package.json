@@ -5,12 +5,11 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "api": "wrangler pages dev --port 8787",
+    "api": "wrangler dev --config wrangler-api.jsonc --port 8787",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
-    "preview": "npm run build && wrangler pages dev --port 8787",
-    "deploy": "npm run build && wrangler pages deploy",
-    "deploy:api": "npx wrangler deploy --config wrangler-api.jsonc",
+    "preview": "npm run build && npm run api",
+    "deploy:api": "wrangler deploy --config wrangler-api.jsonc",
     "deploy:pages": "npm run build && wrangler pages deploy",
     "cf-typegen": "wrangler types"
   },

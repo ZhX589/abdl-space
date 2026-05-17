@@ -79,15 +79,14 @@ npx wrangler d1 execute abdl-space-db --remote --file schemas/seeds/<name>.sql
 echo "your-secret-value" | npx wrangler secret put JWT_SECRET --name abdl-space-api
 ```
 
-**前端 (wiki.abdl-space.top):**
+**前端 (wiki.abdl-space.top) — 设置 API 地址环境变量:**
 
-```bash
-echo "https://api.abdl-space.top" | npx wrangler pages secret put API_BASE_URL --project-name abdl-space
-```
+在 Cloudflare Dashboard: **Workers & Pages → abdl-space → Settings → Environment variables**
+添加:
+- Variable name: `VITE_API_BASE_URL`
+- Value: `https://api.abdl-space.top`
 
-或在 Cloudflare Dashboard: **Workers & Pages → abdl-space → Settings → Variables and Secrets**。
-
-设置后需要**重新部署**才会生效。
+设置后需要在 Dashboard 中点击 **Retry deploy** 重新部署才会生效。
 
 ## 3. 首次部署完整流程
 
@@ -142,15 +141,16 @@ git push origin dev
 ### Step 6: 验证
 
 ```bash
-# 替换为实际域名
-curl https://<your-project>.pages.dev/api/health
+# 验证 API Worker
+curl https://api.abdl-space.top/api/health
 # 期望: {"status":"ok","timestamp":"..."}
 
-curl https://<your-project>.pages.dev/api/health/db
-# 期望: {"status":"ok","db":{"ok":1}}
-
-curl https://<your-project>.pages.dev/api/diapers
+curl https://api.abdl-space.top/api/diapers
 # 期望: 返回 11 条纸尿裤数据
+
+# 验证前端
+curl https://wiki.abdl-space.top
+# 期望: 返回 HTML 页面
 ```
 
 ## 4. 各版本部署检查清单
@@ -243,9 +243,9 @@ curl https://<your-project>.pages.dev/api/diapers
 ### 验证部署
 
 ```bash
-curl https://<your-project>.pages.dev/api/health
-curl https://<your-project>.pages.dev/api/health/db
-curl https://<your-project>.pages.dev/api/diapers
+curl https://api.abdl-space.top/api/health
+curl https://api.abdl-space.top/api/diapers
+curl https://wiki.abdl-space.top
 ```
 
 ## 7. 回滚方案
@@ -268,16 +268,16 @@ npx wrangler d1 execute abdl-space-db --remote --command "<逆向SQL>"
 
 | 项 | 值 |
 |:---|:---|
-| 生产域名 (latest) | `https://f0614066.abdl-space.pages.dev` |
-| Pages 项目 | `abdl-space` |
+| 前端域名 | `https://wiki.abdl-space.top` |
+| API 域名 | `https://api.abdl-space.top` |
+| Pages 项目 | `abdl-space` (前端) |
+| Workers 项目 | `abdl-space-api` (API) |
 | D1 数据库 | `abdl-space-db` (id: `159f81ba-ea32-4667-a3ce-d72cb1659d93`) |
-| Production 分支 | `dev` |
-| 当前 commit (main) | `64118fd` |
-| 当前 commit (dev) | `d5184be` |
+| Production 分支 | `dev` (前端自动部署) |
 | 构建命令 | `npm run build` |
 | 输出目录 | `dist` |
-| 本地 API 端口 | `8787` (`npm run api`) |
-| 本地前端端口 | `5173` (`npm run dev`) |
+| 本地 API 端口 | `8787` (`npm run api` → Worker dev) |
+| 本地前端端口 | `5173` (`npm run dev` → Vite) |
 
 ## 9. 部署日志
 
