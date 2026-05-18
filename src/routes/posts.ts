@@ -42,7 +42,7 @@ posts.get('/', async (c) => {
   const offset = (page - 1) * limit
   const rows = await query<Record<string, unknown>>(
     c.env.abdl_space_db,
-    `SELECT p.id, p.user_id, p.content, p.diaper_id, p.pinned, p.created_at,
+    `SELECT p.id, p.user_id, p.content, p.diaper_id, p.pinned, p.repost_id, p.created_at,
             u.username, u.avatar, u.role,
             (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
             (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count
@@ -72,12 +72,39 @@ posts.get('/', async (c) => {
       [r.id]
     )
 
+    // 获取转发的原帖数据
+    let repost: Record<string, unknown> | null = null
+    if (r.repost_id) {
+      const origPost = await queryOne<Record<string, unknown>>(
+        c.env.abdl_space_db,
+        `SELECT p.id, p.user_id, p.content, p.created_at, u.username, u.avatar, u.role
+         FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`,
+        [r.repost_id]
+      )
+      if (origPost) {
+        const origImages = await query<{ image_url: string }>(
+          c.env.abdl_space_db,
+          'SELECT image_url FROM post_images WHERE post_id = ? ORDER BY sort_order',
+          [r.repost_id]
+        )
+        repost = {
+          id: origPost.id,
+          user: { id: origPost.user_id, username: origPost.username, avatar: origPost.avatar ?? null, role: origPost.role },
+          content: origPost.content,
+          images: origImages.map(img => ({ image_url: img.image_url })),
+          created_at: origPost.created_at
+        }
+      }
+    }
+
     return {
       id: r.id,
       user: { id: r.user_id, username: r.username, avatar: r.avatar ?? null, role: r.role },
       content: r.content,
       diaper_id: r.diaper_id ?? null,
       pinned: !!r.pinned,
+      repost_id: r.repost_id ?? null,
+      repost,
       like_count: r.like_count,
       has_liked: hasLiked,
       comment_count: r.comment_count,
@@ -176,6 +203,31 @@ posts.get('/:id', async (c) => {
     [postId]
   )
 
+  // 获取转发的原帖数据
+  let repost: Record<string, unknown> | null = null
+  if (post.repost_id) {
+    const origPost = await queryOne<Record<string, unknown>>(
+      c.env.abdl_space_db,
+      `SELECT p.id, p.user_id, p.content, p.created_at, u.username, u.avatar, u.role
+       FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`,
+      [post.repost_id]
+    )
+    if (origPost) {
+      const origImages = await query<{ image_url: string }>(
+        c.env.abdl_space_db,
+        'SELECT image_url FROM post_images WHERE post_id = ? ORDER BY sort_order',
+        [post.repost_id]
+      )
+      repost = {
+        id: origPost.id,
+        user: { id: origPost.user_id, username: origPost.username, avatar: origPost.avatar ?? null, role: origPost.role },
+        content: origPost.content,
+        images: origImages.map(img => ({ image_url: img.image_url })),
+        created_at: origPost.created_at
+      }
+    }
+  }
+
   return c.json({
     post: {
       id: post.id,
@@ -183,6 +235,8 @@ posts.get('/:id', async (c) => {
       content: post.content,
       diaper_id: post.diaper_id ?? null,
       pinned: !!post.pinned,
+      repost_id: post.repost_id ?? null,
+      repost,
       like_count: post.like_count,
       has_liked: hasLiked,
       comment_count: post.comment_count,
@@ -199,16 +253,26 @@ posts.get('/:id', async (c) => {
 posts.post('/', authMiddleware, async (c) => {
   const user = c.get('user')
   const body = await c.req.json<CreatePostRequest>()
-  const { content, diaper_id, images } = body
+  const { content, diaper_id, images, repost_id } = body
 
   if (!content || !content.trim() || content.length > 5000) {
     return c.json({ error: 'Content must be 1-5000 characters' }, 400)
   }
 
+  // 验证 repost_id 存在
+  if (repost_id) {
+    const origPost = await queryOne<{ id: number }>(
+      c.env.abdl_space_db,
+      'SELECT id FROM posts WHERE id = ?',
+      [repost_id]
+    )
+    if (!origPost) return c.json({ error: 'Repost target not found' }, 404)
+  }
+
   const result = await run(
     c.env.abdl_space_db,
-    'INSERT INTO posts (user_id, content, diaper_id) VALUES (?, ?, ?)',
-    [user.sub, content.trim(), diaper_id ?? null]
+    'INSERT INTO posts (user_id, content, diaper_id, repost_id) VALUES (?, ?, ?, ?)',
+    [user.sub, content.trim(), diaper_id ?? null, repost_id ?? null]
   )
 
   const postId = result.meta.last_row_id
@@ -220,6 +284,22 @@ posts.post('/', authMiddleware, async (c) => {
         c.env.abdl_space_db,
         'INSERT INTO post_images (post_id, image_url, sort_order) VALUES (?, ?, ?)',
         [postId, images[i], i]
+      )
+    }
+  }
+
+  // 如果是转发，给原帖作者发通知
+  if (repost_id) {
+    const origPost = await queryOne<{ user_id: number }>(
+      c.env.abdl_space_db,
+      'SELECT user_id FROM posts WHERE id = ?',
+      [repost_id]
+    )
+    if (origPost && origPost.user_id !== user.sub) {
+      await run(
+        c.env.abdl_space_db,
+        'INSERT INTO notifications (user_id, type, message, related_id) VALUES (?, ?, ?, ?)',
+        [origPost.user_id, 'repost', `${user.username} 转发了你的帖子`, repost_id]
       )
     }
   }
@@ -247,27 +327,56 @@ posts.delete('/:id', authMiddleware, async (c) => {
 })
 
 /**
+ * PATCH /api/posts/:id — 编辑帖子
+ */
+posts.patch('/:id', authMiddleware, async (c) => {
+  const user = c.get('user')
+  const id = parseInt(c.req.param('id') || '')
+  const body = await c.req.json<{ content: string }>()
+
+  const post = await queryOne<{ id: number; user_id: number }>(
+    c.env.abdl_space_db, 'SELECT id, user_id FROM posts WHERE id = ?', [id]
+  )
+  if (!post) return c.json({ error: 'Post not found' }, 404)
+  if (user.role !== 'admin' && post.user_id !== user.sub) {
+    return c.json({ error: 'Not authorized' }, 403)
+  }
+
+  if (!body.content || !body.content.trim() || body.content.length > 5000) {
+    return c.json({ error: 'Content must be 1-5000 characters' }, 400)
+  }
+
+  await run(
+    c.env.abdl_space_db,
+    'UPDATE posts SET content = ? WHERE id = ?',
+    [body.content.trim(), id]
+  )
+
+  return c.json({ message: '已修改' })
+})
+
+/**
  * POST /api/posts/:id/comments — 发表评论
  */
 posts.post('/:id/comments', authMiddleware, async (c) => {
   const user = c.get('user')
   const postId = parseInt(c.req.param('id') || '')
 
-  const post = await queryOne<{ id: number }>(
-    c.env.abdl_space_db, 'SELECT id FROM posts WHERE id = ?', [postId]
+  const post = await queryOne<{ id: number; user_id: number }>(
+    c.env.abdl_space_db, 'SELECT id, user_id FROM posts WHERE id = ?', [postId]
   )
   if (!post) return c.json({ error: 'Post not found' }, 404)
 
-  const body = await c.req.json<{ content: string; parent_id?: number }>()
-  const { content, parent_id } = body
+  const body = await c.req.json<{ content: string; parent_id?: number; images?: string[] }>()
+  const { content, parent_id, images } = body
 
   if (!content || !content.trim() || content.length > 2000) {
     return c.json({ error: 'Content must be 1-2000 characters' }, 400)
   }
 
   if (parent_id) {
-    const parent = await queryOne<{ id: number }>(
-      c.env.abdl_space_db, 'SELECT id FROM post_comments WHERE id = ? AND post_id = ?', [parent_id, postId]
+    const parent = await queryOne<{ id: number; user_id: number }>(
+      c.env.abdl_space_db, 'SELECT id, user_id FROM post_comments WHERE id = ? AND post_id = ?', [parent_id, postId]
     )
     if (!parent) return c.json({ error: 'Parent comment not found' }, 400)
   }
@@ -278,7 +387,45 @@ posts.post('/:id/comments', authMiddleware, async (c) => {
     [postId, user.sub, parent_id ?? null, content.trim()]
   )
 
-  return c.json({ message: '评论成功', id: result.meta.last_row_id }, 201)
+  const commentId = result.meta.last_row_id
+
+  // 保存评论图片
+  if (images && images.length > 0) {
+    for (let i = 0; i < images.length; i++) {
+      await run(
+        c.env.abdl_space_db,
+        'INSERT INTO post_images (post_id, image_url, sort_order) VALUES (?, ?, ?)',
+        [commentId, images[i], i]
+      )
+    }
+  }
+
+  // 给帖子作者发通知（不给自己发）
+  if (post.user_id !== user.sub) {
+    await run(
+      c.env.abdl_space_db,
+      'INSERT INTO notifications (user_id, type, message, related_id) VALUES (?, ?, ?, ?)',
+      [post.user_id, 'comment', `${user.username} 评论了你的帖子`, postId]
+    )
+  }
+
+  // 如果是回复评论，给被回复者发通知
+  if (parent_id) {
+    const parentComment = await queryOne<{ user_id: number }>(
+      c.env.abdl_space_db,
+      'SELECT user_id FROM post_comments WHERE id = ?',
+      [parent_id]
+    )
+    if (parentComment && parentComment.user_id !== user.sub && parentComment.user_id !== post.user_id) {
+      await run(
+        c.env.abdl_space_db,
+        'INSERT INTO notifications (user_id, type, message, related_id) VALUES (?, ?, ?, ?)',
+        [parentComment.user_id, 'reply', `${user.username} 回复了你的评论`, postId]
+      )
+    }
+  }
+
+  return c.json({ message: '评论成功', id: commentId }, 201)
 })
 
 export default posts
