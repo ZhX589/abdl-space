@@ -50,6 +50,36 @@ likes.post('/', authMiddleware, async (c) => {
     'INSERT INTO likes (user_id, target_type, target_id) VALUES (?, ?, ?)',
     [user.sub, target_type, target_id]
   )
+
+  // 创建通知（不给自己发）
+  if (target_type === 'post') {
+    const post = await queryOne<{ user_id: number }>(
+      c.env.abdl_space_db,
+      'SELECT user_id FROM posts WHERE id = ?',
+      [target_id]
+    )
+    if (post && post.user_id !== user.sub) {
+      await run(
+        c.env.abdl_space_db,
+        'INSERT INTO notifications (user_id, type, message, related_id) VALUES (?, ?, ?, ?)',
+        [post.user_id, 'like', `${user.username} 赞了你的帖子`, target_id]
+      )
+    }
+  } else {
+    const comment = await queryOne<{ user_id: number; post_id: number }>(
+      c.env.abdl_space_db,
+      'SELECT user_id, post_id FROM post_comments WHERE id = ?',
+      [target_id]
+    )
+    if (comment && comment.user_id !== user.sub) {
+      await run(
+        c.env.abdl_space_db,
+        'INSERT INTO notifications (user_id, type, message, related_id) VALUES (?, ?, ?, ?)',
+        [comment.user_id, 'like', `${user.username} 赞了你的评论`, comment.post_id]
+      )
+    }
+  }
+
   return c.json({ liked: true })
 })
 
