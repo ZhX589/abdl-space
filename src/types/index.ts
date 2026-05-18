@@ -213,6 +213,7 @@ export interface CreateFeelingRequest {
 
 /** 创建帖子请求体 */
 export interface CreatePostRequest {
+  images?: string[]
   content: string
   diaper_id?: number
 }
