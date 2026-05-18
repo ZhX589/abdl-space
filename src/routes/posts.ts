@@ -3,6 +3,17 @@ import type { Env, JWTPayload, CreatePostRequest } from '../types/index.ts'
 import { query, queryOne, run } from '../lib/db.ts'
 import { authMiddleware } from '../middleware/auth.ts'
 
+
+// 安全查询帖子图片（post_images 表可能不存在）
+async function safeGetImages(db: D1Database, postId: number): Promise<{image_url: string}[]> {
+  try {
+    const result = await db.prepare('SELECT image_url FROM post_images WHERE post_id = ? ORDER BY sort_order').bind(postId).all();
+    return (result.results || []) as {image_url: string}[];
+  } catch {
+    return [];
+  }
+}
+
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
 const posts = new Hono<AppType>()
@@ -66,11 +77,7 @@ posts.get('/', async (c) => {
     }
 
     // 获取帖子图片
-    const images = await query<{ image_url: string }>(
-      c.env.abdl_space_db,
-      'SELECT image_url FROM post_images WHERE post_id = ? ORDER BY sort_order',
-      [r.id]
-    )
+    const images = await safeGetImages(c.env.abdl_space_db, r.id)
 
     // 获取转发的原帖数据
     let repost: Record<string, unknown> | null = null
@@ -82,11 +89,7 @@ posts.get('/', async (c) => {
         [r.repost_id]
       )
       if (origPost) {
-        const origImages = await query<{ image_url: string }>(
-          c.env.abdl_space_db,
-          'SELECT image_url FROM post_images WHERE post_id = ? ORDER BY sort_order',
-          [r.repost_id]
-        )
+        const origImages = await safeGetImages(c.env.abdl_space_db, r.repost_id)
         repost = {
           id: origPost.id,
           user: { id: origPost.user_id, username: origPost.username, avatar: origPost.avatar ?? null, role: origPost.role },
@@ -197,11 +200,7 @@ posts.get('/:id', async (c) => {
   }))
 
   // 获取帖子图片
-  const postImages = await query<{ image_url: string }>(
-    c.env.abdl_space_db,
-    'SELECT image_url FROM post_images WHERE post_id = ? ORDER BY sort_order',
-    [postId]
-  )
+  const postImages = await safeGetImages(c.env.abdl_space_db, postId)
 
   // 获取转发的原帖数据
   let repost: Record<string, unknown> | null = null
@@ -213,11 +212,7 @@ posts.get('/:id', async (c) => {
       [post.repost_id]
     )
     if (origPost) {
-      const origImages = await query<{ image_url: string }>(
-        c.env.abdl_space_db,
-        'SELECT image_url FROM post_images WHERE post_id = ? ORDER BY sort_order',
-        [post.repost_id]
-      )
+      const origImages = await safeGetImages(c.env.abdl_space_db, post.repost_id)
       repost = {
         id: origPost.id,
         user: { id: origPost.user_id, username: origPost.username, avatar: origPost.avatar ?? null, role: origPost.role },
