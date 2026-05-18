@@ -65,6 +65,13 @@ posts.get('/', async (c) => {
       hasLiked = (liked?.count ?? 0) > 0
     }
 
+    // 获取帖子图片
+    const images = await query<{ image_url: string }>(
+      c.env.abdl_space_db,
+      'SELECT image_url FROM post_images WHERE post_id = ? ORDER BY sort_order',
+      [r.id]
+    )
+
     return {
       id: r.id,
       user: { id: r.user_id, username: r.username, avatar: r.avatar ?? null, role: r.role },
@@ -74,6 +81,7 @@ posts.get('/', async (c) => {
       like_count: r.like_count,
       has_liked: hasLiked,
       comment_count: r.comment_count,
+      images: images.map(img => ({ image_url: img.image_url })),
       created_at: r.created_at
     }
   }))
@@ -161,6 +169,13 @@ posts.get('/:id', async (c) => {
     }
   }))
 
+  // 获取帖子图片
+  const postImages = await query<{ image_url: string }>(
+    c.env.abdl_space_db,
+    'SELECT image_url FROM post_images WHERE post_id = ? ORDER BY sort_order',
+    [postId]
+  )
+
   return c.json({
     post: {
       id: post.id,
@@ -171,6 +186,7 @@ posts.get('/:id', async (c) => {
       like_count: post.like_count,
       has_liked: hasLiked,
       comment_count: post.comment_count,
+      images: postImages.map(img => ({ image_url: img.image_url })),
       created_at: post.created_at
     },
     comments: commentsWithLikes
@@ -183,7 +199,7 @@ posts.get('/:id', async (c) => {
 posts.post('/', authMiddleware, async (c) => {
   const user = c.get('user')
   const body = await c.req.json<CreatePostRequest>()
-  const { content, diaper_id } = body
+  const { content, diaper_id, images } = body
 
   if (!content || !content.trim() || content.length > 5000) {
     return c.json({ error: 'Content must be 1-5000 characters' }, 400)
@@ -195,7 +211,20 @@ posts.post('/', authMiddleware, async (c) => {
     [user.sub, content.trim(), diaper_id ?? null]
   )
 
-  return c.json({ id: result.meta.last_row_id, message: '发布成功' }, 201)
+  const postId = result.meta.last_row_id
+
+  // 保存图片
+  if (images && images.length > 0) {
+    for (let i = 0; i < images.length; i++) {
+      await run(
+        c.env.abdl_space_db,
+        'INSERT INTO post_images (post_id, image_url, sort_order) VALUES (?, ?, ?)',
+        [postId, images[i], i]
+      )
+    }
+  }
+
+  return c.json({ id: postId, message: '发布成功' }, 201)
 })
 
 /**
