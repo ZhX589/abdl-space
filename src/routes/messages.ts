@@ -1,0 +1,143 @@
+import { Hono } from 'hono'
+import type { Env, JWTPayload } from '../types/index.ts'
+import { query, queryOne, run } from '../lib/db.ts'
+import { authMiddleware } from '../middleware/auth.ts'
+
+type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
+
+const messages = new Hono<AppType>()
+
+/**
+ * GET /api/messages/conversations — 对话列表
+ */
+messages.get('/conversations', authMiddleware, async (c) => {
+  const user = c.get('user')
+
+  const rows = await query<Record<string, unknown>>(
+    c.env.abdl_space_db,
+    `SELECT
+       CASE WHEN m.sender_id = ? THEN m.receiver_id ELSE m.sender_id END as other_user_id,
+       m.content as last_message,
+       m.created_at as last_message_at,
+       (SELECT COUNT(*) FROM messages
+        WHERE sender_id = other_user_id AND receiver_id = ? AND read = 0) as unread_count
+     FROM messages m
+     WHERE m.sender_id = ? OR m.receiver_id = ?
+     GROUP BY other_user_id
+     ORDER BY MAX(m.created_at) DESC`,
+    [user.sub, user.sub, user.sub, user.sub]
+  )
+
+  const conversations = await Promise.all(rows.map(async (r) => {
+    const otherUser = await queryOne<{ id: number; username: string; avatar: string | null }>(
+      c.env.abdl_space_db,
+      'SELECT id, username, avatar FROM users WHERE id = ?',
+      [r.other_user_id]
+    )
+    return {
+      user_id: r.other_user_id,
+      username: otherUser?.username || '未知用户',
+      avatar: otherUser?.avatar ?? null,
+      last_message: r.last_message,
+      last_message_at: r.last_message_at,
+      unread_count: r.unread_count ?? 0,
+    }
+  }))
+
+  return c.json({ conversations })
+})
+
+/**
+ * GET /api/messages/:userId — 与某用户的消息记录
+ */
+messages.get('/:userId', authMiddleware, async (c) => {
+  const user = c.get('user')
+  const otherId = parseInt(c.req.param('userId'))
+  const page = Math.max(1, parseInt(c.req.query('page') || '1'))
+  const limit = Math.min(100, Math.max(1, parseInt(c.req.query('limit') || '50')))
+  const offset = (page - 1) * limit
+
+  const rows = await query<Record<string, unknown>>(
+    c.env.abdl_space_db,
+    `SELECT m.id, m.sender_id, m.receiver_id, m.content, m.read, m.created_at,
+            u.username as sender_name
+     FROM messages m
+     JOIN users u ON m.sender_id = u.id
+     WHERE (m.sender_id = ? AND m.receiver_id = ?) OR (m.sender_id = ? AND m.receiver_id = ?)
+     ORDER BY m.created_at ASC
+     LIMIT ? OFFSET ?`,
+    [user.sub, otherId, otherId, user.sub, limit, offset]
+  )
+
+  const messagesList = rows.map(r => ({
+    id: r.id,
+    sender_id: r.sender_id,
+    receiver_id: r.receiver_id,
+    content: r.content,
+    read: !!r.read,
+    created_at: r.created_at,
+  }))
+
+  return c.json({ messages: messagesList })
+})
+
+/**
+ * POST /api/messages — 发送消息
+ */
+messages.post('/', authMiddleware, async (c) => {
+  const user = c.get('user')
+  const body = await c.req.json<{ receiver_id: number; content: string }>()
+  const { receiver_id, content } = body
+
+  if (!receiver_id || !content?.trim()) {
+    return c.json({ error: 'receiver_id 和 content 必填' }, 400)
+  }
+  if (content.length > 2000) {
+    return c.json({ error: '消息最长 2000 字符' }, 400)
+  }
+  if (receiver_id === user.sub) {
+    return c.json({ error: '不能给自己发消息' }, 400)
+  }
+
+  const receiver = await queryOne<{ id: number }>(
+    c.env.abdl_space_db,
+    'SELECT id FROM users WHERE id = ?',
+    [receiver_id]
+  )
+  if (!receiver) return c.json({ error: '用户不存在' }, 404)
+
+  const settings = await queryOne<{ allow_messages: number }>(
+    c.env.abdl_space_db,
+    'SELECT allow_messages FROM user_settings WHERE user_id = ?',
+    [receiver_id]
+  )
+  if (settings && settings.allow_messages === 0) {
+    return c.json({ error: '该用户已关闭私信功能' }, 403)
+  }
+
+  const result = await run(
+    c.env.abdl_space_db,
+    'INSERT INTO messages (sender_id, receiver_id, content) VALUES (?, ?, ?)',
+    [user.sub, receiver_id, content.trim()]
+  )
+
+  return c.json({ id: result.meta.last_row_id, message: '发送成功' }, 201)
+})
+
+/**
+ * POST /api/messages/:userId/read — 标记已读
+ */
+messages.post('/:userId/read', authMiddleware, async (c) => {
+  const user = c.get('user')
+  const otherId = parseInt(c.req.param('userId'))
+
+  await run(
+    c.env.abdl_space_db,
+    'UPDATE messages SET read = 1 WHERE sender_id = ? AND receiver_id = ? AND read = 0',
+    [otherId, user.sub]
+  )
+
+  return c.json({ message: '已标为已读' })
+})
+
+export default messages
