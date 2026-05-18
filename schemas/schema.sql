@@ -234,3 +234,25 @@ CREATE INDEX IF NOT EXISTS idx_notifications_user_id ON notifications(user_id);
 CREATE INDEX IF NOT EXISTS idx_notifications_user_unread ON notifications(user_id, read);
 CREATE INDEX IF NOT EXISTS idx_experience_user_id ON experience(user_id);
 CREATE INDEX IF NOT EXISTS idx_terms_category ON terms(category);
+
+-- ============================================================
+-- 私信系统
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  sender_id INTEGER NOT NULL REFERENCES users(id),
+  receiver_id INTEGER NOT NULL REFERENCES users(id),
+  content TEXT NOT NULL,
+  read INTEGER DEFAULT 0,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS user_settings (
+  user_id INTEGER PRIMARY KEY REFERENCES users(id),
+  allow_messages INTEGER DEFAULT 1,
+  allow_messages_from TEXT DEFAULT 'all'
+);
+
+CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender_id, receiver_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_messages_receiver ON messages(receiver_id, sender_id, read);
