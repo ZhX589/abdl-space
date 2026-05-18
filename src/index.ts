@@ -20,6 +20,7 @@ import recommend from './routes/recommend.ts'
 import notifications from './routes/notifications.ts'
 import messages from './routes/messages.ts'
 import images from './routes/images.ts'
+import follows from './routes/follows.ts'
 import admin from './routes/admin.ts'
 import search from './routes/search.ts'
 import apiKeys from './routes/api_keys.ts'
@@ -79,6 +80,7 @@ app.route('/api/recommend', recommend)
 app.route('/api/notifications', notifications)
 app.route('/api/messages', messages)
 app.route('/api/images', images)
+app.route('/api/follows', follows)
 app.route('/api/admin', admin)
 app.route('/api/search', search)
 app.route('/api/api_keys', apiKeys)
