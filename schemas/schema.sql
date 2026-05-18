@@ -267,3 +267,15 @@ CREATE TABLE IF NOT EXISTS post_images (
 );
 
 CREATE INDEX IF NOT EXISTS idx_post_images_post_id ON post_images(post_id);
+
+-- 关注系统
+CREATE TABLE IF NOT EXISTS follows (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  follower_id INTEGER NOT NULL REFERENCES users(id),
+  following_id INTEGER NOT NULL REFERENCES users(id),
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(follower_id, following_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_follows_follower ON follows(follower_id);
+CREATE INDEX IF NOT EXISTS idx_follows_following ON follows(following_id);
