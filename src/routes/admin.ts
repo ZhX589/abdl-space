@@ -80,7 +80,29 @@ admin.delete('/users/:id', adminMiddleware, async (c) => {
   const user = await queryOne<{ id: number }>(c.env.abdl_space_db, 'SELECT id FROM users WHERE id = ?', [id])
   if (!user) return c.json({ error: 'User not found' }, 404)
 
-  await run(c.env.abdl_space_db, 'DELETE FROM users WHERE id = ?', [id])
+  const db = c.env.abdl_space_db
+
+  // 级联删除所有关联数据
+  await run(db, 'DELETE FROM post_comments WHERE user_id = ?', [id])
+  await run(db, 'DELETE FROM likes WHERE user_id = ?', [id])
+  await run(db, 'DELETE FROM ratings WHERE user_id = ?', [id])
+  await run(db, 'DELETE FROM feelings WHERE user_id = ?', [id])
+  await run(db, 'DELETE FROM notifications WHERE user_id = ?', [id])
+  await run(db, 'DELETE FROM messages WHERE sender_id = ? OR receiver_id = ?', [id, id])
+  await run(db, 'DELETE FROM follows WHERE follower_id = ? OR following_id = ?', [id, id])
+  await run(db, 'DELETE FROM user_settings WHERE user_id = ?', [id])
+  await run(db, 'DELETE FROM experience WHERE user_id = ?', [id])
+  await run(db, 'DELETE FROM reports WHERE user_id = ?', [id])
+  // 删除用户帖子的图片
+  const userPosts = await query<{ id: number }>(db, 'SELECT id FROM posts WHERE author_id = ?', [id])
+  for (const post of userPosts) {
+    await run(db, 'DELETE FROM post_images WHERE post_id = ?', [post.id])
+  }
+  await run(db, 'DELETE FROM posts WHERE author_id = ?', [id])
+  // 删除验证码记录
+  await run(db, 'DELETE FROM email_verifications WHERE user_id = ?', [id])
+  // 删除用户
+  await run(db, 'DELETE FROM users WHERE id = ?', [id])
   return c.json({ message: '已删除' })
 })
 
