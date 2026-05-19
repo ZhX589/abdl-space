@@ -235,7 +235,6 @@ CREATE INDEX IF NOT EXISTS idx_notifications_user_unread ON notifications(user_i
 CREATE INDEX IF NOT EXISTS idx_experience_user_id ON experience(user_id);
 CREATE INDEX IF NOT EXISTS idx_terms_category ON terms(category);
 
--- ============================================================
 -- 私信系统
 -- ============================================================
 
@@ -279,3 +278,17 @@ CREATE TABLE IF NOT EXISTS follows (
 
 CREATE INDEX IF NOT EXISTS idx_follows_follower ON follows(follower_id);
 CREATE INDEX IF NOT EXISTS idx_follows_following ON follows(following_id);
+
+-- 邮件验证码表
+CREATE TABLE IF NOT EXISTS email_verifications (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER,
+  email TEXT NOT NULL,
+  code TEXT NOT NULL,
+  type TEXT NOT NULL,       -- 'register' | 'bind' | 'reset'
+  used INTEGER DEFAULT 0,
+  expires_at TEXT NOT NULL,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_email_ver_email ON email_verifications(email);
+CREATE INDEX IF NOT EXISTS idx_email_ver_lookup ON email_verifications(email, code, type, used);

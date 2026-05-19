@@ -174,6 +174,7 @@ export interface RegisterRequest {
   email: string
   password: string
   username: string
+  code: string
 }
 
 /** 登录请求体（login 接受 email 或 username） */
@@ -276,6 +277,7 @@ export interface Env {
   abdl_space_db: D1Database
   JWT_SECRET: string
   FRONTEND_ORIGIN?: string
+  RESEND_API_KEY: string
 }
 
 /** JWT payload 结构 */
