@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import type { Env, JWTPayload, RegisterRequest, LoginRequest, LoginResponse, User } from '../types/index.ts'
-import { hashPassword, verifyPassword, signJWT, checkRateLimit, getClientIp } from '../lib/auth.ts'
+import { hashPassword, verifyPassword, signJWT } from '../lib/auth.ts'
 import { queryOne, query, run } from '../lib/db.ts'
 import { authMiddleware } from '../middleware/auth.ts'
 
@@ -12,15 +12,67 @@ const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 const CODE_TTL_MINUTES = 5
 const RESEND_COOLDOWN_SECONDS = 60
 const MAX_CODE_REQUESTS = 5
+const MAX_VERIFY_ATTEMPTS = 5  // 验证码最多尝试 5 次
+const RATE_LIMIT_WINDOW = 60   // 秒
+const RATE_LIMIT_MAX = 10      // 每窗口最大请求数
 
 const tokenCookieOptions = 'HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=604800'
 
-/** 生成 6 位验证码 */
+// ============================================================
+// 工具函数
+// ============================================================
+
 function generateCode(): string {
   return String(Math.floor(100000 + Math.random() * 900000))
 }
 
-/** 发送邮件（Resend API） */
+/** SHA-256 哈希（用于验证码） */
+async function sha256(input: string): Promise<string> {
+  const data = new TextEncoder().encode(input)
+  const hash = await crypto.subtle.digest('SHA-256', data)
+  return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('')
+}
+
+/** D1 限流：检查并递增 */
+async function checkD1RateLimit(
+  db: D1Database,
+  key: string,
+  windowSeconds: number,
+  maxRequests: number
+): Promise<{ allowed: boolean; remaining: number }> {
+  const now = new Date()
+  const windowStart = new Date(Math.floor(now.getTime() / (windowSeconds * 1000)) * windowSeconds * 1000).toISOString()
+  const expiresAt = new Date(now.getTime() + windowSeconds * 2 * 1000).toISOString()
+
+  const existing = await queryOne<{ count: number; window_start: string }>(
+    db,
+    'SELECT count, window_start FROM rate_limits WHERE key = ?',
+    [key]
+  )
+
+  if (!existing || existing.window_start !== windowStart) {
+    // 新窗口
+    await run(
+      db,
+      'INSERT OR REPLACE INTO rate_limits (key, count, window_start, expires_at) VALUES (?, 1, ?, ?)',
+      [key, windowStart, expiresAt]
+    )
+    return { allowed: true, remaining: maxRequests - 1 }
+  }
+
+  if (existing.count >= maxRequests) {
+    return { allowed: false, remaining: 0 }
+  }
+
+  await run(db, 'UPDATE rate_limits SET count = count + 1 WHERE key = ?', [key])
+  return { allowed: true, remaining: maxRequests - existing.count - 1 }
+}
+
+/** 清理过期限流记录 */
+async function cleanupRateLimits(db: D1Database): Promise<void> {
+  await run(db, "DELETE FROM rate_limits WHERE expires_at < datetime('now')")
+}
+
 async function sendEmail(to: string, subject: string, html: string, apiKey: string): Promise<void> {
   const res = await fetch('https://api.resend.com/emails', {
     method: 'POST',
@@ -41,7 +93,6 @@ async function sendEmail(to: string, subject: string, html: string, apiKey: stri
   }
 }
 
-/** 验证码邮件 HTML 模板 */
 function codeEmailHtml(code: string): string {
   return `
     <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 480px; margin: 0 auto; padding: 32px;">
@@ -60,13 +111,14 @@ function codeEmailHtml(code: string): string {
 
 // ============================================================
 // POST /api/auth/send-code — 发送邮箱验证码
-// Body: { email, type: 'register' | 'bind' | 'reset' }
 // ============================================================
 auth.post('/send-code', async (c) => {
-  const ip = getClientIp(c)
-  const rateLimit = checkRateLimit(ip)
-  if (!rateLimit.allowed) {
-    c.header('Retry-After', String(Math.ceil(rateLimit.resetIn / 1000)))
+  const db = c.env.abdl_space_db
+  const ip = c.req.header('CF-Connecting-IP') || c.req.header('X-Forwarded-For')?.split(',')[0]?.trim() || 'unknown'
+
+  // IP 限流（D1）
+  const ipLimit = await checkD1RateLimit(db, `ip:send-code:${ip}`, RATE_LIMIT_WINDOW, RATE_LIMIT_MAX)
+  if (!ipLimit.allowed) {
     return c.json({ error: '操作太频繁，请稍后再试' }, 429)
   }
 
@@ -80,13 +132,25 @@ auth.post('/send-code', async (c) => {
     return c.json({ error: '无效的验证码类型' }, 400)
   }
 
-  // bind 类型需要登录
   if (type === 'bind') {
     const authHeader = c.req.header('Authorization')
     if (!authHeader) return c.json({ error: '请先登录' }, 401)
   }
 
-  const db = c.env.abdl_space_db
+  // reset 类型：检查邮箱是否已注册，未注册则静默返回（防枚举+防邮件轰炸）
+  if (type === 'reset') {
+    const userExists = await queryOne<User>(db, 'SELECT id FROM users WHERE email = ?', [emailAddress])
+    if (!userExists) {
+      // 静默成功，不发邮件
+      return c.json({ message: '如果该邮箱已注册，验证码将发送到您的邮箱' })
+    }
+  }
+
+  // 邮箱+类型限流（D1）
+  const emailLimit = await checkD1RateLimit(db, `email:${type}:${emailAddress}`, RESEND_COOLDOWN_SECONDS, 1)
+  if (!emailLimit.allowed) {
+    return c.json({ error: `请等待 ${RESEND_COOLDOWN_SECONDS} 秒后再发送` }, 429)
+  }
 
   // 检查累计未过期未使用次数
   const countRow = await queryOne<{ cnt: number }>(
@@ -99,18 +163,6 @@ auth.post('/send-code', async (c) => {
     return c.json({ error: '该邮箱验证码请求次数已达上限，请稍后再试' }, 429)
   }
 
-  // 检查冷却时间
-  const recent = await queryOne<{ id: number }>(
-    db,
-    `SELECT id FROM email_verifications 
-     WHERE email = ? AND type = ? AND created_at > datetime('now', '-${RESEND_COOLDOWN_SECONDS} seconds')
-     ORDER BY id DESC LIMIT 1`,
-    [emailAddress, type]
-  )
-  if (recent) {
-    return c.json({ error: `请等待 ${RESEND_COOLDOWN_SECONDS} 秒后再发送` }, 429)
-  }
-
   // 作废旧验证码
   await run(
     db,
@@ -118,14 +170,15 @@ auth.post('/send-code', async (c) => {
     [emailAddress, type]
   )
 
-  // 生成并存储新验证码
+  // 生成验证码并存储哈希
   const code = generateCode()
+  const codeHash = await sha256(code)
   const expiresAt = new Date(Date.now() + CODE_TTL_MINUTES * 60 * 1000).toISOString()
 
   await run(
     db,
-    `INSERT INTO email_verifications (user_id, email, code, type, expires_at) VALUES (NULL, ?, ?, ?, ?)`,
-    [emailAddress, code, type, expiresAt]
+    `INSERT INTO email_verifications (user_id, email, code_hash, type, expires_at) VALUES (NULL, ?, ?, ?, ?)`,
+    [emailAddress, codeHash, type, expiresAt]
   )
 
   // 发送邮件
@@ -142,18 +195,60 @@ auth.post('/send-code', async (c) => {
     return c.json({ error: '发送验证码失败，请稍后再试' }, 500)
   }
 
+  // 偶尔清理过期限流记录
+  if (Math.random() < 0.05) {
+    cleanupRateLimits(db).catch(() => {})
+  }
+
   return c.json({ message: '验证码已发送' })
 })
 
 // ============================================================
+// 通用验证码校验（带尝试次数限制）
+// ============================================================
+async function verifyCode(
+  db: D1Database,
+  email: string,
+  code: string,
+  type: string
+): Promise<{ valid: boolean; recordId?: number; error?: string }> {
+  const codeHash = await sha256(code)
+
+  const record = await queryOne<{ id: number; attempts: number }>(
+    db,
+    `SELECT id, attempts FROM email_verifications 
+     WHERE email = ? AND code_hash = ? AND type = ? AND used = 0 
+     AND expires_at > datetime('now')
+     ORDER BY id DESC LIMIT 1`,
+    [email, codeHash, type]
+  )
+
+  if (!record) {
+    return { valid: false, error: '验证码无效或已过期' }
+  }
+
+  // 检查尝试次数
+  if (record.attempts >= MAX_VERIFY_ATTEMPTS) {
+    // 标记为已使用，防止继续尝试
+    await run(db, 'UPDATE email_verifications SET used = 1 WHERE id = ?', [record.id])
+    return { valid: false, error: '验证码尝试次数过多，请重新获取' }
+  }
+
+  // 递增尝试次数
+  await run(db, 'UPDATE email_verifications SET attempts = attempts + 1 WHERE id = ?', [record.id])
+
+  return { valid: true, recordId: record.id }
+}
+
+// ============================================================
 // POST /api/auth/register — 注册（需要邮箱验证码）
-// Body: { username, password, email, code }
 // ============================================================
 auth.post('/register', async (c) => {
-  const ip = getClientIp(c)
-  const rateLimit = checkRateLimit(ip)
-  if (!rateLimit.allowed) {
-    c.header('Retry-After', String(Math.ceil(rateLimit.resetIn / 1000)))
+  const db = c.env.abdl_space_db
+  const ip = c.req.header('CF-Connecting-IP') || c.req.header('X-Forwarded-For')?.split(',')[0]?.trim() || 'unknown'
+
+  const ipLimit = await checkD1RateLimit(db, `ip:register:${ip}`, RATE_LIMIT_WINDOW, RATE_LIMIT_MAX)
+  if (!ipLimit.allowed) {
     return c.json({ error: '操作太频繁，请稍后再试' }, 429)
   }
 
@@ -176,42 +271,32 @@ auth.post('/register', async (c) => {
     return c.json({ error: '用户名 2-32 个字符' }, 400)
   }
 
-  const db = c.env.abdl_space_db
-
-  // 验证码校验
-  const record = await queryOne<{ id: number }>(
-    db,
-    `SELECT id FROM email_verifications 
-     WHERE email = ? AND code = ? AND type = 'register' AND used = 0 
-     AND expires_at > datetime('now')
-     ORDER BY id DESC LIMIT 1`,
-    [emailAddress, code]
-  )
-  if (!record) {
-    return c.json({ error: '验证码无效或已过期' }, 400)
+  // 验证码校验（带尝试次数限制）
+  const result = await verifyCode(db, emailAddress, code, 'register')
+  if (!result.valid) {
+    return c.json({ error: result.error }, 400)
   }
 
   // 标记验证码已使用
-  await run(db, 'UPDATE email_verifications SET used = 1 WHERE id = ?', [record.id])
+  await run(db, 'UPDATE email_verifications SET used = 1 WHERE id = ?', [result.recordId])
 
-  // 检查用户名/邮箱是否已存在
+  // 检查用户名/邮箱是否已存在（模糊提示防枚举）
   const existing = await queryOne<User>(
     db,
     'SELECT id FROM users WHERE email = ? OR username = ?',
     [emailAddress, username]
   )
   if (existing) {
-    return c.json({ error: '邮箱或用户名已被使用' }, 409)
+    return c.json({ error: '注册信息已被使用，请更换邮箱或用户名' }, 409)
   }
 
-  // 创建用户（注册即验证邮箱）
   const passwordHash = await hashPassword(password)
-  const result = await run(
+  const insertResult = await run(
     db,
     'INSERT INTO users (email, password_hash, username, email_verified) VALUES (?, ?, ?, 1)',
     [emailAddress, passwordHash, username]
   )
-  const userId = result.meta.last_row_id as number
+  const userId = insertResult.meta.last_row_id as number
   const token = await signJWT({ sub: userId, username, email: emailAddress, role: 'user' }, c.env.JWT_SECRET)
 
   c.header('Set-Cookie', `token=${token}; ${tokenCookieOptions}`)
@@ -223,13 +308,14 @@ auth.post('/register', async (c) => {
 })
 
 // ============================================================
-// POST /api/auth/login — 登录（支持 email 或 username）
+// POST /api/auth/login — 登录
 // ============================================================
 auth.post('/login', async (c) => {
-  const ip = getClientIp(c)
-  const rateLimit = checkRateLimit(ip)
-  if (!rateLimit.allowed) {
-    c.header('Retry-After', String(Math.ceil(rateLimit.resetIn / 1000)))
+  const db = c.env.abdl_space_db
+  const ip = c.req.header('CF-Connecting-IP') || c.req.header('X-Forwarded-For')?.split(',')[0]?.trim() || 'unknown'
+
+  const ipLimit = await checkD1RateLimit(db, `ip:login:${ip}`, RATE_LIMIT_WINDOW, RATE_LIMIT_MAX)
+  if (!ipLimit.allowed) {
     return c.json({ error: '操作太频繁，请稍后再试' }, 429)
   }
 
@@ -241,7 +327,7 @@ auth.post('/login', async (c) => {
   }
 
   const user = await queryOne<User>(
-    c.env.abdl_space_db,
+    db,
     'SELECT id, email, username, password_hash, avatar, role FROM users WHERE email = ? OR username = ?',
     [login, login]
   )
@@ -258,28 +344,21 @@ auth.post('/login', async (c) => {
 
   c.header('Set-Cookie', `token=${token}; ${tokenCookieOptions}`)
 
-  const response: LoginResponse = {
+  return c.json({
     token,
-    user: {
-      id: user.id,
-      email: user.email,
-      username: user.username,
-      avatar: user.avatar,
-      role: user.role
-    }
-  }
-  return c.json(response)
+    user: { id: user.id, email: user.email, username: user.username, avatar: user.avatar, role: user.role }
+  } satisfies LoginResponse)
 })
 
 // ============================================================
 // POST /api/auth/reset-password — 找回密码
-// Body: { email, code, newPassword }
 // ============================================================
 auth.post('/reset-password', async (c) => {
-  const ip = getClientIp(c)
-  const rateLimit = checkRateLimit(ip)
-  if (!rateLimit.allowed) {
-    c.header('Retry-After', String(Math.ceil(rateLimit.resetIn / 1000)))
+  const db = c.env.abdl_space_db
+  const ip = c.req.header('CF-Connecting-IP') || c.req.header('X-Forwarded-For')?.split(',')[0]?.trim() || 'unknown'
+
+  const ipLimit = await checkD1RateLimit(db, `ip:reset:${ip}`, RATE_LIMIT_WINDOW, RATE_LIMIT_MAX)
+  if (!ipLimit.allowed) {
     return c.json({ error: '操作太频繁，请稍后再试' }, 429)
   }
 
@@ -296,30 +375,20 @@ auth.post('/reset-password', async (c) => {
     return c.json({ error: '密码需包含大小写字母和数字' }, 400)
   }
 
-  const db = c.env.abdl_space_db
-
   // 验证码校验
-  const record = await queryOne<{ id: number }>(
-    db,
-    `SELECT id FROM email_verifications 
-     WHERE email = ? AND code = ? AND type = 'reset' AND used = 0 
-     AND expires_at > datetime('now')
-     ORDER BY id DESC LIMIT 1`,
-    [emailAddress, code]
-  )
-  if (!record) {
+  const result = await verifyCode(db, emailAddress, code, 'reset')
+  if (!result.valid) {
+    return c.json({ error: result.error }, 400)
+  }
+
+  await run(db, 'UPDATE email_verifications SET used = 1 WHERE id = ?', [result.recordId])
+
+  // 查找用户（模糊提示防枚举）
+  const user = await queryOne<User>(db, 'SELECT id FROM users WHERE email = ?', [emailAddress])
+  if (!user) {
     return c.json({ error: '验证码无效或已过期' }, 400)
   }
 
-  await run(db, 'UPDATE email_verifications SET used = 1 WHERE id = ?', [record.id])
-
-  // 查找用户
-  const user = await queryOne<User>(db, 'SELECT id FROM users WHERE email = ?', [emailAddress])
-  if (!user) {
-    return c.json({ error: '该邮箱未注册' }, 404)
-  }
-
-  // 更新密码
   const passwordHash = await hashPassword(newPassword)
   await run(db, 'UPDATE users SET password_hash = ? WHERE id = ?', [passwordHash, user.id])
 
@@ -328,10 +397,17 @@ auth.post('/reset-password', async (c) => {
 
 // ============================================================
 // POST /api/auth/bind-email — 绑定/换绑邮箱（需登录）
-// Body: { email, code }
 // ============================================================
 auth.post('/bind-email', authMiddleware, async (c) => {
+  const db = c.env.abdl_space_db
   const payload = c.get('user')
+  const ip = c.req.header('CF-Connecting-IP') || c.req.header('X-Forwarded-For')?.split(',')[0]?.trim() || 'unknown'
+
+  const ipLimit = await checkD1RateLimit(db, `ip:bind:${ip}`, RATE_LIMIT_WINDOW, RATE_LIMIT_MAX)
+  if (!ipLimit.allowed) {
+    return c.json({ error: '操作太频繁，请稍后再试' }, 429)
+  }
+
   const body = await c.req.json<{ email: string; code: string }>()
   const { email: emailAddress, code } = body
 
@@ -342,34 +418,24 @@ auth.post('/bind-email', authMiddleware, async (c) => {
     return c.json({ error: '请输入验证码' }, 400)
   }
 
-  const db = c.env.abdl_space_db
-
   // 验证码校验
-  const record = await queryOne<{ id: number }>(
-    db,
-    `SELECT id FROM email_verifications 
-     WHERE email = ? AND code = ? AND type = 'bind' AND used = 0 
-     AND expires_at > datetime('now')
-     ORDER BY id DESC LIMIT 1`,
-    [emailAddress, code]
-  )
-  if (!record) {
-    return c.json({ error: '验证码无效或已过期' }, 400)
+  const result = await verifyCode(db, emailAddress, code, 'bind')
+  if (!result.valid) {
+    return c.json({ error: result.error }, 400)
   }
 
-  await run(db, 'UPDATE email_verifications SET used = 1 WHERE id = ?', [record.id])
+  await run(db, 'UPDATE email_verifications SET used = 1 WHERE id = ?', [result.recordId])
 
-  // 检查邮箱是否已被其他用户绑定
+  // 检查邮箱是否已被其他用户绑定（模糊提示）
   const emailTaken = await queryOne<User>(
     db,
     'SELECT id FROM users WHERE email = ? AND id != ?',
     [emailAddress, payload.sub]
   )
   if (emailTaken) {
-    return c.json({ error: '该邮箱已被其他用户绑定' }, 409)
+    return c.json({ error: '该邮箱无法使用，请更换邮箱' }, 409)
   }
 
-  // 更新邮箱
   await run(db, 'UPDATE users SET email = ?, email_verified = 1 WHERE id = ?', [emailAddress, payload.sub])
 
   return c.json({ message: '邮箱绑定成功' })

@@ -284,11 +284,21 @@ CREATE TABLE IF NOT EXISTS email_verifications (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id INTEGER,
   email TEXT NOT NULL,
-  code TEXT NOT NULL,
-  type TEXT NOT NULL,       -- 'register' | 'bind' | 'reset'
+  code_hash TEXT NOT NULL,     -- SHA-256 哈希，不存明文
+  type TEXT NOT NULL,           -- 'register' | 'bind' | 'reset'
   used INTEGER DEFAULT 0,
+  attempts INTEGER DEFAULT 0,  -- 已尝试验证次数
   expires_at TEXT NOT NULL,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_email_ver_email ON email_verifications(email);
-CREATE INDEX IF NOT EXISTS idx_email_ver_lookup ON email_verifications(email, code, type, used);
+CREATE INDEX IF NOT EXISTS idx_email_ver_lookup ON email_verifications(email, code_hash, type, used);
+
+-- D1 限流表（替代内存 Map）
+CREATE TABLE IF NOT EXISTS rate_limits (
+  key TEXT PRIMARY KEY,        -- ip:action 或 email:action
+  count INTEGER DEFAULT 1,
+  window_start TEXT NOT NULL,
+  expires_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_rate_limits_expires ON rate_limits(expires_at);
