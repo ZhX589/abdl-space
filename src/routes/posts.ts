@@ -295,14 +295,23 @@ posts.post('/', authMiddleware, async (c) => {
   const postId = result.meta.last_row_id
 
   // 保存图片
+  let postHasNsfw = false
   if (images && images.length > 0) {
     for (let i = 0; i < images.length; i++) {
+      const img = typeof images[i] === 'string' ? { url: images[i], is_nsfw: false } : images[i]
+      if (!img.url) continue
+      if (img.is_nsfw) postHasNsfw = true
       await run(
         c.env.abdl_space_db,
-        'INSERT INTO post_images (post_id, image_url, sort_order) VALUES (?, ?, ?)',
-        [postId, images[i], i]
+        'INSERT INTO post_images (post_id, image_url, is_nsfw, sort_order) VALUES (?, ?, ?, ?)',
+        [postId, img.url, img.is_nsfw ? 1 : 0, i]
       )
     }
+  }
+
+  // 更新帖子的 has_nsfw 标记
+  if (postHasNsfw) {
+    await run(c.env.abdl_space_db, 'UPDATE posts SET has_nsfw = 1 WHERE id = ?', [postId])
   }
 
   // 如果是转发，给原帖作者发通知
@@ -417,10 +426,12 @@ posts.post('/:id/comments', authMiddleware, async (c) => {
   // 保存评论图片
   if (images && images.length > 0) {
     for (let i = 0; i < images.length; i++) {
+      const img = typeof images[i] === 'string' ? { url: images[i], is_nsfw: false } : images[i]
+      if (!img.url) continue
       await run(
         c.env.abdl_space_db,
-        'INSERT INTO post_images (post_id, image_url, sort_order) VALUES (?, ?, ?)',
-        [commentId, images[i], i]
+        'INSERT INTO comment_images (comment_id, image_url, is_nsfw, sort_order) VALUES (?, ?, ?, ?)',
+        [commentId, img.url, img.is_nsfw ? 1 : 0, i]
       )
     }
   }
