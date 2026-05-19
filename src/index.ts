@@ -24,6 +24,7 @@ import follows from './routes/follows.ts'
 import admin from './routes/admin.ts'
 import search from './routes/search.ts'
 import apiKeys from './routes/api_keys.ts'
+import reports from './routes/reports.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
@@ -84,6 +85,7 @@ app.route('/api/follows', follows)
 app.route('/api/admin', admin)
 app.route('/api/search', search)
 app.route('/api/api_keys', apiKeys)
+app.route('/api/reports', reports)
 
 /**
  * POST /admin_reset/password — admin 只能改自己的密码（需鉴权）

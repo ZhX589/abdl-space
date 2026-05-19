@@ -113,6 +113,28 @@ admin.post('/users/:id/ban', adminMiddleware, async (c) => {
 })
 
 /**
+ * GET /api/admin/posts — 管理员帖子列表
+ */
+admin.get('/posts', adminMiddleware, async (c) => {
+  const rows = await query<Record<string, unknown>>(
+    c.env.abdl_space_db,
+    `SELECT p.id, p.content, p.pinned, p.created_at, p.has_nsfw,
+            u.username, u.avatar, u.role,
+            (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
+            (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count
+     FROM posts p JOIN users u ON p.user_id = u.id
+     ORDER BY p.created_at DESC LIMIT 100`
+  )
+  return c.json({
+    posts: rows.map(r => ({
+      id: r.id, content: r.content, pinned: !!r.pinned, has_nsfw: !!r.has_nsfw,
+      user: { username: r.username, avatar: r.avatar ?? null, role: r.role },
+      like_count: r.like_count, comment_count: r.comment_count, created_at: r.created_at
+    }))
+  })
+})
+
+/**
  * POST /api/admin/posts/:id/pin — 置顶/取消置顶
  */
 admin.post('/posts/:id/pin', adminMiddleware, async (c) => {
