@@ -3,6 +3,27 @@ import type { Env, JWTPayload } from '../types/index.ts'
 import { query, queryOne, run } from '../lib/db.ts'
 import { adminMiddleware } from '../middleware/auth.ts'
 
+const IMGBED_URL = 'https://img.abdl-space.top'
+
+async function deleteImageFromImgbed(env: Env, imageUrl: string) {
+  const deleteKey = env.IMGBED_DELETE_KEY
+  if (!deleteKey) return
+  let fileName = imageUrl
+  try {
+    const parsed = new URL(imageUrl)
+    fileName = parsed.pathname.replace(/^\/file\//, '')
+  } catch {
+    fileName = imageUrl.replace(/^\/file\//, '')
+  }
+  try {
+    await fetch(`${IMGBED_URL}/api/manage/delete`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${deleteKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ list: [fileName] }),
+    })
+  } catch {}
+}
+
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
 const admin = new Hono<AppType>()
@@ -129,6 +150,14 @@ admin.delete('/comments/:id', adminMiddleware, async (c) => {
 
   const comment = await queryOne<{ id: number }>(c.env.abdl_space_db, 'SELECT id FROM post_comments WHERE id = ?', [id])
   if (!comment) return c.json({ error: 'Comment not found' }, 404)
+
+  // 删除图床图片
+  const commentImages = await query<{ image_url: string }>(
+    c.env.abdl_space_db, 'SELECT image_url FROM comment_images WHERE comment_id = ?', [id]
+  )
+  for (const img of commentImages) {
+    await deleteImageFromImgbed(c.env, img.image_url)
+  }
 
   await run(c.env.abdl_space_db, 'DELETE FROM post_comments WHERE id = ?', [id])
   return c.json({ message: '已删除' })

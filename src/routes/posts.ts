@@ -3,6 +3,28 @@ import type { Env, JWTPayload, CreatePostRequest } from '../types/index.ts'
 import { query, queryOne, run } from '../lib/db.ts'
 import { authMiddleware } from '../middleware/auth.ts'
 
+const IMGBED_URL = 'https://img.abdl-space.top'
+
+/** 从图床删除图片 */
+async function deleteImageFromImgbed(env: Env, imageUrl: string) {
+  const deleteKey = env.IMGBED_DELETE_KEY
+  if (!deleteKey) return
+  let fileName = imageUrl
+  try {
+    const parsed = new URL(imageUrl)
+    fileName = parsed.pathname.replace(/^\/file\//, '')
+  } catch {
+    fileName = imageUrl.replace(/^\/file\//, '')
+  }
+  try {
+    await fetch(`${IMGBED_URL}/api/manage/delete`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${deleteKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ list: [fileName] }),
+    })
+  } catch {}
+}
+
 
 // 安全查询帖子图片（post_images 表可能不存在）
 async function safeGetImages(db: D1Database, postId: number): Promise<{image_url: string}[]> {
@@ -315,6 +337,14 @@ posts.delete('/:id', authMiddleware, async (c) => {
   if (!post) return c.json({ error: 'Post not found' }, 404)
   if (user.role !== 'admin' && post.user_id !== user.sub) {
     return c.json({ error: 'Not authorized' }, 403)
+  }
+
+  // 删除图床图片
+  const postImages = await query<{ image_url: string }>(
+    c.env.abdl_space_db, 'SELECT image_url FROM post_images WHERE post_id = ?', [id]
+  )
+  for (const img of postImages) {
+    await deleteImageFromImgbed(c.env, img.image_url)
   }
 
   await run(c.env.abdl_space_db, 'DELETE FROM posts WHERE id = ?', [id])
