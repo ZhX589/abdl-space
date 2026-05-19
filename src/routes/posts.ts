@@ -27,10 +27,10 @@ async function deleteImageFromImgbed(env: Env, imageUrl: string) {
 
 
 // 安全查询帖子图片（post_images 表可能不存在）
-async function safeGetImages(db: D1Database, postId: number): Promise<{image_url: string}[]> {
+async function safeGetImages(db: D1Database, postId: number): Promise<{image_url: string; is_nsfw: number}[]> {
   try {
-    const result = await db.prepare('SELECT image_url FROM post_images WHERE post_id = ? ORDER BY sort_order').bind(postId).all();
-    return (result.results || []) as {image_url: string}[];
+    const result = await db.prepare('SELECT image_url, is_nsfw FROM post_images WHERE post_id = ? ORDER BY sort_order').bind(postId).all();
+    return (result.results || []) as {image_url: string; is_nsfw: number}[];
   } catch {
     return [];
   }
