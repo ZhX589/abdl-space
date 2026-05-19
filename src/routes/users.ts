@@ -32,6 +32,24 @@ function calcLevel(exp: number) {
 }
 
 /**
+ * GET /api/users/search?q= — 搜索用户
+ */
+users.get('/search', async (c) => {
+  const q = c.req.query('q') || '';
+  if (!q.trim()) return c.json({ users: [] });
+
+  const rows = await query<Record<string, unknown>>(
+    c.env.abdl_space_db,
+    'SELECT id, username, avatar, role FROM users WHERE username LIKE ? LIMIT 10',
+    [`%${q}%`]
+  );
+
+  return c.json({
+    users: rows.map(r => ({ id: r.id, username: r.username, avatar: r.avatar ?? null, role: r.role }))
+  });
+});
+
+/**
  * GET /api/users/:id — 用户公开信息
  */
 users.get('/:id', async (c) => {
