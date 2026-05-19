@@ -1,10 +1,12 @@
 -- ============================================================
--- 邮件验证安全升级迁移
+-- 邮件验证安全升级迁移（修正版）
 -- 执行命令：wrangler d1 execute abdl-space-db --remote --file schemas/email-verifications-migrate.sql
 -- ============================================================
 
--- 1. 重建 email_verifications 表（加 attempts 字段，code 改为 code_hash）
-CREATE TABLE IF NOT EXISTS email_verifications_new (
+-- 1. 删除旧表重建（数据为空，无需迁移）
+DROP TABLE IF EXISTS email_verifications;
+
+CREATE TABLE IF NOT EXISTS email_verifications (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id INTEGER,
   email TEXT NOT NULL,
@@ -15,16 +17,6 @@ CREATE TABLE IF NOT EXISTS email_verifications_new (
   expires_at TEXT NOT NULL,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
-
--- 迁移旧数据（如果有）
-INSERT INTO email_verifications_new (id, user_id, email, code_hash, type, used, attempts, expires_at, created_at)
-SELECT id, user_id, email, code, type, used, 0, expires_at, created_at
-FROM email_verifications
-WHERE 1 = 1;
-
--- 替换表
-DROP TABLE IF EXISTS email_verifications;
-ALTER TABLE email_verifications_new RENAME TO email_verifications;
 
 CREATE INDEX IF NOT EXISTS idx_email_ver_email ON email_verifications(email);
 CREATE INDEX IF NOT EXISTS idx_email_ver_lookup ON email_verifications(email, code_hash, type, used);
