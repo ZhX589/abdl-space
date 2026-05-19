@@ -116,7 +116,7 @@ posts.get('/', async (c) => {
           id: origPost.id,
           user: { id: origPost.user_id, username: origPost.username, avatar: origPost.avatar ?? null, role: origPost.role },
           content: origPost.content,
-          images: origImages.map(img => ({ image_url: img.image_url })),
+          images: origImages.map(img => ({ image_url: img.image_url, is_nsfw: !!img.is_nsfw })),
           created_at: origPost.created_at
         }
       }
@@ -133,7 +133,7 @@ posts.get('/', async (c) => {
       like_count: r.like_count,
       has_liked: hasLiked,
       comment_count: r.comment_count,
-      images: images.map(img => ({ image_url: img.image_url })),
+      images: images.map(img => ({ image_url: img.image_url, is_nsfw: !!img.is_nsfw })),
       created_at: r.created_at
     }
   }))
@@ -239,7 +239,7 @@ posts.get('/:id', async (c) => {
         id: origPost.id,
         user: { id: origPost.user_id, username: origPost.username, avatar: origPost.avatar ?? null, role: origPost.role },
         content: origPost.content,
-        images: origImages.map(img => ({ image_url: img.image_url })),
+        images: origImages.map(img => ({ image_url: img.image_url, is_nsfw: !!img.is_nsfw })),
         created_at: origPost.created_at
       }
     }
@@ -257,7 +257,7 @@ posts.get('/:id', async (c) => {
       like_count: post.like_count,
       has_liked: hasLiked,
       comment_count: post.comment_count,
-      images: postImages.map(img => ({ image_url: img.image_url })),
+      images: postImages.map(img => ({ image_url: img.image_url, is_nsfw: !!img.is_nsfw })),
       created_at: post.created_at
     },
     comments: commentsWithLikes
