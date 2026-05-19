@@ -34,13 +34,24 @@ images.post('/upload', authMiddleware, async (c) => {
   const uploadForm = new FormData()
   uploadForm.append('file', file)
 
-  const res = await fetch(`${IMGBED_URL}/upload?returnFormat=full`, {
+  // 先尝试 Bearer token 方式
+  let res = await fetch(`${IMGBED_URL}/upload?returnFormat=full`, {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${c.env.IMGBED_UPLOAD_KEY}`,
     },
     body: uploadForm,
   })
+
+  // 如果 Bearer 失败，尝试 authCode 参数方式
+  if (!res.ok && c.env.IMGBED_UPLOAD_KEY) {
+    const uploadForm2 = new FormData()
+    uploadForm2.append('file', file)
+    res = await fetch(`${IMGBED_URL}/upload?returnFormat=full&authCode=${c.env.IMGBED_UPLOAD_KEY}`, {
+      method: 'POST',
+      body: uploadForm2,
+    })
+  }
 
   if (!res.ok) {
     const err = await res.text()
