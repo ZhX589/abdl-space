@@ -85,16 +85,28 @@ diapers.get('/', async (c) => {
 
   const diaperIds = diaperRows.map(r => r.id as number)
   const sizesMap = new Map<number, DiaperSize[]>()
+  const imagesMap = new Map<number, string[]>()
   if (diaperIds.length > 0) {
     const placeholders = diaperIds.map(() => '?').join(',')
-    const sizes = await query<DiaperSize & { diaper_id: number }>(
-      c.env.abdl_space_db,
-      `SELECT * FROM diaper_sizes WHERE diaper_id IN (${placeholders})`,
-      diaperIds
-    )
+    const [sizes, images] = await Promise.all([
+      query<DiaperSize & { diaper_id: number }>(
+        c.env.abdl_space_db,
+        `SELECT * FROM diaper_sizes WHERE diaper_id IN (${placeholders})`,
+        diaperIds
+      ),
+      query<{ diaper_id: number; image_url: string }>(
+        c.env.abdl_space_db,
+        `SELECT diaper_id, image_url FROM diaper_images WHERE diaper_id IN (${placeholders}) ORDER BY sort_order`,
+        diaperIds
+      ),
+    ])
     for (const s of sizes) {
       if (!sizesMap.has(s.diaper_id)) sizesMap.set(s.diaper_id, [])
       sizesMap.get(s.diaper_id)!.push(s)
+    }
+    for (const img of images) {
+      if (!imagesMap.has(img.diaper_id)) imagesMap.set(img.diaper_id, [])
+      imagesMap.get(img.diaper_id)!.push(img.image_url)
     }
   }
 
@@ -128,7 +140,8 @@ diapers.get('/', async (c) => {
       })),
       avg_score: avgScore,
       rating_count: ratingCount,
-      feeling_count: feelingCount
+      feeling_count: feelingCount,
+      images: imagesMap.get(r.id as number) || [],
     }
   })
 
@@ -428,6 +441,12 @@ diapers.get('/:id', async (c) => {
     [id]
   )
 
+  const images = await query<{ image_url: string }>(
+    c.env.abdl_space_db,
+    'SELECT image_url FROM diaper_images WHERE diaper_id = ? ORDER BY sort_order',
+    [id]
+  )
+
   const reviews = await query<Record<string, unknown>>(
     c.env.abdl_space_db,
     `SELECT r.*, u.username, u.role, u.avatar
@@ -491,7 +510,8 @@ diapers.get('/:id', async (c) => {
       })),
       avg_score: avgScore,
       rating_count: ratingCount,
-      feeling_count: feelingCount
+      feeling_count: feelingCount,
+      images: images.map(i => i.image_url),
     },
     reviews: reviews.map(r => ({
       id: r.id,
