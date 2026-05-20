@@ -216,8 +216,113 @@ admin.delete('/diapers/:id', adminMiddleware, async (c) => {
   const diaper = await queryOne<{ id: number }>(c.env.abdl_space_db, 'SELECT id FROM diapers WHERE id = ?', [id])
   if (!diaper) return c.json({ error: 'Diaper not found' }, 404)
 
+  // 删除关联图片
+  const images = await query<{ image_url: string }>(c.env.abdl_space_db, 'SELECT image_url FROM diaper_images WHERE diaper_id = ?', [id])
+  for (const img of images) {
+    await deleteImageFromImgbed(c.env, img.image_url)
+  }
+  await run(c.env.abdl_space_db, 'DELETE FROM diaper_images WHERE diaper_id = ?', [id])
   await run(c.env.abdl_space_db, 'DELETE FROM diapers WHERE id = ?', [id])
   return c.json({ message: '已删除' })
+})
+
+/**
+ * GET /api/admin/diapers — 纸尿裤列表（管理用）
+ */
+admin.get('/diapers', adminMiddleware, async (c) => {
+  const rows = await query<Record<string, unknown>>(
+    c.env.abdl_space_db,
+    `SELECT d.*, GROUP_CONCAT(di.image_url) as image_urls
+     FROM diapers d
+     LEFT JOIN diaper_images di ON di.diaper_id = d.id
+     GROUP BY d.id
+     ORDER BY d.created_at DESC`
+  )
+  const diapers = rows.map(r => ({
+    ...r,
+    images: r.image_urls ? (r.image_urls as string).split(',') : [],
+    image_urls: undefined,
+  }))
+  return c.json({ diapers })
+})
+
+/**
+ * POST /api/admin/diapers — 创建纸尿裤
+ */
+admin.post('/diapers', adminMiddleware, async (c) => {
+  const body = await c.req.json<{
+    brand: string; model: string; product_type: string;
+    thickness: number; absorbency_mfr: string; absorbency_adult: string;
+    is_baby_diaper: number; material: string; features: string; avg_price: string;
+    images?: string[];
+  }>()
+
+  if (!body.brand || !body.model || !body.product_type) {
+    return c.json({ error: '品牌、型号、产品类型为必填' }, 400)
+  }
+
+  const result = await run(
+    c.env.abdl_space_db,
+    `INSERT INTO diapers (brand, model, product_type, thickness, absorbency_mfr, absorbency_adult, is_baby_diaper, material, features, avg_price)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [body.brand, body.model, body.product_type, body.thickness || 3, body.absorbency_mfr || '', body.absorbency_adult || '', body.is_baby_diaper || 0, body.material || '', body.features || '', body.avg_price || '']
+  )
+  const diaperId = result.meta.last_row_id as number
+
+  // 添加图片
+  if (body.images && body.images.length > 0) {
+    for (let i = 0; i < body.images.length; i++) {
+      await run(c.env.abdl_space_db, 'INSERT INTO diaper_images (diaper_id, image_url, sort_order) VALUES (?, ?, ?)', [diaperId, body.images[i], i])
+    }
+  }
+
+  return c.json({ id: diaperId, message: '创建成功' }, 201)
+})
+
+/**
+ * PATCH /api/admin/diapers/:id — 更新纸尿裤
+ */
+admin.patch('/diapers/:id', adminMiddleware, async (c) => {
+  const id = parseInt(c.req.param('id') || '')
+  const body = await c.req.json<Partial<{
+    brand: string; model: string; product_type: string;
+    thickness: number; absorbency_mfr: string; absorbency_adult: string;
+    is_baby_diaper: number; material: string; features: string; avg_price: string;
+    images: string[];
+  }>>()
+
+  const diaper = await queryOne<{ id: number }>(c.env.abdl_space_db, 'SELECT id FROM diapers WHERE id = ?', [id])
+  if (!diaper) return c.json({ error: 'Diaper not found' }, 404)
+
+  // 更新基本信息
+  const fields: string[] = []
+  const values: unknown[] = []
+  for (const key of ['brand', 'model', 'product_type', 'thickness', 'absorbency_mfr', 'absorbency_adult', 'is_baby_diaper', 'material', 'features', 'avg_price']) {
+    if (key in body) {
+      fields.push(`${key} = ?`)
+      values.push((body as Record<string, unknown>)[key])
+    }
+  }
+  if (fields.length > 0) {
+    values.push(id)
+    await run(c.env.abdl_space_db, `UPDATE diapers SET ${fields.join(', ')} WHERE id = ?`, values)
+  }
+
+  // 更新图片（如果有传）
+  if (body.images) {
+    // 删除旧图片
+    const oldImages = await query<{ image_url: string }>(c.env.abdl_space_db, 'SELECT image_url FROM diaper_images WHERE diaper_id = ?', [id])
+    for (const img of oldImages) {
+      await deleteImageFromImgbed(c.env, img.image_url)
+    }
+    await run(c.env.abdl_space_db, 'DELETE FROM diaper_images WHERE diaper_id = ?', [id])
+    // 添加新图片
+    for (let i = 0; i < body.images.length; i++) {
+      await run(c.env.abdl_space_db, 'INSERT INTO diaper_images (diaper_id, image_url, sort_order) VALUES (?, ?, ?)', [id, body.images[i], i])
+    }
+  }
+
+  return c.json({ message: '更新成功' })
 })
 
 export default admin

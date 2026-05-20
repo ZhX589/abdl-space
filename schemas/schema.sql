@@ -302,3 +302,13 @@ CREATE TABLE IF NOT EXISTS rate_limits (
   expires_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_rate_limits_expires ON rate_limits(expires_at);
+
+-- 纸尿裤图片表
+CREATE TABLE IF NOT EXISTS diaper_images (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  diaper_id INTEGER NOT NULL REFERENCES diapers(id) ON DELETE CASCADE,
+  image_url TEXT NOT NULL,
+  sort_order INTEGER DEFAULT 0,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_diaper_images_diaper_id ON diaper_images(diaper_id);
