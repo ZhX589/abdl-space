@@ -238,9 +238,22 @@ admin.get('/diapers', adminMiddleware, async (c) => {
      GROUP BY d.id
      ORDER BY d.created_at DESC`
   )
+  const ids = rows.map(r => r.id as number)
+  const sizesMap = new Map<number, { label: string; waist_min: number; waist_max: number; hip_min: number; hip_max: number }[]>()
+  const imagesMap = new Map<number, string[]>()
+  if (ids.length > 0) {
+    const ph = ids.map(() => '?').join(',')
+    const [sizes, images] = await Promise.all([
+      query<{ diaper_id: number; label: string; waist_min: number; waist_max: number; hip_min: number; hip_max: number }>(c.env.abdl_space_db, `SELECT * FROM diaper_sizes WHERE diaper_id IN (${ph})`, ids),
+      query<{ diaper_id: number; image_url: string }>(c.env.abdl_space_db, `SELECT diaper_id, image_url FROM diaper_images WHERE diaper_id IN (${ph}) ORDER BY sort_order`, ids),
+    ])
+    for (const s of sizes) { if (!sizesMap.has(s.diaper_id)) sizesMap.set(s.diaper_id, []); sizesMap.get(s.diaper_id)!.push(s); }
+    for (const img of images) { if (!imagesMap.has(img.diaper_id)) imagesMap.set(img.diaper_id, []); imagesMap.get(img.diaper_id)!.push(img.image_url); }
+  }
   const diapers = rows.map(r => ({
     ...r,
-    images: r.image_urls ? (r.image_urls as string).split(',') : [],
+    images: imagesMap.get(r.id as number) || [],
+    sizes: sizesMap.get(r.id as number) || [],
     image_urls: undefined,
   }))
   return c.json({ diapers })
@@ -252,9 +265,10 @@ admin.get('/diapers', adminMiddleware, async (c) => {
 admin.post('/diapers', adminMiddleware, async (c) => {
   const body = await c.req.json<{
     brand: string; model: string; product_type: string;
-    thickness: number; absorbency_mfr: string; absorbency_adult: string;
+    absorbency_mfr: string; absorbency_adult: string;
     is_baby_diaper: number; material: string; features: string; avg_price: string;
     images?: string[];
+    sizes?: { label: string; waist_min: number; waist_max: number; hip_min: number; hip_max: number }[];
   }>()
 
   if (!body.brand || !body.model || !body.product_type) {
@@ -264,8 +278,8 @@ admin.post('/diapers', adminMiddleware, async (c) => {
   const result = await run(
     c.env.abdl_space_db,
     `INSERT INTO diapers (brand, model, product_type, thickness, absorbency_mfr, absorbency_adult, is_baby_diaper, material, features, avg_price)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [body.brand, body.model, body.product_type, body.thickness || 3, body.absorbency_mfr || '', body.absorbency_adult || '', body.is_baby_diaper || 0, body.material || '', body.features || '', body.avg_price || '']
+     VALUES (?, ?, ?, 3, ?, ?, ?, ?, ?, ?)`,
+    [body.brand, body.model, body.product_type, body.absorbency_mfr || '', body.absorbency_adult || '', body.is_baby_diaper || 0, body.material || '', body.features || '', body.avg_price || '']
   )
   const diaperId = result.meta.last_row_id as number
 
@@ -273,6 +287,13 @@ admin.post('/diapers', adminMiddleware, async (c) => {
   if (body.images && body.images.length > 0) {
     for (let i = 0; i < body.images.length; i++) {
       await run(c.env.abdl_space_db, 'INSERT INTO diaper_images (diaper_id, image_url, sort_order) VALUES (?, ?, ?)', [diaperId, body.images[i], i])
+    }
+  }
+
+  // 添加尺码
+  if (body.sizes && body.sizes.length > 0) {
+    for (const s of body.sizes) {
+      await run(c.env.abdl_space_db, 'INSERT INTO diaper_sizes (diaper_id, label, waist_min, waist_max, hip_min, hip_max) VALUES (?, ?, ?, ?, ?, ?)', [diaperId, s.label, s.waist_min, s.waist_max, s.hip_min, s.hip_max])
     }
   }
 
@@ -286,9 +307,10 @@ admin.patch('/diapers/:id', adminMiddleware, async (c) => {
   const id = parseInt(c.req.param('id') || '')
   const body = await c.req.json<Partial<{
     brand: string; model: string; product_type: string;
-    thickness: number; absorbency_mfr: string; absorbency_adult: string;
+    absorbency_mfr: string; absorbency_adult: string;
     is_baby_diaper: number; material: string; features: string; avg_price: string;
     images: string[];
+    sizes: { label: string; waist_min: number; waist_max: number; hip_min: number; hip_max: number }[];
   }>>()
 
   const diaper = await queryOne<{ id: number }>(c.env.abdl_space_db, 'SELECT id FROM diapers WHERE id = ?', [id])
@@ -297,7 +319,7 @@ admin.patch('/diapers/:id', adminMiddleware, async (c) => {
   // 更新基本信息
   const fields: string[] = []
   const values: unknown[] = []
-  for (const key of ['brand', 'model', 'product_type', 'thickness', 'absorbency_mfr', 'absorbency_adult', 'is_baby_diaper', 'material', 'features', 'avg_price']) {
+  for (const key of ['brand', 'model', 'product_type', 'absorbency_mfr', 'absorbency_adult', 'is_baby_diaper', 'material', 'features', 'avg_price']) {
     if (key in body) {
       fields.push(`${key} = ?`)
       values.push((body as Record<string, unknown>)[key])
@@ -310,15 +332,21 @@ admin.patch('/diapers/:id', adminMiddleware, async (c) => {
 
   // 更新图片（如果有传）
   if (body.images) {
-    // 删除旧图片
     const oldImages = await query<{ image_url: string }>(c.env.abdl_space_db, 'SELECT image_url FROM diaper_images WHERE diaper_id = ?', [id])
     for (const img of oldImages) {
       await deleteImageFromImgbed(c.env, img.image_url)
     }
     await run(c.env.abdl_space_db, 'DELETE FROM diaper_images WHERE diaper_id = ?', [id])
-    // 添加新图片
     for (let i = 0; i < body.images.length; i++) {
       await run(c.env.abdl_space_db, 'INSERT INTO diaper_images (diaper_id, image_url, sort_order) VALUES (?, ?, ?)', [id, body.images[i], i])
+    }
+  }
+
+  // 更新尺码（如果有传）
+  if (body.sizes) {
+    await run(c.env.abdl_space_db, 'DELETE FROM diaper_sizes WHERE diaper_id = ?', [id])
+    for (const s of body.sizes) {
+      await run(c.env.abdl_space_db, 'INSERT INTO diaper_sizes (diaper_id, label, waist_min, waist_max, hip_min, hip_max) VALUES (?, ?, ?, ?, ?, ?)', [id, s.label, s.waist_min, s.waist_max, s.hip_min, s.hip_max])
     }
   }
 
