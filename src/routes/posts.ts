@@ -9,18 +9,19 @@ const IMGBED_URL = 'https://img.abdl-space.top'
 async function deleteImageFromImgbed(env: Env, imageUrl: string) {
   const deleteKey = env.IMGBED_DELETE_KEY
   if (!deleteKey) return
-  let fileName = imageUrl
+  let src = imageUrl
   try {
     const parsed = new URL(imageUrl)
-    fileName = parsed.pathname.replace(/^\/file\//, '')
+    src = parsed.pathname // 保留 /file/ 前缀
   } catch {
-    fileName = imageUrl.replace(/^\/file\//, '')
+    // 如果不是完整 URL，确保有 /file/ 前缀
+    if (!imageUrl.startsWith('/file/')) src = `/file/${imageUrl}`
   }
   try {
     await fetch(`${IMGBED_URL}/api/manage/delete`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${deleteKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ list: [fileName] }),
+      body: JSON.stringify({ src }),
     })
   } catch {}
 }

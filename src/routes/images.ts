@@ -78,14 +78,13 @@ images.post('/delete', authMiddleware, async (c) => {
 
   if (!url) return c.json({ error: 'url 必填' }, 400)
 
-  // 从完整 URL 提取文件名（/file/xxx.jpg → xxx.jpg）
-  let fileName = url
+  // 从完整 URL 提取文件路径
+  let src = url
   try {
     const parsed = new URL(url)
-    fileName = parsed.pathname.replace(/^\/file\//, '')
+    src = parsed.pathname // 保留 /file/ 前缀
   } catch {
-    // url 可能已经是相对路径
-    fileName = url.replace(/^\/file\//, '')
+    if (!url.startsWith('/file/')) src = `/file/${url}`
   }
 
   const res = await fetch(`${IMGBED_URL}/api/manage/delete`, {
@@ -94,7 +93,7 @@ images.post('/delete', authMiddleware, async (c) => {
       'Authorization': `Bearer ${c.env.IMGBED_DELETE_KEY}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ list: [fileName] }),
+    body: JSON.stringify({ src }),
   })
 
   if (!res.ok) {
