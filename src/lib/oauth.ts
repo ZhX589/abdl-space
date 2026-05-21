@@ -47,6 +47,16 @@ export async function sha256(input: string): Promise<string> {
   return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('')
 }
 
+/** SHA-256 → base64url（用于 PKCE code_challenge 校验） */
+export async function sha256base64url(input: string): Promise<string> {
+  const encoder = new TextEncoder()
+  const hash = await crypto.subtle.digest('SHA-256', encoder.encode(input))
+  const bytes = new Uint8Array(hash)
+  let binary = ''
+  for (const b of bytes) binary += String.fromCharCode(b)
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+
 function nowS(): number {
   return Math.floor(Date.now() / 1000)
 }
@@ -295,7 +305,7 @@ export async function consumeAuthorizationCode(
   // PKCE 校验
   if (row.code_challenge) {
     if (!codeVerifier) return { valid: false, error: 'invalid_grant: code_verifier required' }
-    const challenge = await sha256(codeVerifier)
+    const challenge = await sha256base64url(codeVerifier)
     if (challenge !== row.code_challenge) return { valid: false, error: 'invalid_grant: code_verifier mismatch' }
   }
 
