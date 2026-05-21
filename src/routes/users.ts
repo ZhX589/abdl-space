@@ -289,7 +289,7 @@ users.get('/:id/worn', async (c) => {
 
   const worn = await query<Record<string, unknown>>(
     c.env.abdl_space_db,
-    `SELECT r.diaper_id, d.name as diaper_name, d.brand,
+    `SELECT r.diaper_id, d.brand, d.model,
             r.absorption_score, r.fit_score, r.comfort_score,
             r.thickness_score, r.appearance_score, r.value_score,
             r.created_at as rated_at
@@ -303,7 +303,7 @@ users.get('/:id/worn', async (c) => {
   return c.json({
     worn: worn.map(r => ({
       diaper_id: r.diaper_id,
-      diaper_name: r.diaper_name ?? '未知',
+      diaper_name: r.brand && r.model ? `${r.brand} ${r.model}` : (r.brand || r.model || '未知'),
       brand: r.brand ?? null,
       avg_score: Math.round(((r.absorption_score + r.fit_score + r.comfort_score + r.thickness_score + r.appearance_score + r.value_score) / 6) * 10) / 10,
       rated_at: r.rated_at,

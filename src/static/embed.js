@@ -327,7 +327,7 @@
           this.userSequence = []; this.successfulEdges = []; this.nodeScales = {};
           this.setStatus('按高亮顺序点击节点');
         }
-      }, 800);
+      }, COOLDOWN_MS);
     }
 
     async submitAnswer() {
