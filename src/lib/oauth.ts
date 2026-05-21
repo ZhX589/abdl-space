@@ -120,7 +120,7 @@ export async function createClient(
   const clientId = generateClientId()
   const isPublic = !!data.public_client
   const rawSecret = isPublic ? undefined : generateClientSecret()
-  const secretHash = rawSecret ? await sha256(rawSecret) : null
+  const secretHash = rawSecret ? await sha256(rawSecret) : ''
   const now = nowS()
   const authMethod = isPublic ? 'none' : 'client_secret_post'
 
