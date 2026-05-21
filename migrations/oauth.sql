@@ -5,7 +5,7 @@
 CREATE TABLE IF NOT EXISTS oauth_clients (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   client_id     TEXT NOT NULL UNIQUE,          -- 公开标识: "oc_" + 32 hex
-  client_secret TEXT NOT NULL,                 -- SHA-256 哈希存储，不存明文
+  client_secret TEXT,                        -- SHA-256 哈希存储，公开客户端可为空
   name          TEXT NOT NULL,                 -- 应用名称
   description   TEXT,                          -- 应用描述
   logo_url      TEXT,                          -- 应用 logo
@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS oauth_clients (
   redirect_uris TEXT NOT NULL,                 -- JSON 数组: ["https://app.com/callback"]
   scopes        TEXT NOT NULL DEFAULT 'profile', -- 允许的 scope, 逗号分隔
   grant_types   TEXT NOT NULL DEFAULT 'authorization_code,refresh_token',
+  token_endpoint_auth_method TEXT NOT NULL DEFAULT 'client_secret_post', -- 'client_secret_post' | 'none'
   owner_id      INTEGER NOT NULL,              -- 创建者 user id
   active        INTEGER NOT NULL DEFAULT 1,
   created_at    INTEGER NOT NULL,

@@ -63,6 +63,7 @@ export interface OAuthClient {
   redirect_uris: string[]
   scopes: string[]
   grant_types: string[]
+  token_endpoint_auth_method: string  // 'client_secret_post' | 'none'
   owner_id: number
   active: boolean
   created_at: number
@@ -105,8 +106,9 @@ export async function createClient(
     homepage_url?: string
     redirect_uris: string[]
     scopes?: string[]
+    public_client?: boolean  // true = 公开客户端（PKCE），不生成 secret
   }
-): Promise<{ client: OAuthClient; raw_secret: string }> {
+): Promise<{ client: OAuthClient; raw_secret?: string }> {
   // 限制数量
   const count = await queryOne<{ cnt: number }>(
     db, 'SELECT COUNT(*) as cnt FROM oauth_clients WHERE owner_id = ?', [ownerId]
@@ -116,9 +118,11 @@ export async function createClient(
   }
 
   const clientId = generateClientId()
-  const rawSecret = generateClientSecret()
-  const secretHash = await sha256(rawSecret)
+  const isPublic = !!data.public_client
+  const rawSecret = isPublic ? undefined : generateClientSecret()
+  const secretHash = rawSecret ? await sha256(rawSecret) : null
   const now = nowS()
+  const authMethod = isPublic ? 'none' : 'client_secret_post'
 
   const scopes = data.scopes?.filter(s => ALL_SCOPES.includes(s as Scope)) || ['profile']
   const redirectUris = data.redirect_uris.filter(u => {
@@ -129,13 +133,13 @@ export async function createClient(
   await run(db,
     `INSERT INTO oauth_clients
       (client_id, client_secret, name, description, logo_url, homepage_url,
-       redirect_uris, scopes, grant_types, owner_id, active, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+       redirect_uris, scopes, grant_types, token_endpoint_auth_method, owner_id, active, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
     [
       clientId, secretHash, data.name,
       data.description || null, data.logo_url || null, data.homepage_url || null,
       JSON.stringify(redirectUris), scopes.join(','),
-      'authorization_code,refresh_token',
+      'authorization_code,refresh_token', authMethod,
       ownerId, now, now,
     ]
   )
@@ -147,6 +151,7 @@ export async function createClient(
     homepage_url: data.homepage_url || null,
     redirect_uris: redirectUris, scopes,
     grant_types: ['authorization_code', 'refresh_token'],
+    token_endpoint_auth_method: authMethod,
     owner_id: ownerId, active: true,
     created_at: now, updated_at: now,
   }
@@ -159,6 +164,7 @@ export async function getClient(db: D1Database, clientId: string): Promise<OAuth
     id: number; client_id: string; name: string; description: string | null;
     logo_url: string | null; homepage_url: string | null;
     redirect_uris: string; scopes: string; grant_types: string;
+    token_endpoint_auth_method: string;
     owner_id: number; active: number; created_at: number; updated_at: number
   }>(db, 'SELECT * FROM oauth_clients WHERE client_id = ?', [clientId])
 
@@ -170,6 +176,7 @@ export async function getClient(db: D1Database, clientId: string): Promise<OAuth
     redirect_uris: JSON.parse(row.redirect_uris),
     scopes: row.scopes.split(','),
     grant_types: row.grant_types.split(','),
+    token_endpoint_auth_method: row.token_endpoint_auth_method || 'client_secret_post',
     owner_id: row.owner_id, active: !!row.active,
     created_at: row.created_at, updated_at: row.updated_at,
   }
@@ -180,6 +187,7 @@ export async function getClientsByOwner(db: D1Database, ownerId: number): Promis
     id: number; client_id: string; name: string; description: string | null;
     logo_url: string | null; homepage_url: string | null;
     redirect_uris: string; scopes: string; grant_types: string;
+    token_endpoint_auth_method: string;
     owner_id: number; active: number; created_at: number; updated_at: number
   }>(db, 'SELECT * FROM oauth_clients WHERE owner_id = ? ORDER BY created_at DESC', [ownerId])
 
@@ -190,6 +198,7 @@ export async function getClientsByOwner(db: D1Database, ownerId: number): Promis
     redirect_uris: JSON.parse(row.redirect_uris),
     scopes: row.scopes.split(','),
     grant_types: row.grant_types.split(','),
+    token_endpoint_auth_method: row.token_endpoint_auth_method || 'client_secret_post',
     owner_id: row.owner_id, active: !!row.active,
     created_at: row.created_at, updated_at: row.updated_at,
   }))

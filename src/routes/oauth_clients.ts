@@ -39,7 +39,8 @@ oauthClients.post('/', authMiddleware, async (c) => {
   const user = c.get('user')
   let body: {
     name?: string; description?: string; logo_url?: string;
-    homepage_url?: string; redirect_uris?: string[]; scopes?: string[]
+    homepage_url?: string; redirect_uris?: string[]; scopes?: string[];
+    public_client?: boolean
   }
   try { body = await c.req.json() } catch { return c.json({ error: 'invalid body' }, 400) }
 
@@ -55,6 +56,7 @@ oauthClients.post('/', authMiddleware, async (c) => {
       homepage_url: body.homepage_url,
       redirect_uris: body.redirect_uris,
       scopes: body.scopes,
+      public_client: body.public_client,
     })
     return c.json({ client, raw_secret })
   } catch (err: unknown) {

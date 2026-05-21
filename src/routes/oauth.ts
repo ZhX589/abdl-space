@@ -145,16 +145,21 @@ oauth.post('/token', async (c) => {
   const clientId = body.client_id
   const clientSecret = body.client_secret
 
-  if (!clientId || !clientSecret) {
-    return c.json({ error: 'client_id and client_secret required' }, 401)
+  if (!clientId) {
+    return c.json({ error: 'client_id required' }, 401)
   }
 
-  // 验证 client
-  const valid = await verifyClientSecret(c.env.abdl_space_db, clientId, clientSecret)
-  if (!valid) return c.json({ error: 'invalid_client' }, 401)
-
+  // 获取 client
   const client = await getClient(c.env.abdl_space_db, clientId)
-  if (!client) return c.json({ error: 'invalid_client' }, 401)
+  if (!client || !client.active) return c.json({ error: 'invalid_client' }, 401)
+
+  // 公开客户端（PKCE）不需要 secret，机密客户端需要
+  const isPublicClient = client.token_endpoint_auth_method === 'none'
+  if (!isPublicClient) {
+    if (!clientSecret) return c.json({ error: 'client_secret required' }, 401)
+    const valid = await verifyClientSecret(c.env.abdl_space_db, clientId, clientSecret)
+    if (!valid) return c.json({ error: 'invalid_client' }, 401)
+  }
 
   if (grantType === 'authorization_code') {
     if (!client.grant_types.includes('authorization_code')) {
@@ -164,6 +169,11 @@ oauth.post('/token', async (c) => {
     const { code, redirect_uri, code_verifier } = body
     if (!code || !redirect_uri) {
       return c.json({ error: 'code and redirect_uri required' }, 400)
+    }
+
+    // 公开客户端必须使用 PKCE
+    if (isPublicClient && !code_verifier) {
+      return c.json({ error: 'code_verifier required for public clients' }, 400)
     }
 
     const result = await consumeAuthorizationCode(
