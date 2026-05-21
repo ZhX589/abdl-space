@@ -40,15 +40,18 @@ app.use('*', logger())
 
 const ALLOWED_ORIGINS = [
   'http://localhost:5173',
+  'http://localhost:5174',
   'https://wiki.abdl-space.top',
   'https://www.abdl-space.top',
   'https://abdl-space.top',
   'https://img.abdl-space.top',
+  'https://open.abdl-space.top',
 ]
 
 async function corsWithOrigin(c: Context<AppType>, next: Next) {
   const incomingOrigin = c.req.header('origin') || ''
   const allowed = ALLOWED_ORIGINS.includes(incomingOrigin)
+    || incomingOrigin.endsWith('.abdl-space.top')
     ? incomingOrigin
     : ALLOWED_ORIGINS[0]
   return cors({
