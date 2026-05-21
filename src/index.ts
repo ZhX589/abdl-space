@@ -35,7 +35,11 @@ type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
 const app = new Hono<AppType>()
 
-app.use('*', corsWithOrigin)
+app.use('*', async (c, next) => {
+  // /api/v1/* 路由由各自处理 CORS（允许所有来源）
+  if (c.req.path.startsWith('/api/v1/')) return next()
+  return corsWithOrigin(c, next)
+})
 app.use('*', logger())
 
 const ALLOWED_ORIGINS = [
