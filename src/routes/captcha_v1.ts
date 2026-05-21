@@ -1,4 +1,5 @@
 import { Hono } from 'hono'
+import { cors } from 'hono/cors'
 import type { Env } from '../types/index.ts'
 import { captchaService } from '../lib/captcha.ts'
 import { validateApiKey, recordKeyUsage } from './captcha_keys.ts'
@@ -6,6 +7,13 @@ import { validateApiKey, recordKeyUsage } from './captcha_keys.ts'
 type AppType = { Bindings: Env }
 
 const captchaV1 = new Hono<AppType>()
+
+// 外部 API 允许任意来源（API Key 鉴权，不需要 cookie）
+captchaV1.use('*', cors({
+  origin: '*',
+  allowHeaders: ['Content-Type', 'Authorization'],
+  allowMethods: ['GET', 'POST', 'OPTIONS'],
+}))
 
 /** 从 Authorization: Bearer <key> 提取 key */
 function extractApiKey(c: { req: { header: (name: string) => string | undefined } }): string | null {
