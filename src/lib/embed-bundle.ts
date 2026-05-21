@@ -179,6 +179,7 @@ export const EMBED_JS = `/**
       bar.appendChild(this.attemptsEl);
 
       this.resetBtn = document.createElement('button');
+      this.resetBtn.type = 'button';
       this.resetBtn.textContent = '重置';
       bar.appendChild(this.resetBtn);
 
