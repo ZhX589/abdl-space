@@ -203,6 +203,7 @@
     }
 
     async fetchChallenge() {
+      this.setStatus('正在加载...');
       console.log('[ABDLCaptcha] fetchChallenge, apiKey:', this.apiKey ? this.apiKey.slice(0, 11) + '...' : 'EMPTY');
       try {
         const res = await fetch(`${API_BASE}/api/v1/captcha/create`, {
@@ -211,6 +212,7 @@
           body: JSON.stringify({ type: 'quantum' }),
         });
         const data = await res.json();
+        console.log('[ABDLCaptcha] create response:', res.status, data);
         if (!res.ok) throw new Error(data.error || 'Failed to create challenge');
         this.sessionId = data.session_id;
         this.correctOrder = data.challenge.order || [];
