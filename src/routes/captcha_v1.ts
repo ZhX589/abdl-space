@@ -3,6 +3,7 @@ import { cors } from 'hono/cors'
 import type { Env } from '../types/index.ts'
 import { captchaService } from '../lib/captcha.ts'
 import { validateApiKey, recordKeyUsage } from './captcha_keys.ts'
+import { rateLimit } from '../lib/rate-limit.ts'
 
 type AppType = { Bindings: Env }
 
@@ -14,6 +15,9 @@ captchaV1.use('*', cors({
   allowHeaders: ['Content-Type', 'Authorization'],
   allowMethods: ['GET', 'POST', 'OPTIONS'],
 }))
+
+// 限速：每 API Key 每分钟 60 次（通过 IP 限速，API Key 限速在服务端逻辑中）
+captchaV1.use('*', rateLimit('v1-captcha', 60_000, 120))
 
 /** 从 Authorization: Bearer <key> 提取 key */
 function extractApiKey(c: { req: { header: (name: string) => string | undefined } }): string | null {

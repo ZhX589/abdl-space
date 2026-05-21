@@ -9,10 +9,16 @@ import {
 } from '../lib/oauth.ts'
 import { queryOne } from '../lib/db.ts'
 import { authMiddleware } from '../middleware/auth.ts'
+import { rateLimit } from '../lib/rate-limit.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
 const oauth = new Hono<AppType>()
+
+// 令牌端点限速：每 IP 每分钟 20 次
+oauth.use('/token', rateLimit('oauth-token', 60_000, 20))
+// 授权端点限速：每 IP 每分钟 30 次
+oauth.use('/authorize', rateLimit('oauth-authorize', 60_000, 30))
 
 /* ============================================================
  * GET /oauth/authorize — 授权端点（返回授权页面数据）

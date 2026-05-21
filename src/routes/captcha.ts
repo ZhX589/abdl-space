@@ -1,10 +1,15 @@
 import { Hono } from 'hono'
 import type { Env } from '../types/index.ts'
 import { captchaService } from '../lib/captcha.ts'
+import { rateLimit } from '../lib/rate-limit.ts'
 
 type AppType = { Bindings: Env }
 
 const captcha = new Hono<AppType>()
+
+// 限速：每 IP 每分钟 30 次 challenge 请求
+captcha.use('/challenge', rateLimit('captcha-challenge', 60_000, 30))
+captcha.use('/verify', rateLimit('captcha-verify', 60_000, 60))
 
 /* ============================================================
  * 内部 API — 前端直连调用
