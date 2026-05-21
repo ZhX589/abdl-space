@@ -327,12 +327,14 @@ export const EMBED_JS = `/**
 
     async submitAnswer() {
       try {
+        console.log('[ABDLCaptcha] submitAnswer:', { sessionId: this.sessionId, answer: this.userSequence.join(','), hasApiKey: !!this.apiKey });
         const res = await fetch(\`\${API_BASE}/api/v1/captcha/check\`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'Authorization': \`Bearer \${this.apiKey}\` },
           body: JSON.stringify({ session_id: this.sessionId, answer: this.userSequence.join(',') }),
         });
         const data = await res.json();
+        console.log('[ABDLCaptcha] check response:', data);
         if (data.verified && data.token) {
           this.setStatus('✓ 验证成功', 'ok');
           this.onSuccess(data.token);
@@ -348,6 +350,7 @@ export const EMBED_JS = `/**
           setTimeout(() => this.setStatus('按高亮顺序点击节点'), 1500);
         }
       } catch (err) {
+        console.error('[ABDLCaptcha] submitAnswer error:', err);
         this.setStatus('网络错误', 'err');
         this.onError(err);
       }
