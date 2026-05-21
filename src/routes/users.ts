@@ -62,6 +62,13 @@ users.get('/:id', async (c) => {
   )
   if (!user) return c.json({ error: 'User not found' }, 404)
 
+  // 穿过数量 = 该用户评分过的不同纸尿裤数
+  const wornRow = await queryOne<{ cnt: number }>(
+    c.env.abdl_space_db,
+    'SELECT COUNT(DISTINCT diaper_id) as cnt FROM ratings WHERE user_id = ?',
+    [id]
+  )
+
   return c.json({
     user: {
       id: user.id,
@@ -72,7 +79,8 @@ users.get('/:id', async (c) => {
       region: user.region ?? null,
       style_preference: user.style_preference ?? null,
       bio: user.bio ?? null,
-      created_at: user.created_at
+      created_at: user.created_at,
+      worn_count: wornRow?.cnt ?? 0,
     }
   })
 })
@@ -270,6 +278,37 @@ users.get('/:id/ratings', async (c) => {
       review_status: r.review_status,
       created_at: r.created_at
     }))
+  })
+})
+
+/**
+ * GET /api/users/:id/worn — 用户穿过的纸尿裤（评过分的）
+ */
+users.get('/:id/worn', async (c) => {
+  const id = parseInt(c.req.param('id'))
+
+  const worn = await query<Record<string, unknown>>(
+    c.env.abdl_space_db,
+    `SELECT r.diaper_id, d.name as diaper_name, d.brand,
+            r.absorption_score, r.fit_score, r.comfort_score,
+            r.thickness_score, r.appearance_score, r.value_score,
+            r.created_at as rated_at
+     FROM ratings r
+     LEFT JOIN diapers d ON r.diaper_id = d.id
+     WHERE r.user_id = ?
+     ORDER BY r.created_at DESC`,
+    [id]
+  )
+
+  return c.json({
+    worn: worn.map(r => ({
+      diaper_id: r.diaper_id,
+      diaper_name: r.diaper_name ?? '未知',
+      brand: r.brand ?? null,
+      avg_score: Math.round(((r.absorption_score + r.fit_score + r.comfort_score + r.thickness_score + r.appearance_score + r.value_score) / 6) * 10) / 10,
+      rated_at: r.rated_at,
+    })),
+    total: worn.length,
   })
 })
 
