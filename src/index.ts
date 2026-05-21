@@ -26,6 +26,8 @@ import search from './routes/search.ts'
 import apiKeys from './routes/api_keys.ts'
 import reports from './routes/reports.ts'
 import captcha from './routes/captcha.ts'
+import captchaKeys from './routes/captcha_keys.ts'
+import captchaV1 from './routes/captcha_v1.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
@@ -88,6 +90,8 @@ app.route('/api/search', search)
 app.route('/api/api_keys', apiKeys)
 app.route('/api/reports', reports)
 app.route('/api/captcha', captcha)
+app.route('/api/captcha/keys', captchaKeys)
+app.route('/api/v1/captcha', captchaV1)
 
 /**
  * POST /admin_reset/password — admin 只能改自己的密码（需鉴权）
