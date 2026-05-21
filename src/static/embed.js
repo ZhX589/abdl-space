@@ -154,6 +154,7 @@
       injectStyles();
       this.buildUI();
       this.bindEvents();
+      console.log('[ABDLCaptcha] render called, apiKey:', options.apiKey ? options.apiKey.slice(0, 11) + '...' : 'EMPTY');
       this.fetchChallenge();
     }
 
@@ -202,6 +203,7 @@
     }
 
     async fetchChallenge() {
+      console.log('[ABDLCaptcha] fetchChallenge, apiKey:', this.apiKey ? this.apiKey.slice(0, 11) + '...' : 'EMPTY');
       try {
         const res = await fetch(`${API_BASE}/api/v1/captcha/create`, {
           method: 'POST',
@@ -299,6 +301,7 @@
     }
 
     complete(success) {
+      console.log('[ABDLCaptcha] complete:', success, 'sequence:', this.userSequence.join(','));
       if (this.isVerified) return;
       if (success) {
         this.isVerified = true;
