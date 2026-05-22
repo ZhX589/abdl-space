@@ -266,7 +266,7 @@ admin.post('/diapers', adminMiddleware, async (c) => {
   const body = await c.req.json<{
     brand: string; model: string; product_type: string;
     absorbency_mfr: string; absorbency_adult: string;
-    is_baby_diaper: number; material: string; features: string; avg_price: string;
+    is_baby_diaper: number; material: string; features: string; avg_price: string; official_url?: string;
     images?: string[];
     sizes?: { label: string; waist_min: number; waist_max: number; hip_min: number; hip_max: number }[];
   }>()
@@ -277,9 +277,9 @@ admin.post('/diapers', adminMiddleware, async (c) => {
 
   const result = await run(
     c.env.abdl_space_db,
-    `INSERT INTO diapers (brand, model, product_type, thickness, absorbency_mfr, absorbency_adult, is_baby_diaper, material, features, avg_price)
-     VALUES (?, ?, ?, 3, ?, ?, ?, ?, ?, ?)`,
-    [body.brand, body.model, body.product_type, body.absorbency_mfr || '', body.absorbency_adult || '', body.is_baby_diaper || 0, body.material || '', body.features || '', body.avg_price || '']
+    `INSERT INTO diapers (brand, model, product_type, thickness, absorbency_mfr, absorbency_adult, is_baby_diaper, material, features, avg_price, official_url)
+     VALUES (?, ?, ?, 3, ?, ?, ?, ?, ?, ?, ?)`,
+    [body.brand, body.model, body.product_type, body.absorbency_mfr || '', body.absorbency_adult || '', body.is_baby_diaper || 0, body.material || '', body.features || '', body.avg_price || '', body.official_url || '']
   )
   const diaperId = result.meta.last_row_id as number
 
@@ -319,7 +319,7 @@ admin.patch('/diapers/:id', adminMiddleware, async (c) => {
   // 更新基本信息
   const fields: string[] = []
   const values: unknown[] = []
-  for (const key of ['brand', 'model', 'product_type', 'absorbency_mfr', 'absorbency_adult', 'is_baby_diaper', 'material', 'features', 'avg_price']) {
+  for (const key of ['brand', 'model', 'product_type', 'absorbency_mfr', 'absorbency_adult', 'is_baby_diaper', 'material', 'features', 'avg_price', 'official_url']) {
     if (key in body) {
       fields.push(`${key} = ?`)
       values.push((body as Record<string, unknown>)[key])
@@ -351,6 +351,50 @@ admin.patch('/diapers/:id', adminMiddleware, async (c) => {
   }
 
   return c.json({ message: '更新成功' })
+})
+
+// ===== 品牌管理 =====
+
+/**
+ * GET /api/admin/brands — 品牌列表
+ */
+admin.get('/brands', adminMiddleware, async (c) => {
+  const rows = await query<{ id: number; name: string; logo: string; invert_dark: number; invert_light: number; created_at: string }>(
+    c.env.abdl_space_db,
+    'SELECT id, name, logo, invert_dark, invert_light, created_at FROM brands ORDER BY name'
+  )
+  return c.json({ brands: rows.map(r => ({ ...r, logo: r.logo || null, invert_dark: !!r.invert_dark, invert_light: !!r.invert_light })) })
+})
+
+/**
+ * POST /api/admin/brands — 创建/更新品牌
+ * { name, logo? }
+ */
+admin.post('/brands', adminMiddleware, async (c) => {
+  const body = await c.req.json<{ name: string; logo?: string; invert_dark?: boolean; invert_light?: boolean }>()
+  if (!body.name?.trim()) return c.json({ error: '品牌名称为必填' }, 400)
+
+  const existing = await queryOne<{ id: number }>(
+    c.env.abdl_space_db, 'SELECT id FROM brands WHERE name = ?', [body.name.trim()]
+  )
+  if (existing) {
+    await run(c.env.abdl_space_db, 'UPDATE brands SET logo = ?, invert_dark = ?, invert_light = ? WHERE id = ?', [body.logo || '', body.invert_dark ? 1 : 0, body.invert_light ? 1 : 0, existing.id])
+    return c.json({ id: existing.id, message: '更新成功' })
+  }
+  const result = await run(c.env.abdl_space_db, 'INSERT INTO brands (name, logo, invert_dark, invert_light) VALUES (?, ?, ?, ?)', [body.name.trim(), body.logo || '', body.invert_dark ? 1 : 0, body.invert_light ? 1 : 0])
+  return c.json({ id: result.meta.last_row_id, message: '创建成功' }, 201)
+})
+
+/**
+ * DELETE /api/admin/brands/:id
+ */
+admin.delete('/brands/:id', adminMiddleware, async (c) => {
+  const id = parseInt(c.req.param('id') || '')
+  const brand = await queryOne<{ id: number; logo: string }>(c.env.abdl_space_db, 'SELECT id, logo FROM brands WHERE id = ?', [id])
+  if (!brand) return c.json({ error: '品牌不存在' }, 404)
+  if (brand.logo) { try { await deleteImageFromImgbed(c.env, brand.logo); } catch { /* ignore */ } }
+  await run(c.env.abdl_space_db, 'DELETE FROM brands WHERE id = ?', [id])
+  return c.json({ message: '删除成功' })
 })
 
 export default admin
