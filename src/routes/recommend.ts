@@ -96,16 +96,21 @@ ${feelingsLine}
 可选纸尿裤：
 ${diaperList}
 
-请根据用户信息，推荐最合适的2-4款纸尿裤，返回格式如下（只返回JSON，不要其他内容）：
-{
-  "recommendations": [
-    {"diaper_id": 1, "reason": "推荐理由，20字以内", "matchScore": 85},
-    ...
-  ],
-  "summary": "一句话总结推荐逻辑，20字以内"
-}
+请根据用户信息，推荐最合适的2-4款纸尿裤。
 
-matchScore 1-100，表示推荐匹配度。不要返回不存在的diaper_id。`
+要求：
+1. 用自然、亲切的中文写一段推荐分析（150-250字）
+2. 在分析中自然地提到你推荐的纸尿裤，每次提到时用【品牌 型号】的格式标记，例如【ABU Little Kings】
+3. 分析要结合用户的具体数据（身材、偏好、使用感受等）
+4. 最后返回一个JSON对象
+
+返回格式（先写分析文本，然后换行写JSON）：
+
+根据你的数据分析...
+
+{"recommendations": [{"diaper_id": 1, "reason": "推荐理由", "matchScore": 85}], "summary": "一句话总结"}
+
+matchScore 1-100。不要返回不存在的diaper_id。`
 }
 
 /**
@@ -192,10 +197,17 @@ recommend.post('/', authMiddleware, async (c) => {
   }
 
   let parsed: { recommendations: Recommendation[]; summary: string }
+  let rawText = ''
   try {
-    const jsonMatch = rawResponse.match(/\{[\s\S]*\}/)
-    if (!jsonMatch) throw new Error('No JSON found in response')
-    parsed = JSON.parse(jsonMatch[0])
+    // 提取 JSON（最后一个 {} 块）
+    const jsonMatch = rawResponse.match(/\{[\s\S]*\}$/)
+    if (jsonMatch) {
+      parsed = JSON.parse(jsonMatch[0])
+      // JSON 之前的内容就是 AI 的分析文本
+      rawText = rawResponse.substring(0, rawResponse.lastIndexOf(jsonMatch[0])).trim()
+    } else {
+      throw new Error('No JSON found in response')
+    }
   } catch {
     return c.json({ error: 'AI 返回格式解析失败，请重试' }, 502)
   }
@@ -217,7 +229,9 @@ recommend.post('/', authMiddleware, async (c) => {
 
   return c.json({
     recommendations,
-    summary: parsed.summary || `根据您的信息推荐 ${recommendations.length} 款`
+    summary: parsed.summary || `根据您的信息推荐 ${recommendations.length} 款`,
+    rawText: rawText || undefined,
+    diapers: diapers.map(d => ({ id: d.id, brand: d.brand, model: d.model }))
   })
   } catch (e) {
     console.error('[recommend] error:', e)
