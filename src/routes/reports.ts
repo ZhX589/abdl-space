@@ -104,6 +104,13 @@ reports.patch('/admin/:id', adminMiddleware, async (c) => {
     if (report.target_type === 'post') {
       await run(c.env.abdl_space_db, 'DELETE FROM posts WHERE id = ?', [report.target_id])
     } else {
+      // 删除评论图片
+      const cmtImages = await query<{ image_url: string }>(
+        c.env.abdl_space_db, 'SELECT image_url FROM comment_images WHERE comment_id = ?', [report.target_id]
+      )
+      for (const img of cmtImages) {
+        await deleteImageFromImgbed(c.env, img.image_url)
+      }
       await run(c.env.abdl_space_db, 'DELETE FROM post_comments WHERE id = ?', [report.target_id])
     }
   }

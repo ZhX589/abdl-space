@@ -28,6 +28,17 @@ async function deleteImageFromImgbed(env: Env, imageUrl: string) {
 
 
 // 安全查询帖子图片（post_images 表可能不存在）
+async function safeGetCommentImages(db: D1Database, commentId: number): Promise<{image_url: string; is_nsfw: number}[]> {
+  try {
+    const result = await db.prepare(
+      'SELECT image_url, is_nsfw FROM comment_images WHERE comment_id = ? ORDER BY sort_order'
+    ).bind(commentId).all();
+    return result.results as { image_url: string; is_nsfw: number }[];
+  } catch {
+    return [];
+  }
+}
+
 async function safeGetImages(db: D1Database, postId: number): Promise<{image_url: string; is_nsfw: number}[]> {
   try {
     const result = await db.prepare('SELECT image_url, is_nsfw FROM post_images WHERE post_id = ? ORDER BY sort_order').bind(postId).all();
@@ -210,12 +221,15 @@ posts.get('/:id', async (c) => {
       [cmt.id]
     )
 
+    const commentImages = await safeGetCommentImages(c.env.abdl_space_db, cmt.id);
+
     return {
       id: cmt.id,
       post_id: cmt.post_id,
       user: { id: cmt.user_id, username: cmt.username, avatar: cmt.avatar ?? null, role: cmt.role },
       parent_id: cmt.parent_id ?? null,
       content: cmt.content,
+      images: commentImages.map(img => ({ image_url: img.image_url, is_nsfw: !!img.is_nsfw })),
       like_count: likeCount?.count ?? 0,
       has_liked: cmtHasLiked,
       created_at: cmt.created_at
@@ -349,12 +363,25 @@ posts.delete('/:id', authMiddleware, async (c) => {
     return c.json({ error: 'Not authorized' }, 403)
   }
 
-  // 删除图床图片
+  // 删除帖子图片
   const postImages = await query<{ image_url: string }>(
     c.env.abdl_space_db, 'SELECT image_url FROM post_images WHERE post_id = ?', [id]
   )
   for (const img of postImages) {
     await deleteImageFromImgbed(c.env, img.image_url)
+  }
+
+  // 删除评论图片（评论本身由 DB CASCADE 触发删除）
+  const commentRows = await query<{ id: number }>(
+    c.env.abdl_space_db, 'SELECT id FROM post_comments WHERE post_id = ?', [id]
+  )
+  for (const cmt of commentRows) {
+    const cmtImages = await query<{ image_url: string }>(
+      c.env.abdl_space_db, 'SELECT image_url FROM comment_images WHERE comment_id = ?', [cmt.id]
+    )
+    for (const img of cmtImages) {
+      await deleteImageFromImgbed(c.env, img.image_url)
+    }
   }
 
   await run(c.env.abdl_space_db, 'DELETE FROM posts WHERE id = ?', [id])

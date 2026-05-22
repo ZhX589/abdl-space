@@ -17,10 +17,18 @@ interface DiaperInfo {
   id: number
   brand: string
   model: string
+  product_type: string
   thickness: number
   avg_score: number
   rating_count: number
+  absorbency_mfr: string
   absorbency_adult: string
+  is_baby_diaper: number
+  comfort: number | null
+  popularity: number
+  material: string
+  features: string
+  avg_price: string
 }
 
 const recommend = new Hono<AppType>()
@@ -84,33 +92,53 @@ function buildPrompt(
     ? `平均感受：松紧度${avgFeelings.looseness > 0 ? '偏紧' : avgFeelings.looseness < 0 ? '偏松' : '适中'}、柔软度${avgFeelings.softness > 0 ? '较软' : '较硬'}、干燥感${avgFeelings.dryness > 0 ? '较干' : '较湿'}、防臭${avgFeelings.odor_control > 0 ? '较好' : '一般'}、静音${avgFeelings.quietness > 0 ? '较安静' : '较吵'}`
     : '暂无感受数据'
 
-  const diaperList = diapers.map((d, i) =>
-    `${i + 1}. ${d.brand} ${d.model}（厚度${d.thickness}/5，综合评分${d.avg_score}，${d.rating_count}人评价，吸收量${d.absorbency_adult}）`
-  ).join('\n')
+  const diaperList = diapers.map((d, i) => {
+    const parts = [
+      `${i + 1}. 【${d.brand} ${d.model}】`,
+      `类型：${d.product_type}`,
+      `厚度：${d.thickness}/5`,
+      `综合评分：${d.avg_score}（${d.rating_count}人评价）`,
+      `厂家标称吸收：${d.absorbency_mfr}，成人实际吸收：${d.absorbency_adult}`,
+      d.is_baby_diaper ? '注意：此为婴儿纸尿裤，成人使用需折算吸收量' : '成人专用纸尿裤',
+      d.comfort ? `先天舒适度：${d.comfort}/5` : null,
+      `社区热度：${d.popularity}/10`,
+      `材质：${d.material}`,
+      `特点：${d.features}`,
+      `参考价：${d.avg_price}`
+    ].filter(Boolean)
+    return parts.join('；')
+  }).join('\n')
 
-  return `你是一个纸尿裤推荐专家。用户想根据个人信息找到最合适的纸尿裤。
+  return `你是一个纸尿裤推荐专家，服务于 ABDL（Adult Baby Diaper Lover）社区。用户是 ABDL 群体的一员，他们不仅关注纸尿裤的功能性（吸收、舒适），也关注外观、穿着体验和心理满足感。请从 ABDL 用户的角度出发进行推荐。
 
 ${profileLines}
 ${feelingsLine}
 
-可选纸尿裤：
+可选纸尿裤详细信息：
 ${diaperList}
 
 请根据用户信息，推荐最合适的2-4款纸尿裤。
 
 要求：
-1. 用自然、亲切的中文写一段推荐分析（150-250字）
-2. 在分析中自然地提到你推荐的纸尿裤，每次提到时用【品牌 型号】的格式标记，例如【ABU Little Kings】
-3. 分析要结合用户的具体数据（身材、偏好、使用感受等）
-4. 最后返回一个JSON对象
+1. 写一段自然、亲切的推荐分析（150-250字），像朋友聊天一样
+2. 分析要结合用户的具体数据（身材、偏好、使用感受等）
+3. 提到纸尿裤时用 content 数组中的 diaper 类型引用
+4. 可以提到纸尿裤的材质、特点、吸收量等具体信息来支撑推荐理由
+5. 理解 ABDL 用户对纸尿裤的情感需求，推荐时兼顾实用性和心理满足
 
-返回格式（先写分析文本，然后换行写JSON）：
+返回格式（只返回JSON）：
+{
+  "content": [
+    {"type": "text", "text": "根据你的数据分析，"},
+    {"type": "diaper", "diaper_id": 1},
+    {"type": "text", "text": "非常适合你的身材特点..."},
+    {"type": "diaper", "diaper_id": 3}
+  ],
+  "recommendations": [{"diaper_id": 1, "reason": "推荐理由，20字以内", "matchScore": 85}],
+  "summary": "一句话总结推荐逻辑，20字以内"
+}
 
-根据你的数据分析...
-
-{"recommendations": [{"diaper_id": 1, "reason": "推荐理由", "matchScore": 85}], "summary": "一句话总结"}
-
-matchScore 1-100。不要返回不存在的diaper_id。`
+matchScore 1-100。content 数组中 text 和 diaper 交替出现，构成完整的分析文本。`
 }
 
 /**
@@ -149,12 +177,12 @@ recommend.post('/', authMiddleware, async (c) => {
 
   const diapersRaw = (await query(
     c.env.abdl_space_db,
-    `SELECT d.id, d.brand, d.model, d.thickness,
+    `SELECT d.id, d.brand, d.model, d.product_type, d.thickness,
       ROUND(AVG((r.absorption_score + r.fit_score + r.comfort_score + r.thickness_score + r.appearance_score + r.value_score) / 6.0), 1) as rating_avg,
       COUNT(r.id) as rating_count,
       ROUND(COALESCE(AVG((f.looseness + 5 + f.softness + 5 + f.dryness + 5 + f.odor_control + 5 + f.quietness + 5) / 5.0), 0), 0) as feeling_avg,
       COUNT(DISTINCT f.id) as feeling_count,
-      d.absorbency_adult
+      d.absorbency_mfr, d.absorbency_adult, d.is_baby_diaper, d.comfort, d.popularity, d.material, d.features, d.avg_price
      FROM diapers d
      LEFT JOIN ratings r ON r.diaper_id = d.id
      LEFT JOIN feelings f ON f.diaper_id = d.id
@@ -172,10 +200,18 @@ recommend.post('/', authMiddleware, async (c) => {
       id: Number(d.id),
       brand: String(d.brand),
       model: String(d.model),
+      product_type: String(d.product_type),
       thickness: Number(d.thickness),
       avg_score: computeAvgScore(ratingAvg, ratingCount, feelingAvg, feelingCount),
       rating_count: ratingCount,
-      absorbency_adult: String(d.absorbency_adult)
+      absorbency_mfr: String(d.absorbency_mfr),
+      absorbency_adult: String(d.absorbency_adult),
+      is_baby_diaper: Number(d.is_baby_diaper),
+      comfort: d.comfort != null ? Number(d.comfort) : null,
+      popularity: Number(d.popularity),
+      material: String(d.material),
+      features: String(d.features),
+      avg_price: String(d.avg_price)
     }
   })
 
@@ -196,18 +232,11 @@ recommend.post('/', authMiddleware, async (c) => {
     return c.json({ error: `AI 服务调用失败：${e instanceof Error ? e.message : 'Unknown error'}` }, 502)
   }
 
-  let parsed: { recommendations: Recommendation[]; summary: string }
-  let rawText = ''
+  let parsed: { content?: { type: string; text?: string; diaper_id?: number }[]; recommendations: Recommendation[]; summary: string }
   try {
-    // 提取 JSON（最后一个 {} 块）
-    const jsonMatch = rawResponse.match(/\{[\s\S]*\}$/)
-    if (jsonMatch) {
-      parsed = JSON.parse(jsonMatch[0])
-      // JSON 之前的内容就是 AI 的分析文本
-      rawText = rawResponse.substring(0, rawResponse.lastIndexOf(jsonMatch[0])).trim()
-    } else {
-      throw new Error('No JSON found in response')
-    }
+    const jsonMatch = rawResponse.match(/\{[\s\S]*\}/)
+    if (!jsonMatch) throw new Error('No JSON found in response')
+    parsed = JSON.parse(jsonMatch[0])
   } catch {
     return c.json({ error: 'AI 返回格式解析失败，请重试' }, 502)
   }
@@ -230,8 +259,8 @@ recommend.post('/', authMiddleware, async (c) => {
   return c.json({
     recommendations,
     summary: parsed.summary || `根据您的信息推荐 ${recommendations.length} 款`,
-    rawText: rawText || undefined,
-    diapers: diapers.map(d => ({ id: d.id, brand: d.brand, model: d.model }))
+    content: parsed.content || undefined,
+    diapers: diapers.map(d => ({ id: d.id, brand: d.brand, model: d.model, product_type: d.product_type }))
   })
   } catch (e) {
     console.error('[recommend] error:', e)

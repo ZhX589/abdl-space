@@ -61,7 +61,7 @@ async function corsWithOrigin(c: Context<AppType>, next: Next) {
   return cors({
     origin: allowed,
     credentials: true,
-    allowHeaders: ['Content-Type', 'Authorization'],
+    allowHeaders: ['Content-Type', 'Authorization', 'X-Captcha-Token'],
     allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   })(c, next)
 }
