@@ -37,6 +37,7 @@ function calcLevel(exp: number) {
 users.get('/search', async (c) => {
   const q = c.req.query('q') || '';
   if (!q.trim()) return c.json({ users: [] });
+  if (q.length > 100) return c.json({ error: 'Query too long' }, 400);
 
   const rows = await query<Record<string, unknown>>(
     c.env.abdl_space_db,

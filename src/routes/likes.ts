@@ -22,11 +22,17 @@ likes.post('/', authMiddleware, async (c) => {
     return c.json({ error: 'target_type must be post or comment' }, 400)
   }
 
-  const table = target_type === 'post' ? 'posts' : 'post_comments'
+  const tableMap: Record<string, string> = { post: 'posts', comment: 'post_comments' }
+  const table = tableMap[target_type]
+  if (!table) return c.json({ error: 'Invalid target_type' }, 400)
+
+  const targetId = parseInt(String(target_id))
+  if (!targetId || targetId < 1) return c.json({ error: 'Invalid target_id' }, 400)
+
   const target = await queryOne<{ id: number }>(
     c.env.abdl_space_db,
     `SELECT id FROM ${table} WHERE id = ?`,
-    [target_id]
+    [targetId]
   )
   if (!target) return c.json({ error: 'Target not found' }, 404)
 
