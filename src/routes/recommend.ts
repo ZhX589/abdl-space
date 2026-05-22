@@ -112,6 +112,7 @@ matchScore 1-100，表示推荐匹配度。不要返回不存在的diaper_id。`
  * POST /api/recommend — AI 推荐（DeepSeek 驱动）
  */
 recommend.post('/', authMiddleware, async (c) => {
+  try {
   const user = c.get('user')
 
   const [{ selected }] = await Promise.all([
@@ -146,7 +147,7 @@ recommend.post('/', authMiddleware, async (c) => {
     `SELECT d.id, d.brand, d.model, d.thickness,
       ROUND(AVG((r.absorption_score + r.fit_score + r.comfort_score + r.thickness_score + r.appearance_score + r.value_score) / 6.0), 1) as rating_avg,
       COUNT(r.id) as rating_count,
-      COALESCE(ROUND(AVG((f.looseness + 5 + f.softness + 5 + f.dryness + 5 + f.odor_control + 5 + f.quietness + 5) / 5.0), 0) as feeling_avg,
+      ROUND(COALESCE(AVG((f.looseness + 5 + f.softness + 5 + f.dryness + 5 + f.odor_control + 5 + f.quietness + 5) / 5.0), 0), 0) as feeling_avg,
       COUNT(DISTINCT f.id) as feeling_count,
       d.absorbency_adult
      FROM diapers d
@@ -173,12 +174,11 @@ recommend.post('/', authMiddleware, async (c) => {
     }
   })
 
-  const apiKeyRow = await queryOne<{ key_value: string }>(
-    c.env.abdl_space_db,
-    "SELECT key_value FROM api_keys WHERE provider = 'deepseek'"
-  )
 
-  if (!apiKeyRow?.key_value) {
+
+  const apiKey = c.env.DEEPSEEK_API_KEY
+
+  if (!apiKey) {
     return c.json({ error: 'AI 推荐未配置，请管理员设置 DeepSeek API Key' }, 503)
   }
 
@@ -186,7 +186,7 @@ recommend.post('/', authMiddleware, async (c) => {
 
   let rawResponse: string
   try {
-    rawResponse = await callDeepSeekAI(apiKeyRow.key_value, prompt)
+    rawResponse = await callDeepSeekAI(apiKey, prompt)
   } catch (e) {
     return c.json({ error: `AI 服务调用失败：${e instanceof Error ? e.message : 'Unknown error'}` }, 502)
   }
@@ -219,6 +219,10 @@ recommend.post('/', authMiddleware, async (c) => {
     recommendations,
     summary: parsed.summary || `根据您的信息推荐 ${recommendations.length} 款`
   })
+  } catch (e) {
+    console.error('[recommend] error:', e)
+    return c.json({ error: `推荐失败：${e instanceof Error ? e.message : 'Unknown error'}` }, 500)
+  }
 })
 
 /**
