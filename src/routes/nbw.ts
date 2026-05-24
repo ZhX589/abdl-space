@@ -15,6 +15,16 @@ const NBW_USERINFO_URL = 'https://www.newbabyworld.top/oauth/userinfo.php'
 const tokenCookieOptions = 'HttpOnly; Secure; SameSite=None; Domain=.abdl-space.top; Path=/; Max-Age=604800'
 
 /**
+ * GET /api/auth/nbw/config — 返回公开的 OAuth 配置（不含 secret）
+ */
+nbw.get('/config', (c) => {
+  return c.json({
+    client_id: c.env.NBW_CLIENT_ID || '',
+    redirect_uri: c.env.NBW_REDIRECT_URI || '',
+  });
+});
+
+/**
  * POST /api/auth/nbw/callback — NewBabyWorld OAuth 回调
  * Body: { code: string }
  * Response: { action: 'login', token, user } | { action: 'register', nbw_user }
