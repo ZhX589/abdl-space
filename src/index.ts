@@ -178,6 +178,5 @@ app.post('/api/admin/add', adminMiddleware, async (c) => {
     return c.json({ error: '操作失败' }, 500)
   }
 })
-})
 
 export default app
