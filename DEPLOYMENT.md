@@ -1,51 +1,29 @@
-# ABDL Space — 部署指南
+# ABDL Space API — 部署指南
 
 > 本文档说明何时需要部署、部署什么、以及部署顺序。
 
 ## 1. 部署架构概述
 
-### 当前架构（前后端分离）
-
 | 组件 | 域名 | 平台 | 触发方式 |
 |:---|:---|:---|:---|
-| 前端 (Wiki) | `wiki.abdl-space.top` | Cloudflare Pages | 推送到 `dev` 分支 → 自动构建 |
 | 后端 (API) | `api.abdl-space.top` | Cloudflare Workers | 手动 `wrangler deploy` |
 | D1 数据库 | — | Cloudflare D1 | 手动 `wrangler d1 execute --remote` |
 | 环境变量 / 密钥 | — | Cloudflare Workers Secrets | 手动 `wrangler secret put` |
 
-- **Pages 项目名**: `abdl-space`（前端）
-- **Workers 项目名**: `abdl-space-api`（后端 API）
-- **Production 分支**: `dev`（前端自动部署）
-- **D1 数据库**: `abdl-space-db`（binding 名 `abdl_space_db`）
+- **Workers 项目名**: `abdl-space-api`
+- **D1 数据库**: `abdl-space-db` (binding 名 `abdl_space_db`)
 
-### 旧架构（已废弃）
-
-前端和后端都部署在同一个 Cloudflare Pages 项目里，通过 `functions/` 目录提供 API。
+> 前端 Wiki 页面已拆分到独立仓库，不再由此仓库部署。
 
 ## 2. 部署类型与触发条件
 
-### 2.1 前端部署（自动）
-
-**触发**: 推送到 `dev` 分支（直接 push 或合并 PR）
-
-> ⚠️ **Pages Dashboard 设置**: 构建命令必须为 `npm run build && wrangler pages deploy --config wrangler-pages.jsonc`（指定 Pages 配置，避免与 Worker 默认配置冲突）
-
-Cloudflare Pages 自动执行：
-1. `npm install`
-2. `npm run build`（tsc + vite build → `dist/`）
-3. 部署前端静态资源到 `wiki.abdl-space.top`
-
-### 2.2 后端 API 部署（手动）
-
-**触发**: Workers 项目 `abdl-space-api` 连接 GitHub → 构建命令 `npm run deploy:api`
-
-> Workers 自动读取默认配置 `wrangler.jsonc`（`name: "abdl-space-api"`），无需额外指定。
+### 2.1 后端 API 部署
 
 ```bash
-npm run deploy:api
+npm run deploy
 ```
 
-### 2.3 数据库 Schema 部署（手动）
+### 2.2 数据库 Schema 部署（手动）
 
 **触发**: `schemas/schema.sql` 有变更（新增表、新字段、新索引、FTS 虚拟表等）
 
@@ -57,7 +35,7 @@ npx wrangler d1 execute abdl-space-db --remote --file schemas/schema.sql
 
 **必须在依赖新 schema 的代码部署之前执行**，否则新代码会因查不到表/字段而报错。
 
-### 2.4 种子数据部署（手动）
+### 2.3 种子数据部署（手动）
 
 **触发**: `schemas/seeds/` 目录下新增或更新了 SQL 文件
 
@@ -67,28 +45,15 @@ npx wrangler d1 execute abdl-space-db --remote --file schemas/seeds/<name>.sql
 
 种子数据可在代码部署前后任意时间执行，不影响已有功能。
 
-### 2.5 环境变量 / 密钥部署（手动）
+### 2.4 环境变量 / 密钥部署（手动）
 
 **触发**: 新增或修改了密钥（如 `JWT_SECRET`、`AI_API_KEY` 等）
-
-**Workers API (api.abdl-space.top):**
 
 ```bash
 echo "your-secret-value" | npx wrangler secret put JWT_SECRET --name abdl-space-api
 ```
 
-**前端 (wiki.abdl-space.top) — 设置 API 地址环境变量:**
-
-在 Cloudflare Dashboard: **Workers & Pages → abdl-space → Settings → Environment variables**
-添加:
-- Variable name: `VITE_API_BASE_URL`
-- Value: `https://api.abdl-space.top`
-
-设置后需要在 Dashboard 中点击 **Retry deploy** 重新部署才会生效。
-
 ## 3. 首次部署完整流程
-
-如果从头开始部署项目，按以下顺序操作：
 
 ### Step 1: 推送代码到 GitHub
 
@@ -97,16 +62,14 @@ git checkout dev
 git push origin dev
 ```
 
-### Step 2: 在 Cloudflare Dashboard 创建 Pages 项目
+### Step 2: 在 Cloudflare Dashboard 创建 Workers 项目
 
 1. 登录 [Cloudflare Dashboard](https://dash.cloudflare.com/)
-2. **Workers & Pages → Create application → Pages → Connect to Git**
+2. **Workers & Pages → Create application → Workers → Connect to Git**
 3. 选择 `abdl-space` 仓库
 4. 配置：
-   - **Production branch**: `dev`
-   - **Build command**: `npm run build`
-   - **Build output directory**: `dist`
-5. 点击 Deploy
+   - **Build command**: `npm run deploy`
+   - **Branch**: `dev`
 
 ### Step 3: 导入数据库
 
@@ -116,104 +79,25 @@ npx wrangler d1 execute abdl-space-db --remote --file schemas/schema.sql
 
 # 导入种子数据（11 条纸尿裤 + 尺码）
 npx wrangler d1 execute abdl-space-db --remote --file schemas/seeds/diapers.sql
-
-# 如果已导入过，需要先清空再导：
-# npx wrangler d1 execute abdl-space-db --remote --command "DELETE FROM diaper_sizes; DELETE FROM diapers;"
 ```
 
 ### Step 4: 设置 JWT 密钥
 
 ```bash
-openssl rand -base64 32 | npx wrangler pages secret put JWT_SECRET --project-name abdl-space
+echo "your-secret-value" | npx wrangler secret put JWT_SECRET --name abdl-space-api
 ```
 
-### Step 5: 重新部署使密钥生效
-
-在 Cloudflare Dashboard 中点击 **Retry deploy**，或推送一个空 commit：
+### Step 5: 验证
 
 ```bash
-git commit --allow-empty -m "chore: 触发重新部署使密钥生效"
-git push origin dev
-```
-
-### Step 6: 验证
-
-```bash
-# 验证 API Worker
 curl https://api.abdl-space.top/api/health
 # 期望: {"status":"ok","timestamp":"..."}
 
 curl https://api.abdl-space.top/api/diapers
-# 期望: 返回 11 条纸尿裤数据
-
-# 验证前端
-curl https://wiki.abdl-space.top
-# 期望: 返回 HTML 页面
+# 期望: 返回纸尿裤数据
 ```
 
-## 4. 各版本部署检查清单
-
-> ✅ = 已完成 / ❌ = 不需要 / ⚠️ = 需要注意
-
-### v0.1.0 — Schema 重构 + 核心数据（✅ 已部署）
-
-| 任务 | 类型 | 状态 |
-|:---|:---|:---:|
-| 14 表 Schema | D1 手动 | ✅ |
-| 11 条纸尿裤种子 | D1 手动 | ✅ |
-| JWT_SECRET | Secret | ✅ |
-| A1 `feat/backend-core` — Hono + D1 + 类型 | 代码 | ✅ |
-| A2 `feat/auth` — JWT 注册/登录 + 中间件 | 代码 | ✅ |
-| A3 `feat/schema-v2` — Schema + API.md | 文档 | ✅ |
-| A4 `feat/auth-v2` — PATCH /api/users/me + 用户资料扩展 | 代码 | ✅ |
-| A5 `feat/diapers-api` — 5 个 API 端点 | 代码 | ✅ |
-| B1 `feat/frontend-shell` — 路由 + 布局 + 主题 | 代码 | ✅ |
-| B2 `feat/frontend-fix` — router.tsx + index.css + api.ts + utils.ts | 代码 | ✅ |
-
-### v0.2.0 — Wiki + 评分展示 + 评论区（✅ 已完成）
-
-| 任务 | 类型 | 状态 |
-|:---|:---|:---:|
-| A6 `feat/wiki-api` — Wiki CRUD + 段评 API | 代码 | ✅ |
-| A7 `feat/routes-refactor` — 路由拆分到 src/routes/ | 代码 | ✅ |
-| B3 `feat/diapers-ui` — 纸尿裤列表/详情/筛选 | 代码 | ✅ |
-| B4 `feat/wiki-ui` — Wiki 列表/阅读/编辑 + 段评 | 代码 | ✅ |
-| B5 `feat/diaper-comments` — 条目底部评论区 | 代码 | ✅ |
-
-> 所有表已在 v0.1.0 建立，**无需 schema 变更**。纯代码部署。
-
-### v0.3.0 — 排行榜 + 对比 + 搜索 + 术语（✅ 已完成）
-
-| 任务 | 类型 | 状态 |
-|:---|:---|:---:|
-| A8 `feat/rankings-api` — 综合排行榜 | 代码 | ✅ |
-| A9 `feat/compare-api` — 纸尿裤对比 | 代码 | ✅ |
-| A10 `feat/search-api` — 统一搜索 API | 代码 | ✅ |
-| A11 `feat/terms-api` — 术语百科 CRUD | 代码 | ✅ |
-| B6 `feat/rankings-compare-ui` — 排行榜页面 | 代码 | ✅ |
-| B7 `feat/compare-ui` — 纸尿裤对比页面 | 代码 | ✅ |
-| B8 `feat/search-terms-ui` — 搜索框 + 搜索结果页 | 代码 | ✅ |
-| B9 `feat/search-terms-ui` — 术语百科页 | 代码 | ✅ |
-
-### v0.4.0 — 猜你喜欢 + 版本历史 + 富文本 + AI推荐（✅ 已完成）
-
-| 任务 | 类型 | 状态 |
-|:---|:---|:---:|
-| A12 `feat/guess-api` — 猜你喜欢（纯数据驱动） | 代码 | ✅ |
-| A13 `feat/wiki-versions-api` — Wiki 版本历史 + 回滚 | 代码 | ✅ |
-| A14 `feat/rich-editor` — 富文本/Markdown 编辑器（后端存根） | 代码 | ✅ |
-| B10 `feat/guess-ui` — 猜你喜欢展示 | 代码 | ✅ |
-| B11 `feat/wiki-versions-ui` — 版本历史对比 UI + 回滚 | 代码 | ✅ |
-| B12 `feat/rich-editor-ui` — 富文本编辑器组件 | 代码 | ✅ |
-| `feat/ai-recommend` — DeepSeek AI 推荐 + api_keys 表 | 代码 | ✅ |
-| API Key 管理页面 | 前端页面 | ✅ |
-| 频率限制 + 安全加固 | 代码 | ✅ |
-| R2 Bucket | wrangler.jsonc + Dashboard | ❌ 未规划 |
-| 频率限制 + 安全加固 | 代码 | ✅ |
-
-> ⚠️ **AI 推荐**: 需要管理员在 `/api_set` 页面设置 DeepSeek API Key 后才能使用 AI 推荐功能。
-
-## 5. 部署顺序规则
+## 4. 部署顺序规则
 
 ```
 密钥/Secret  ──→  Schema 变更  ──→  种子数据  ──→  代码推送
@@ -225,32 +109,31 @@ curl https://wiki.abdl-space.top
 | 1 | **新增密钥 (Secrets)** | 代码启动时会读取，缺失则报错。设置后需重新部署。 |
 | 2 | **Schema 变更** | 新代码依赖新表/新字段，先建表再部署代码。 |
 | 3 | **种子数据** | 非关键路径，可在代码部署前后执行。 |
-| 4 | **代码推送** | 推送到 `dev` 即自动部署，是最后一步。 |
+| 4 | **代码推送** | 推送到 `dev` 即自动部署（如配置了 auto-deploy）。 |
 
 **核心原则**: 永远先部署"被依赖的东西"，再部署"依赖别人的东西"。
 
-## 6. 日常部署操作
+## 5. 日常部署操作
 
 ### 合并功能分支并部署
 
 1. 在 GitHub 上创建 PR：`feat/xxx → dev`
 2. 审查通过后 Squash merge
-3. Cloudflare Pages 自动检测 dev 变更 → 构建部署
-4. 等待部署完成（Pages Dashboard 可查看进度）
+3. 推送 dev 到远程
+4. 手动运行 `npm run deploy`
 
 ### 验证部署
 
 ```bash
 curl https://api.abdl-space.top/api/health
 curl https://api.abdl-space.top/api/diapers
-curl https://wiki.abdl-space.top
 ```
 
-## 7. 回滚方案
+## 6. 回滚方案
 
 ### 代码回滚
 
-在 GitHub 上 revert 对应的 PR，合并后 Pages 自动重新部署。
+在 GitHub 上 revert 对应的 PR，重新部署。
 
 ### Schema 回滚
 
@@ -262,100 +145,20 @@ npx wrangler d1 execute abdl-space-db --remote --command "<逆向SQL>"
 
 > ⚠️ 回滚 Schema 前确保没有代码依赖这些表。
 
-## 8. 当前部署信息
+## 7. 当前部署信息
 
 | 项 | 值 |
 |:---|:---|
-| 前端域名 | `https://wiki.abdl-space.top` |
 | API 域名 | `https://api.abdl-space.top` |
-| Pages 项目 | `abdl-space` (前端) |
-| Workers 项目 | `abdl-space-api` (API) |
+| Workers 项目 | `abdl-space-api` |
 | D1 数据库 | `abdl-space-db` (id: `159f81ba-ea32-4667-a3ce-d72cb1659d93`) |
-| Production 分支 | `dev` (前端自动部署) |
-| 构建命令 | `npm run build` |
-| 输出目录 | `dist` |
-| 本地 API 端口 | `8787` (`npm run api` → Worker dev) |
-| 本地前端端口 | `5173` (`npm run dev` → Vite) |
+| 本地 API 端口 | `8787` (`npm run dev` → Worker dev) |
 
-## 9. 部署日志
+## 8. 常见问题
 
-### 2026-05-10 — v0.1.0 首次部署
+### Q: 部署后不生效？
 
-| 时间 | 操作 | 状态 |
-|:---|:---|:---:|
-| - | dev 分支同步到 main (merge, commit `da94234`) | ✅ |
-| - | Cloudflare Dashboard 创建 Pages 项目 `abdl-space` | ✅ |
-| - | 导入 schema: `schemas/schema.sql` (14 张表) | ✅ |
-| - | 导入种子: `schemas/seeds/diapers.sql` (11 条纸尿裤) | ✅ |
-| - | 设置 Secret: `JWT_SECRET` | ✅ |
-| - | 重新部署使 Secret 生效 | ✅ |
-| - | 验证: `/api/health`、`/api/diapers` 正常响应 | ✅ |
-| - | 删除已合并分支 `feat/diapers-api` | ✅ |
-
-### Git 分支状态
-
-```
-main  @ 64118fd                     ← 当前所在（落后）
-dev   @ d5184be                     ← Cloudflare Pages production 分支（最新）
-```
-
-> 已删除远程分支: `feat/ai-recommend`, `feat/backend-api-complete`, `feat/compare-ui`, `feat/rankings-compare-ui`, `feat/rich-editor-ui`, `feat/search-api`, `feat/search-terms-ui`, `feat/wiki-versions-api`, `feat/wiki-versions-ui`, `fix/admin-and-bugs`, `fix/ratelimit-error`, `fix/security-hardening`
-
-### 2026-05-17 — Bug 修复 + 生产环境验证
-
-| 时间 | 操作 | Commit | 状态 |
-|:---|:---|:---|:---:|
-| - | fix: SQL语法错误 (COALESCE ROUND) + computeAvgScore统一函数 + terms验证 | `d5184be` | ✅ |
-| - | 推送 dev → origin/dev | `d5184be` | ✅ |
-| - | 生产验证: /api/health OK, /api/diapers OK, /api/auth/register OK | - | ✅ |
-| - | ⚠️ 生产问题: /api/rankings, /api/search, /api/terms, /api/pages 等返回 404 | - | ⚠️ 需调查 |
-
-> ⚠️ **生产环境部分端点 404**: diapers/auth/health 正常，但 rankings/search/terms/pages 等返回 404。推测是 Cloudflare Pages 部署新代码但某些路由未正确加载。
-
-### 2026-05-11 — B2 完成 + bug 修复 + 端口统一
-
-| 时间 | 操作 | Commit | 状态 |
-|:---|:---|:---|:---:|
-| - | docs: AGENTS.md 新增「文档与 Git 状态维护纪律」 | `de98b4b` | ✅ |
-| - | fix: 创建 router.tsx + 重写 index.css (品牌色+glass+dark) | `de98b4b` | ✅ |
-| - | fix: diapers.ts 路由顺序修复 + avg_score/feeling_count 实时计算 | `de98b4b` | ✅ |
-| - | fix: GET /api/auth/me 补充 body 字段 | `de98b4b` | ✅ |
-| - | feat: 新增 src/lib/utils.ts | `de98b4b` | ✅ |
-| - | fix: 统一本地端口为 8787 + 新增 npm run api 命令 | `c4ebb59` | ✅ |
-| - | fix: 登录 SQL 补充 role 字段 | `3fce82f` | ✅ |
-| - | ROADMAP.md B2 标记 ✅ + API.md 端口修正 | - | ✅ |
-| - | docs: DEPLOYMENT.md 更新清单和日志 | `23569c2` | ✅ |
-| - | Production 部署验证: `/api/health` + `/api/health/db` + `/api/diapers` OK | `23569c2` | ✅ |
-
-### 2026-05-14 — v0.2.0 ~ v0.4.0 功能完成
-
-| 时间 | 操作 | Commit | 状态 |
-|:---|:---|:---|:---:|
-| - | fix: sort=rating_count 500错误 + avg_score公式修正 + admin端点 + 输入校验 | `ce68bea` | ✅ |
-| - | fix: 17个TS build errors修复 | `7ef75d4` | ✅ |
-| - | feat: Wiki版本历史API+UI (A13+B11) | `788f156` + `c65be71` | ✅ |
-| - | feat: Markdown富文本编辑器UI (A14+B12) | `831b371` | ✅ |
-| - | feat: 排行榜页面UI (B6) — 4类型切换 + 分维度切换 | `48aa9f7` | ✅ |
-| - | feat: 统一搜索API (A10) — diapers + wiki + terms | `93bd256` | ✅ |
-| - | feat: 纸尿裤对比页面UI (B7) — 可视化表格 + 最优高亮 | `c305dc7` | ✅ |
-| - | feat: 搜索结果页 + 术语百科页 (B8+B9) | `b715b00` | ✅ |
-| - | docs: ROADMAP 更新所有完成项 | `15e624e` | ✅ |
-
-### 2026-05-16 — 安全加固 + AI推荐 + 频率限制
-
-| 时间 | 操作 | Commit | 状态 |
-|:---|:---|:---|:---:|
-| - | fix: JWT httpOnly Cookie + 严格CORS + 密码复杂度校验 + Cookie鉴权兜底 | `4289b1a` | ✅ |
-| - | feat: DeepSeek AI推荐 + api_keys表 + /api_set管理页面 | `960489a` | ✅ |
-| - | fix: rate limiting on auth端点 + 错误信息脱敏 | `6e92a4d` | ✅ |
-| - | fix: avg_score计算统一 + GET /api/terms/:id + admin ban endpoint | `bfef0f0` | ✅ |
-| - | docs: ROADMAP 更新 A14 ✅ + bug fixes logged | `64118fd` | ✅ |
-
-## 10. 常见问题
-
-### Q: 推送 dev 后部署失败？
-
-查看 Cloudflare Dashboard → Pages → abdl-space → Deployments → 构建日志。
+查看 Cloudflare Dashboard → Workers & Pages → abdl-space-api → Deployments → 构建日志。
 
 ### Q: Secret 设置后不生效？
 
