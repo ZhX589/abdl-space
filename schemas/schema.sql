@@ -234,3 +234,81 @@ CREATE INDEX IF NOT EXISTS idx_notifications_user_id ON notifications(user_id);
 CREATE INDEX IF NOT EXISTS idx_notifications_user_unread ON notifications(user_id, read);
 CREATE INDEX IF NOT EXISTS idx_experience_user_id ON experience(user_id);
 CREATE INDEX IF NOT EXISTS idx_terms_category ON terms(category);
+
+-- 私信系统
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  sender_id INTEGER NOT NULL REFERENCES users(id),
+  receiver_id INTEGER NOT NULL REFERENCES users(id),
+  content TEXT NOT NULL,
+  read INTEGER DEFAULT 0,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS user_settings (
+  user_id INTEGER PRIMARY KEY REFERENCES users(id),
+  allow_messages INTEGER DEFAULT 1,
+  allow_messages_from TEXT DEFAULT 'all'
+);
+
+CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender_id, receiver_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_messages_receiver ON messages(receiver_id, sender_id, read);
+
+-- 帖子图片表
+CREATE TABLE IF NOT EXISTS post_images (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  post_id INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+  image_url TEXT NOT NULL,
+  sort_order INTEGER DEFAULT 0,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_post_images_post_id ON post_images(post_id);
+
+-- 关注系统
+CREATE TABLE IF NOT EXISTS follows (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  follower_id INTEGER NOT NULL REFERENCES users(id),
+  following_id INTEGER NOT NULL REFERENCES users(id),
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(follower_id, following_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_follows_follower ON follows(follower_id);
+CREATE INDEX IF NOT EXISTS idx_follows_following ON follows(following_id);
+
+-- 邮件验证码表
+CREATE TABLE IF NOT EXISTS email_verifications (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER,
+  email TEXT NOT NULL,
+  code_hash TEXT NOT NULL,     -- SHA-256 哈希，不存明文
+  type TEXT NOT NULL,           -- 'register' | 'bind' | 'reset'
+  used INTEGER DEFAULT 0,
+  attempts INTEGER DEFAULT 0,  -- 已尝试验证次数
+  expires_at TEXT NOT NULL,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_email_ver_email ON email_verifications(email);
+CREATE INDEX IF NOT EXISTS idx_email_ver_lookup ON email_verifications(email, code_hash, type, used);
+
+-- D1 限流表（替代内存 Map）
+CREATE TABLE IF NOT EXISTS rate_limits (
+  key TEXT PRIMARY KEY,        -- ip:action 或 email:action
+  count INTEGER DEFAULT 1,
+  window_start TEXT NOT NULL,
+  expires_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_rate_limits_expires ON rate_limits(expires_at);
+
+-- 纸尿裤图片表
+CREATE TABLE IF NOT EXISTS diaper_images (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  diaper_id INTEGER NOT NULL REFERENCES diapers(id) ON DELETE CASCADE,
+  image_url TEXT NOT NULL,
+  sort_order INTEGER DEFAULT 0,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_diaper_images_diaper_id ON diaper_images(diaper_id);

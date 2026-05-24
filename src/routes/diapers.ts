@@ -56,7 +56,10 @@ diapers.get('/', async (c) => {
       COALESCE(avg_scores.rating_avg, 0) as rating_avg,
       COALESCE(avg_scores.rating_count, 0) as rating_count,
       COALESCE(feel_cnt.feeling_count, 0) as feeling_count,
-      COALESCE(feel_cnt.feeling_avg, 0) as feeling_avg
+      COALESCE(feel_cnt.feeling_avg, 0) as feeling_avg,
+      b.logo as brand_logo,
+      b.invert_dark as brand_invert_dark,
+      b.invert_light as brand_invert_light
     FROM diapers d
     LEFT JOIN (
       SELECT r.diaper_id,
@@ -72,6 +75,7 @@ diapers.get('/', async (c) => {
       FROM feelings
       GROUP BY diaper_id
     ) feel_cnt ON feel_cnt.diaper_id = d.id
+    LEFT JOIN brands b ON b.name = d.brand
     ${whereClause}
     ORDER BY ${JOIN_ALIAS_SORT.has(sort) ? sort : `d.${sort}`} ${order}
     LIMIT ? OFFSET ?
@@ -85,16 +89,28 @@ diapers.get('/', async (c) => {
 
   const diaperIds = diaperRows.map(r => r.id as number)
   const sizesMap = new Map<number, DiaperSize[]>()
+  const imagesMap = new Map<number, string[]>()
   if (diaperIds.length > 0) {
     const placeholders = diaperIds.map(() => '?').join(',')
-    const sizes = await query<DiaperSize & { diaper_id: number }>(
-      c.env.abdl_space_db,
-      `SELECT * FROM diaper_sizes WHERE diaper_id IN (${placeholders})`,
-      diaperIds
-    )
+    const [sizes, images] = await Promise.all([
+      query<DiaperSize & { diaper_id: number }>(
+        c.env.abdl_space_db,
+        `SELECT * FROM diaper_sizes WHERE diaper_id IN (${placeholders})`,
+        diaperIds
+      ),
+      query<{ diaper_id: number; image_url: string }>(
+        c.env.abdl_space_db,
+        `SELECT diaper_id, image_url FROM diaper_images WHERE diaper_id IN (${placeholders}) ORDER BY sort_order`,
+        diaperIds
+      ),
+    ])
     for (const s of sizes) {
       if (!sizesMap.has(s.diaper_id)) sizesMap.set(s.diaper_id, [])
       sizesMap.get(s.diaper_id)!.push(s)
+    }
+    for (const img of images) {
+      if (!imagesMap.has(img.diaper_id)) imagesMap.set(img.diaper_id, [])
+      imagesMap.get(img.diaper_id)!.push(img.image_url)
     }
   }
 
@@ -119,6 +135,9 @@ diapers.get('/', async (c) => {
       material: r.material,
       features: r.features,
       avg_price: r.avg_price,
+      brand_logo: r.brand_logo || null,
+      brand_invert_dark: !!r.brand_invert_dark,
+      brand_invert_light: !!r.brand_invert_light,
       sizes: (sizesMap.get(r.id as number) || []).map(s => ({
         label: s.label,
         waist_min: s.waist_min,
@@ -128,7 +147,8 @@ diapers.get('/', async (c) => {
       })),
       avg_score: avgScore,
       rating_count: ratingCount,
-      feeling_count: feelingCount
+      feeling_count: feelingCount,
+      images: imagesMap.get(r.id as number) || [],
     }
   })
 
@@ -417,7 +437,7 @@ diapers.get('/:id', async (c) => {
 
   const diaper = await queryOne<Diaper>(
     c.env.abdl_space_db,
-    'SELECT * FROM diapers WHERE id = ?',
+    'SELECT d.*, b.logo as brand_logo, b.invert_dark as brand_invert_dark, b.invert_light as brand_invert_light FROM diapers d LEFT JOIN brands b ON b.name = d.brand WHERE d.id = ?',
     [id]
   )
   if (!diaper) return c.json({ error: 'Diaper not found' }, 404)
@@ -425,6 +445,12 @@ diapers.get('/:id', async (c) => {
   const sizes = await query<DiaperSize>(
     c.env.abdl_space_db,
     'SELECT * FROM diaper_sizes WHERE diaper_id = ?',
+    [id]
+  )
+
+  const images = await query<{ image_url: string }>(
+    c.env.abdl_space_db,
+    'SELECT image_url FROM diaper_images WHERE diaper_id = ? ORDER BY sort_order',
     [id]
   )
 
@@ -482,6 +508,10 @@ diapers.get('/:id', async (c) => {
       material: diaper.material,
       features: diaper.features,
       avg_price: diaper.avg_price,
+      official_url: diaper.official_url || null,
+      brand_logo: (diaper as Record<string,unknown>).brand_logo || null,
+      brand_invert_dark: !!(diaper as Record<string,unknown>).brand_invert_dark,
+      brand_invert_light: !!(diaper as Record<string,unknown>).brand_invert_light,
       sizes: sizes.map(s => ({
         label: s.label,
         waist_min: s.waist_min,
@@ -491,7 +521,8 @@ diapers.get('/:id', async (c) => {
       })),
       avg_score: avgScore,
       rating_count: ratingCount,
-      feeling_count: feelingCount
+      feeling_count: feelingCount,
+      images: images.map(i => i.image_url),
     },
     reviews: reviews.map(r => ({
       id: r.id,

@@ -18,31 +18,52 @@ import wiki from './routes/wiki.ts'
 import terms from './routes/terms.ts'
 import recommend from './routes/recommend.ts'
 import notifications from './routes/notifications.ts'
+import messages from './routes/messages.ts'
+import images from './routes/images.ts'
+import follows from './routes/follows.ts'
 import admin from './routes/admin.ts'
 import search from './routes/search.ts'
 import apiKeys from './routes/api_keys.ts'
+import reports from './routes/reports.ts'
+import captcha from './routes/captcha.ts'
+import captchaKeys from './routes/captcha_keys.ts'
+import captchaV1 from './routes/captcha_v1.ts'
+import oauth from './routes/oauth.ts'
+import oauthClients from './routes/oauth_clients.ts'
+import contentKeys from './routes/content_keys.ts'
+import contentV1 from './routes/content_v1.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
 const app = new Hono<AppType>()
 
-app.use('*', corsWithOrigin)
+app.use('*', async (c, next) => {
+  // /api/v1/* 路由由各自处理 CORS（允许所有来源）
+  if (c.req.path.startsWith('/api/v1/')) return next()
+  return corsWithOrigin(c, next)
+})
 app.use('*', logger())
 
 const ALLOWED_ORIGINS = [
   'http://localhost:5173',
+  'http://localhost:5174',
   'https://wiki.abdl-space.top',
+  'https://www.abdl-space.top',
+  'https://abdl-space.top',
+  'https://img.abdl-space.top',
+  'https://open.abdl-space.top',
 ]
 
 async function corsWithOrigin(c: Context<AppType>, next: Next) {
   const incomingOrigin = c.req.header('origin') || ''
   const allowed = ALLOWED_ORIGINS.includes(incomingOrigin)
+    || incomingOrigin.endsWith('.abdl-space.top')
     ? incomingOrigin
     : ALLOWED_ORIGINS[0]
   return cors({
     origin: allowed,
     credentials: true,
-    allowHeaders: ['Content-Type', 'Authorization'],
+    allowHeaders: ['Content-Type', 'Authorization', 'X-Captcha-Token'],
     allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   })(c, next)
 }
@@ -72,9 +93,20 @@ app.route('/api/pages', wiki)
 app.route('/api/terms', terms)
 app.route('/api/recommend', recommend)
 app.route('/api/notifications', notifications)
+app.route('/api/messages', messages)
+app.route('/api/images', images)
+app.route('/api/follows', follows)
 app.route('/api/admin', admin)
 app.route('/api/search', search)
 app.route('/api/api_keys', apiKeys)
+app.route('/api/reports', reports)
+app.route('/api/captcha', captcha)
+app.route('/api/captcha/keys', captchaKeys)
+app.route('/api/v1/captcha', captchaV1)
+app.route('/api/oauth', oauth)
+app.route('/api/oauth/clients', oauthClients)
+app.route('/api/content/keys', contentKeys)
+app.route('/api/v1/content', contentV1)
 
 /**
  * POST /admin_reset/password — admin 只能改自己的密码（需鉴权）
