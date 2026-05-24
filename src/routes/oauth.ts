@@ -286,4 +286,29 @@ oauth.get('/userinfo', async (c) => {
   return c.json(info)
 })
 
+/* ============================================================
+ * GET /oauth/tokens — 获取当前用户已授权的 OAuth 应用列表
+ * ============================================================ */
+oauth.get('/tokens', authMiddleware, async (c) => {
+  const user = c.get('user')
+  const { getUserTokens } = await import('../lib/oauth.ts')
+  const tokens = await getUserTokens(c.env.abdl_space_db, user.sub)
+  return c.json({ tokens })
+})
+
+/* ============================================================
+ * POST /oauth/revoke-client — 吊销某个 OAuth 应用的所有令牌
+ * Body: { client_id }
+ * ============================================================ */
+oauth.post('/revoke-client', authMiddleware, async (c) => {
+  const user = c.get('user')
+  let body: { client_id?: string }
+  try { body = await c.req.json() } catch { return c.json({ error: 'invalid body' }, 400) }
+  if (!body.client_id) return c.json({ error: 'client_id required' }, 400)
+
+  const { revokeAllUserTokensForClient } = await import('../lib/oauth.ts')
+  const count = await revokeAllUserTokensForClient(c.env.abdl_space_db, user.sub, body.client_id)
+  return c.json({ success: true, revoked: count })
+})
+
 export default oauth
