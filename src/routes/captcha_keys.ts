@@ -82,6 +82,16 @@ captchaKeys.post('/', authMiddleware, async (c) => {
     return c.json({ error: '每个用户最多创建 10 个 API Key' }, 400)
   }
 
+  // 创建频率限制：同一用户 10 秒内只能创建 1 个
+  const recent = await queryOne<{ cnt: number }>(
+    c.env.abdl_space_db,
+    'SELECT COUNT(*) as cnt FROM captcha_api_keys WHERE owner_id = ? AND created_at > ?',
+    [user.sub, nowSeconds() - 10]
+  )
+  if (recent && recent.cnt > 0) {
+    return c.json({ error: '创建过于频繁，请稍后再试' }, 429)
+  }
+
   const rawKey = generateApiKey()
   const keyHash = await sha256(rawKey)
   const keyPrefix = rawKey.slice(0, 11)  // "cv_" + 前8字符

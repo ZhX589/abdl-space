@@ -30,13 +30,29 @@ function extractApiKey(c: { req: { header: (name: string) => string | undefined 
   return match ? match[1].trim() : null
 }
 
-/** 验证 API Key 并检查权限 */
+/** 验证 API Key 并检查权限 + per-key 限速 */
+const keyRateLimiters = new Map<string, { count: number; resetAt: number }>()
+
 async function requireKey(c: { env: Env; req: { header: (name: string) => string | undefined } }, perm: string) {
   const rawKey = extractApiKey(c)
   if (!rawKey) return { error: 'Missing Authorization header', status: 401 as const }
   const keyInfo = await validateContentApiKey(c.env.abdl_space_db, rawKey)
   if (!keyInfo.valid) return { error: 'Invalid or disabled API key', status: 401 as const }
   if (!keyInfo.permissions!.includes(perm)) return { error: `Key does not have "${perm}" permission`, status: 403 as const }
+
+  // Per-key 限速
+  const keyId = String(keyInfo.keyId!)
+  const limit = keyInfo.rateLimit || 200
+  const now = Date.now()
+  const entry = keyRateLimiters.get(keyId)
+  if (!entry || now > entry.resetAt) {
+    keyRateLimiters.set(keyId, { count: 1, resetAt: now + 60_000 })
+  } else if (entry.count >= limit) {
+    return { error: 'Rate limit exceeded for this API key', status: 429 as const }
+  } else {
+    entry.count++
+  }
+
   return { keyId: keyInfo.keyId!, ownerId: keyInfo.ownerId! }
 }
 

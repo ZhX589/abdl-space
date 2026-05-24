@@ -109,9 +109,9 @@ app.route('/api/content/keys', contentKeys)
 app.route('/api/v1/content', contentV1)
 
 /**
- * POST /admin_reset/password — admin 只能改自己的密码（需鉴权）
+ * POST /api/admin/reset/password — admin 只能改自己的密码（需鉴权）
  */
-app.post('/admin_reset/password', authMiddleware, async (c) => {
+app.post('/api/admin/reset/password', authMiddleware, async (c) => {
   const user = c.get('user')
   if (user.role !== 'admin') {
     return c.json({ error: 'Admin access required' }, 403)
@@ -148,9 +148,9 @@ app.post('/admin_reset/password', authMiddleware, async (c) => {
 })
 
 /**
- * POST /admin/add — admin 只能把非 admin 用户提升为 admin（需 admin 鉴权）
+ * POST /api/admin/add — admin 只能把非 admin 用户提升为 admin（需 admin 鉴权）
  */
-app.post('/admin/add', adminMiddleware, async (c) => {
+app.post('/api/admin/add', adminMiddleware, async (c) => {
   const body = await c.req.json<{ user_ids: number[] }>()
   const { user_ids } = body
 

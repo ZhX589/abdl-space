@@ -1,10 +1,14 @@
 import { Hono } from 'hono'
 import type { Env, JWTPayload, Diaper, DiaperSize } from '../types/index.ts'
 import { query, queryOne, computeAvgScore } from '../lib/db.ts'
+import { rateLimit } from '../lib/rate-limit.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
 const diapers = new Hono<AppType>()
+
+// 公共 API 限速：每 IP 每分钟 60 次
+diapers.use('*', rateLimit('diapers', 60_000, 60))
 
 const VALID_SORT = ['id', 'avg_score', 'rating_count', 'thickness']
 const JOIN_ALIAS_SORT = new Set(['avg_score', 'rating_count'])

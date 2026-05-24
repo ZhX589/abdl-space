@@ -1,10 +1,14 @@
 import { Hono } from 'hono'
 import type { Env, JWTPayload } from '../types/index.ts'
 import { query, computeAvgScore } from '../lib/db.ts'
+import { rateLimit } from '../lib/rate-limit.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
 const rankings = new Hono<AppType>()
+
+// 公共 API 限速：每 IP 每分钟 60 次
+rankings.use('*', rateLimit('rankings', 60_000, 60))
 
 const VALID_TYPES = ['hot', 'absorbency', 'popular', 'dimension'] as const
 const VALID_DIMENSIONS = ['absorption_score', 'fit_score', 'comfort_score', 'thickness_score', 'appearance_score', 'value_score'] as const

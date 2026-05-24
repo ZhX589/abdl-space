@@ -2,6 +2,7 @@ import { Hono } from 'hono'
 import type { Env, JWTPayload, CreatePostRequest } from '../types/index.ts'
 import { query, queryOne, run } from '../lib/db.ts'
 import { authMiddleware } from '../middleware/auth.ts'
+import { rateLimit } from '../lib/rate-limit.ts'
 
 const IMGBED_URL = 'https://img.abdl-space.top'
 
@@ -52,6 +53,9 @@ type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
 const posts = new Hono<AppType>()
 
+// 公共 API 限速：每 IP 每分钟 60 次
+posts.use('*', rateLimit('posts', 60_000, 60))
+
 /**
  * GET /api/posts — 帖子列表
  */
@@ -63,9 +67,11 @@ posts.get('/', async (c) => {
   let userId: number | null = null
   const authHeader = c.req.header('Authorization')
   if (authHeader && authHeader.startsWith('Bearer ')) {
-    const { verifyJWT } = await import('../lib/auth.ts')
-    const payload = await verifyJWT(authHeader.slice(7), c.env.JWT_SECRET)
-    if (payload) userId = payload.sub
+    try {
+      const { verifyJWT } = await import('../lib/auth.ts')
+      const payload = await verifyJWT(authHeader.slice(7), c.env.JWT_SECRET)
+      if (payload) userId = payload.sub
+    } catch { /* invalid token, continue as unauthenticated */ }
   }
 
   const conditions: string[] = []
@@ -169,9 +175,11 @@ posts.get('/:id', async (c) => {
   let userId: number | null = null
   const authHeader = c.req.header('Authorization')
   if (authHeader && authHeader.startsWith('Bearer ')) {
-    const { verifyJWT } = await import('../lib/auth.ts')
-    const payload = await verifyJWT(authHeader.slice(7), c.env.JWT_SECRET)
-    if (payload) userId = payload.sub
+    try {
+      const { verifyJWT } = await import('../lib/auth.ts')
+      const payload = await verifyJWT(authHeader.slice(7), c.env.JWT_SECRET)
+      if (payload) userId = payload.sub
+    } catch { /* invalid token, continue as unauthenticated */ }
   }
 
   const post = await queryOne<Record<string, unknown>>(
