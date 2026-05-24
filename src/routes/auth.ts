@@ -134,7 +134,10 @@ auth.post('/send-code', async (c) => {
 
   if (type === 'bind') {
     const authHeader = c.req.header('Authorization')
-    if (!authHeader) return c.json({ error: '请先登录' }, 401)
+    if (!authHeader || !authHeader.startsWith('Bearer ')) return c.json({ error: '请先登录' }, 401)
+    const { verifyJWT } = await import('../lib/auth.ts')
+    const payload = await verifyJWT(authHeader.slice(7), c.env.JWT_SECRET)
+    if (!payload) return c.json({ error: '登录已过期，请重新登录' }, 401)
   }
 
   // reset 类型：检查邮箱是否已注册，未注册则静默返回（防枚举+防邮件轰炸）

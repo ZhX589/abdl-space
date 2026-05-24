@@ -55,6 +55,10 @@ export function rateLimit(
     }
 
     entry.count++
+
+    // 1% 概率触发清理，防止内存泄漏
+    if (Math.random() < 0.01) cleanupRateLimits()
+
     c.header('X-RateLimit-Limit', String(maxRequests))
     c.header('X-RateLimit-Remaining', String(maxRequests - entry.count))
     await next()

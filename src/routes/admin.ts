@@ -92,7 +92,7 @@ admin.delete('/users/:id', adminMiddleware, async (c) => {
   await run(db, 'DELETE FROM follows WHERE follower_id = ? OR following_id = ?', [id, id])
   await run(db, 'DELETE FROM user_settings WHERE user_id = ?', [id])
   await run(db, 'DELETE FROM experience WHERE user_id = ?', [id])
-  await run(db, 'DELETE FROM reports WHERE user_id = ?', [id])
+  await run(db, 'DELETE FROM reports WHERE user_id = ? OR reporter_id = ?', [id, id])
   // 删除用户帖子的图片
   const userPosts = await query<{ id: number }>(db, 'SELECT id FROM posts WHERE author_id = ?', [id])
   for (const post of userPosts) {
