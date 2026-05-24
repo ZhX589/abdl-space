@@ -16,7 +16,7 @@ const MAX_VERIFY_ATTEMPTS = 5  // 验证码最多尝试 5 次
 const RATE_LIMIT_WINDOW = 60   // 秒
 const RATE_LIMIT_MAX = 10      // 每窗口最大请求数
 
-const tokenCookieOptions = 'HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=604800'
+const tokenCookieOptions = 'HttpOnly; Secure; SameSite=None; Domain=.abdl-space.top; Path=/; Max-Age=604800'
 
 // ============================================================
 // 工具函数
@@ -473,6 +473,14 @@ auth.get('/me', authMiddleware, async (c) => {
     email_verified: user.email_verified,
     created_at: user.created_at
   })
+})
+
+/**
+ * POST /api/auth/logout — 登出，清除 cookie
+ */
+auth.post('/logout', async (c) => {
+  c.header('Set-Cookie', `token=; HttpOnly; Secure; SameSite=None; Domain=.abdl-space.top; Path=/; Max-Age=0`)
+  return c.json({ message: '已登出' })
 })
 
 export default auth
