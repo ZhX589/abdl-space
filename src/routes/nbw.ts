@@ -101,9 +101,10 @@ nbw.post('/callback', async (c) => {
     })
   }
 
-  // 4. 未绑定，返回 NBW 用户信息供注册
+  // 4. 未绑定，返回 NBW 用户信息供注册（含 code 用于后端验证）
   return c.json({
     action: 'register',
+    nbw_code: body.code,
     nbw_user: {
       uid: nbwUser.uid,
       username: nbwUser.username || '',
