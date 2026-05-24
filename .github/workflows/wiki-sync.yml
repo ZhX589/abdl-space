@@ -1,0 +1,31 @@
+name: 同步 Wiki
+
+on:
+  push:
+    branches: [dev, main]
+    paths:
+      - 'docs/wiki/**'
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 同步本地文档到 GitHub Wiki
+        env:
+          WIKI_TOKEN: ${{ secrets.WIKI_SYNC_TOKEN }}
+        run: |
+          git clone "https://x-access-token:${WIKI_TOKEN}@github.com/ZhX589/abdl-space.wiki.git" wiki-tmp
+          rm -rf wiki-tmp/*
+          cp -r docs/wiki/* wiki-tmp/
+          cd wiki-tmp
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "无变更"
+          else
+            git commit -m "docs: 同步 wiki 文档 [skip ci]"
+            git push
+          fi
