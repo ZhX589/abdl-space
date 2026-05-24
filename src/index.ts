@@ -153,25 +153,31 @@ app.post('/api/admin/reset/password', authMiddleware, async (c) => {
  * POST /api/admin/add — admin 只能把非 admin 用户提升为 admin（需 admin 鉴权）
  */
 app.post('/api/admin/add', adminMiddleware, async (c) => {
-  const body = await c.req.json<{ user_ids: number[] }>()
-  const { user_ids } = body
+  try {
+    const body = await c.req.json<{ user_ids: number[] }>()
+    const { user_ids } = body
 
-  if (!Array.isArray(user_ids) || user_ids.length === 0) {
-    return c.json({ error: 'user_ids must be a non-empty array' }, 400)
+    if (!Array.isArray(user_ids) || user_ids.length === 0) {
+      return c.json({ error: 'user_ids must be a non-empty array' }, 400)
+    }
+
+    const placeholders = user_ids.map(() => '?').join(',')
+    const result = await run(
+      c.env.abdl_space_db,
+      `UPDATE users SET role = 'admin' WHERE id IN (${placeholders}) AND role != 'admin'`,
+      user_ids
+    )
+
+    const changed = result.meta.changes ?? 0
+    return c.json({
+      promoted: changed,
+      message: `${changed} 个用户已提升为管理员`,
+    })
+  } catch (e) {
+    console.error('Promote user error:', e)
+    return c.json({ error: '操作失败' }, 500)
   }
-
-  const placeholders = user_ids.map(() => '?').join(',')
-  const result = await run(
-    c.env.abdl_space_db,
-    `UPDATE users SET role = 'admin' WHERE id IN (${placeholders}) AND role != 'admin'`,
-    user_ids
-  )
-
-  const changed = result.meta.changes ?? 0
-  return c.json({
-    promoted: changed,
-    message: `${changed} 个用户已提升为管理员`
-  })
+})
 })
 
 export default app

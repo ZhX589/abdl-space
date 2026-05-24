@@ -212,18 +212,24 @@ admin.delete('/comments/:id', adminMiddleware, async (c) => {
  */
 admin.delete('/diapers/:id', adminMiddleware, async (c) => {
   const id = parseInt(c.req.param('id') || '')
+  if (!id) return c.json({ error: 'Invalid id' }, 400)
 
   const diaper = await queryOne<{ id: number }>(c.env.abdl_space_db, 'SELECT id FROM diapers WHERE id = ?', [id])
-  if (!diaper) return c.json({ error: 'Diaper not found' }, 404)
+  if (!diaper) return c.json({ error: 'Diaper not found', id }, 404)
 
-  // 删除关联图片
-  const images = await query<{ image_url: string }>(c.env.abdl_space_db, 'SELECT image_url FROM diaper_images WHERE diaper_id = ?', [id])
-  for (const img of images) {
-    await deleteImageFromImgbed(c.env, img.image_url)
+  try {
+    const images = await query<{ image_url: string }>(c.env.abdl_space_db, 'SELECT image_url FROM diaper_images WHERE diaper_id = ?', [id])
+    for (const img of images) {
+      await deleteImageFromImgbed(c.env, img.image_url)
+    }
+    await run(c.env.abdl_space_db, 'DELETE FROM diaper_images WHERE diaper_id = ?', [id])
+    await run(c.env.abdl_space_db, 'DELETE FROM diaper_sizes WHERE diaper_id = ?', [id])
+    await run(c.env.abdl_space_db, 'DELETE FROM diapers WHERE id = ?', [id])
+    return c.json({ message: '已删除' })
+  } catch (e) {
+    console.error('Delete diaper error:', e)
+    return c.json({ error: '删除失败' }, 500)
   }
-  await run(c.env.abdl_space_db, 'DELETE FROM diaper_images WHERE diaper_id = ?', [id])
-  await run(c.env.abdl_space_db, 'DELETE FROM diapers WHERE id = ?', [id])
-  return c.json({ message: '已删除' })
 })
 
 /**
