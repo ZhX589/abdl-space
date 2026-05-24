@@ -255,10 +255,11 @@ auth.post('/register', async (c) => {
     return c.json({ error: '操作太频繁，请稍后再试' }, 429)
   }
 
-  const body = await c.req.json<{ username: string; password: string; email: string; code: string }>()
-  const { username, password, email: emailAddress, code } = body
+  const body = await c.req.json<{ username: string; password: string; email: string; code?: string; nbw_uid?: string }>()
+  const { username, password, email: emailAddress, code, nbw_uid } = body
+  const isNBW = !!nbw_uid
 
-  if (!emailAddress || !password || !username || !code) {
+  if (!emailAddress || !password || !username) {
     return c.json({ error: '请填写所有字段' }, 400)
   }
   if (!EMAIL_REGEX.test(emailAddress)) {
@@ -274,14 +275,17 @@ auth.post('/register', async (c) => {
     return c.json({ error: '用户名 2-32 个字符' }, 400)
   }
 
-  // 验证码校验（带尝试次数限制）
-  const result = await verifyCode(db, emailAddress, code, 'register')
-  if (!result.valid) {
-    return c.json({ error: result.error }, 400)
+  // NBW 注册：跳过邮箱验证码校验
+  let result: { valid: boolean; recordId?: number; error?: string } | null = null
+  if (!isNBW) {
+    if (!code) return c.json({ error: '请输入验证码' }, 400)
+    result = await verifyCode(db, emailAddress, code, 'register')
+    if (!result.valid) {
+      return c.json({ error: result.error }, 400)
+    }
+    // 标记验证码已使用
+    await run(db, 'UPDATE email_verifications SET used = 1 WHERE id = ?', [result.recordId])
   }
-
-  // 标记验证码已使用
-  await run(db, 'UPDATE email_verifications SET used = 1 WHERE id = ?', [result.recordId])
 
   // 检查用户名/邮箱是否已存在（模糊提示防枚举）
   const existing = await queryOne<User>(
@@ -296,8 +300,8 @@ auth.post('/register', async (c) => {
   const passwordHash = await hashPassword(password)
   const insertResult = await run(
     db,
-    'INSERT INTO users (email, password_hash, username, email_verified) VALUES (?, ?, ?, 1)',
-    [emailAddress, passwordHash, username]
+    'INSERT INTO users (email, password_hash, username, email_verified, nbw_uid) VALUES (?, ?, ?, 1, ?)',
+    [emailAddress, passwordHash, username, isNBW ? nbw_uid : null]
   )
   const userId = insertResult.meta.last_row_id as number
   const token = await signJWT({ sub: userId, username, email: emailAddress, role: 'user' }, c.env.JWT_SECRET)
@@ -451,7 +455,7 @@ auth.get('/me', authMiddleware, async (c) => {
   const payload = c.get('user')
   const user = await queryOne<User>(
     c.env.abdl_space_db,
-    'SELECT id, email, username, avatar, role, age, region, weight, waist, hip, style_preference, bio, email_verified, created_at FROM users WHERE id = ?',
+    'SELECT id, email, username, avatar, role, age, region, weight, waist, hip, style_preference, bio, email_verified, nbw_uid, created_at FROM users WHERE id = ?',
     [payload.sub]
   )
   if (!user) {
@@ -471,6 +475,7 @@ auth.get('/me', authMiddleware, async (c) => {
     style_preference: user.style_preference,
     bio: user.bio,
     email_verified: user.email_verified,
+    nbw_uid: user.nbw_uid || null,
     created_at: user.created_at
   })
 })
