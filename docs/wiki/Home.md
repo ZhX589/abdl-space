@@ -98,20 +98,20 @@ GET /api/diapers?page=1&limit=20
 
 | 模块 | 说明 | 鉴权 |
 |:---|:---|:---|
-| [Auth](./api/auth) | 注册、登录、用户信息 | 部分 |
-| [Diapers](./api/diapers) | 纸尿裤数据库 | 无 |
-| [Ratings](./api/ratings) | 6 维度评分 | 需鉴权 |
-| [Feelings](./api/feelings) | 5 维度使用感受 | 需鉴权 |
-| [Posts](./api/posts) | 论坛帖子 + 评论 | 需鉴权 |
-| [Wiki Pages](./api/pages) | Wiki 百科 + 段评 | 部分 |
-| [Rankings](./api/rankings) | 综合排行榜 | 无 |
-| [Recommend](./api/recommend) | AI 推荐 + 猜你喜欢 | 需鉴权 |
-| [Terms](./api/terms) | 术语百科 | 部分 |
-| [Users](./api/users) | 用户资料 + 等级 | 部分 |
-| [Admin](./api/admin) | 管理后台 | 管理员 |
-| [OAuth 2.0](./api/oauth) | 第三方登录 | 无 |
-| [Captcha](./api/captcha) | 人机验证 | 部分 |
-| [Content API v1](./api/content-v1) | 开放平台内容 API | API Key |
+| [Auth](api/auth) | 注册、登录、用户信息 | 部分 |
+| [Diapers](api/diapers) | 纸尿裤数据库 | 无 |
+| [Ratings](api/ratings) | 6 维度评分 | 需鉴权 |
+| [Feelings](api/feelings) | 5 维度使用感受 | 需鉴权 |
+| [Posts](api/posts) | 论坛帖子 + 评论 | 需鉴权 |
+| [Wiki Pages](api/pages) | Wiki 百科 + 段评 | 部分 |
+| [Rankings](api/rankings) | 综合排行榜 | 无 |
+| [Recommend](api/recommend) | AI 推荐 + 猜你喜欢 | 需鉴权 |
+| [Terms](api/terms) | 术语百科 | 部分 |
+| [Users](api/users) | 用户资料 + 等级 | 部分 |
+| [Admin](api/admin) | 管理后台 | 管理员 |
+| [OAuth 2.0](api/oauth) | 第三方登录 | 无 |
+| [Captcha](api/captcha) | 人机验证 | 部分 |
+| [Content API v1](api/content-v1) | 开放平台内容 API | API Key |
 
 ---
 
@@ -150,4 +150,4 @@ npm install
 npm run dev              # 启动 wrangler dev，端口 8787
 ```
 
-需要更多帮助？查看 [入门指南](./Getting-Started) 或 [GitHub 仓库](https://github.com/ZhX589/abdl-space)。
+需要更多帮助？查看 [入门指南](Getting-Started) 或 [GitHub 仓库](https://github.com/ZhX589/abdl-space)。

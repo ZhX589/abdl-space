@@ -192,6 +192,6 @@ curl -s -o /dev/null -w "%{http_code}" \
 
 ## 下一步
 
-- 查看 [Auth API](./api/auth) 了解完整的认证接口
-- 查看 [Diapers API](./api/diapers) 了解纸尿裤数据查询
-- 查看 [Ratings API](./api/ratings) 了解评分提交
+- 查看 [Auth API](api/auth) 了解完整的认证接口
+- 查看 [Diapers API](api/diapers) 了解纸尿裤数据查询
+- 查看 [Ratings API](api/ratings) 了解评分提交
