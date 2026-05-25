@@ -174,9 +174,9 @@ nbw.post('/bind', authMiddleware, async (c) => {
   }
 
   // 绑定
-  await run(db, 'UPDATE users SET nbw_uid = ? WHERE id = ?', [nbwUser.uid, user.sub])
+  await run(db, 'UPDATE users SET nbw_uid = ?, nbw_username = ? WHERE id = ?', [nbwUser.uid, nbwUser.username || null, user.sub])
 
-  return c.json({ message: '绑定成功', nbw_uid: nbwUser.uid })
+  return c.json({ message: '绑定成功', nbw_uid: nbwUser.uid, nbw_username: nbwUser.username || null })
 })
 
 export default nbw

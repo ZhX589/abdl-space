@@ -427,11 +427,12 @@ export async function getUserTokens(db: D1Database, userId: number) {
     access_expires_at: number; refresh_expires_at: number | null;
     revoked: number; created_at: number
   }>(db,
-    `SELECT t.*, c.name as client_name, c.logo_url
+    `SELECT t.id, t.client_id, t.scopes, t.access_expires_at, t.refresh_expires_at, t.revoked, t.created_at, c.name as client_name, c.logo_url
      FROM oauth_tokens t
      LEFT JOIN oauth_clients c ON t.client_id = c.client_id
      WHERE t.user_id = ? AND t.revoked = 0 AND t.refresh_expires_at > ?
-     ORDER BY t.created_at DESC`,
+     GROUP BY t.client_id
+     ORDER BY MAX(t.created_at) DESC`,
     [userId, nowS()]
   )
   return rows
