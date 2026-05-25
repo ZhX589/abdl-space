@@ -53,6 +53,7 @@ const ALLOWED_ORIGINS = [
   'https://abdl-space.top',
   'https://img.abdl-space.top',
   'https://open.abdl-space.top',
+  'https://abdl-space-mobile.pages.dev',
 ]
 
 async function corsWithOrigin(c: Context<AppType>, next: Next) {
