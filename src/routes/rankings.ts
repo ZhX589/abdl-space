@@ -65,10 +65,8 @@ rankings.get('/', async (c) => {
       LEFT JOIN feelings f ON f.diaper_id = d.id
       GROUP BY d.id
       HAVING dim_avg IS NOT NULL
-      ORDER BY ${orderBy}
-      LIMIT ?
     `
-    params.push(limit)
+    // 不在 SQL 层排序/截断，应用层用修正分数重排
   } else if (joinRating) {
     sql = `
       SELECT d.id, d.brand, d.model, d.thickness, d.absorbency_adult,
@@ -80,10 +78,8 @@ rankings.get('/', async (c) => {
       LEFT JOIN ratings r ON r.diaper_id = d.id
       LEFT JOIN feelings f ON f.diaper_id = d.id
       GROUP BY d.id
-      ORDER BY ${orderBy}
-      LIMIT ?
     `
-    params.push(limit)
+    // 不在 SQL 层排序/截断，应用层用修正分数重排
   } else {
     sql = `
       SELECT d.id, d.brand, d.model, d.thickness, d.absorbency_adult,
@@ -106,26 +102,36 @@ rankings.get('/', async (c) => {
   const gM = gStats[0]?.avg_count || 5
   const gC = gStats[0]?.avg_score || 5
 
+  // 对 hot/dimension 类型，用修正分数重排后截断
+  const needsResort = type === 'hot' || type === 'dimension'
+
+  let ranked = rows.map(r => {
+    const ratingAvg = Number(r.rating_avg) || 0
+    const ratingCount = Number(r.rating_count) || 0
+    const feelingAvg = Number(r.feeling_avg) || null
+    const feelingCount = Number(r.feeling_count) || 0
+    const rawScore = computeAvgScore(ratingAvg, ratingCount, feelingAvg, feelingCount)
+    const { avgScore, rankScore } = adjustedScore(rawScore, ratingCount, gM, gC)
+    return {
+      id: r.id,
+      brand: r.brand,
+      model: r.model,
+      avg_score: avgScore,
+      rank_score: rankScore,
+      rating_count: ratingCount,
+      thickness: r.thickness,
+      absorbency_adult: r.absorbency_adult,
+      ...(type === 'dimension' ? { dim_avg: Math.round(Number(r.dim_avg) * 10) / 10 } : {}),
+    }
+  })
+
+  if (needsResort) {
+    ranked.sort((a, b) => b.rank_score - a.rank_score)
+    ranked = ranked.slice(0, limit)
+  }
+
   return c.json({
-    rankings: rows.map(r => {
-      const ratingAvg = Number(r.rating_avg) || 0
-      const ratingCount = Number(r.rating_count) || 0
-      const feelingAvg = Number(r.feeling_avg) || null
-      const feelingCount = Number(r.feeling_count) || 0
-      const rawScore = computeAvgScore(ratingAvg, ratingCount, feelingAvg, feelingCount)
-      const { avgScore } = adjustedScore(rawScore, ratingCount, gM, gC)
-      return {
-        id: r.id,
-        brand: r.brand,
-        model: r.model,
-        avg_score: avgScore,
-        rating_count: ratingCount,
-        thickness: r.thickness,
-        absorbency_adult: r.absorbency_adult
-      }
-    }),
+    rankings: ranked,
     type
   })
 })
-
-export default rankings
