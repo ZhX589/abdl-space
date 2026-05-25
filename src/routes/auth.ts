@@ -255,9 +255,9 @@ auth.post('/register', async (c) => {
     return c.json({ error: '操作太频繁，请稍后再试' }, 429)
   }
 
-  const body = await c.req.json<{ username: string; password: string; email: string; code?: string; nbw_code?: string }>()
-  const { username, password, email: emailAddress, code, nbw_code } = body
-  const isNBW = !!nbw_code
+  const body = await c.req.json<{ username: string; password: string; email: string; code?: string; nbw_code?: string; nbw_token?: string }>()
+  const { username, password, email: emailAddress, code, nbw_code, nbw_token } = body
+  const isNBW = !!nbw_code || !!nbw_token
 
   if (!emailAddress || !password || !username) {
     return c.json({ error: '请填写所有字段' }, 400)
@@ -275,34 +275,50 @@ auth.post('/register', async (c) => {
     return c.json({ error: '用户名 2-32 个字符' }, 400)
   }
 
-  // NBW 注册：跳过邮箱验证码校验，但验证 NBW code 获取 uid
+  // NBW 注册：跳过邮箱验证码校验，但验证 NBW code/token 获取 uid
   let nbw_uid: string | null = null
+  let nbw_username: string | null = null
   if (isNBW) {
-    const clientId = c.env.NBW_CLIENT_ID
-    const clientSecret = c.env.NBW_CLIENT_SECRET
-    const redirectUri = c.env.NBW_REDIRECT_URI
-    if (!clientId || !clientSecret || !redirectUri) {
-      return c.json({ error: 'NewBabyWorld OAuth 未配置' }, 500)
+    if (nbw_token) {
+      // 新流程：从缓存获取
+      const { nbwTokenCache } = await import('./nbw.ts')
+      const cached = nbwTokenCache.get(nbw_token)
+      if (!cached || cached.expiresAt < Date.now()) {
+        return c.json({ error: 'NBW 授权信息已过期，请重新登录' }, 400)
+      }
+      nbwTokenCache.delete(nbw_token)
+      nbw_uid = cached.uid
+      nbw_username = cached.username || null
+    } else {
+      // 旧流程：用 code 换 token
+      const clientId = c.env.NBW_CLIENT_ID
+      const clientSecret = c.env.NBW_CLIENT_SECRET
+      const redirectUri = c.env.NBW_REDIRECT_URI
+      if (!clientId || !clientSecret || !redirectUri) {
+        return c.json({ error: 'NewBabyWorld OAuth 未配置' }, 500)
+      }
+      try {
+        const tokenRes = await fetch('https://www.newbabyworld.top/oauth/token.php', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({
+            client_id: clientId, client_secret: clientSecret,
+            grant_type: 'authorization_code', code: nbw_code, redirect_uri: redirectUri,
+          }),
+        })
+        if (!tokenRes.ok) return c.json({ error: 'NBW 授权码无效' }, 400)
+        const tokenData = await tokenRes.json() as { access_token?: string }
+        if (!tokenData.access_token) return c.json({ error: 'NBW Token 获取失败' }, 400)
+        const userRes = await fetch(`https://www.newbabyworld.top/oauth/userinfo.php?access_token=${tokenData.access_token}`)
+        if (!userRes.ok) return c.json({ error: 'NBW 用户信息获取失败' }, 400)
+        const userData = await userRes.json() as { errcode?: number; data?: { uid?: string; username?: string } }
+        if (userData.errcode !== 0 || !userData.data?.uid) return c.json({ error: 'NBW 用户信息无效' }, 400)
+        nbw_uid = userData.data.uid
+        nbw_username = userData.data.username || null
+      } catch {
+        return c.json({ error: 'NBW 验证请求失败' }, 502)
+      }
     }
-    // 用 code 换 token
-    try {
-      const tokenRes = await fetch('https://www.newbabyworld.top/oauth/token.php', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({
-          client_id: clientId, client_secret: clientSecret,
-          grant_type: 'authorization_code', code: nbw_code, redirect_uri: redirectUri,
-        }),
-      })
-      if (!tokenRes.ok) return c.json({ error: 'NBW 授权码无效' }, 400)
-      const tokenData = await tokenRes.json() as { access_token?: string }
-      if (!tokenData.access_token) return c.json({ error: 'NBW Token 获取失败' }, 400)
-      // 获取用户信息验证 uid
-      const userRes = await fetch(`https://www.newbabyworld.top/oauth/userinfo.php?access_token=${tokenData.access_token}`)
-      if (!userRes.ok) return c.json({ error: 'NBW 用户信息获取失败' }, 400)
-      const userData = await userRes.json() as { errcode?: number; data?: { uid?: string } }
-      if (userData.errcode !== 0 || !userData.data?.uid) return c.json({ error: 'NBW 用户信息无效' }, 400)
-      nbw_uid = userData.data.uid
     } catch {
       return c.json({ error: 'NBW 验证失败' }, 502)
     }
@@ -328,8 +344,8 @@ auth.post('/register', async (c) => {
   const passwordHash = await hashPassword(password)
   const insertResult = await run(
     db,
-    'INSERT INTO users (email, password_hash, username, email_verified, nbw_uid) VALUES (?, ?, ?, 1, ?)',
-    [emailAddress, passwordHash, username, isNBW ? nbw_uid : null]
+    'INSERT INTO users (email, password_hash, username, email_verified, nbw_uid, nbw_username) VALUES (?, ?, ?, 1, ?, ?)',
+    [emailAddress, passwordHash, username, isNBW ? nbw_uid : null, isNBW ? nbw_username : null]
   )
   const userId = insertResult.meta.last_row_id as number
   const token = await signJWT({ sub: userId, username, email: emailAddress, role: 'user' }, c.env.JWT_SECRET)
