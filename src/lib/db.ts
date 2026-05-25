@@ -35,19 +35,16 @@ export function wilsonLower(p: number, n: number, z = 1.96): number {
 }
 
 /**
- * 贝叶斯-威尔逊评分修正
- * @returns {{ avgScore, rankScore }}
+ * 组合评分修正：贝叶斯平均 + 威尔逊区间下界
+ * 产出单一修正分数，同时用于显示和排名
  */
 export function adjustedScore(
   rawScore: number, ratingCount: number,
   globalM: number, globalC: number
-): { avgScore: number; rankScore: number } {
+): number {
   const bayesian = bayesianAverage(rawScore, ratingCount, globalM, globalC)
   const wilson = wilsonLower(bayesian / 10, Math.max(ratingCount, 1)) * 10
-  return {
-    avgScore: Math.round(bayesian * 10) / 10,
-    rankScore: Math.round(wilson * 100) / 100,
-  }
+  return Math.round(wilson * 100) / 100
 }
 
 export function computeAvgScore(ratingAvg: number, _ratingCount: number, feelingAvg: number | null, feelingCount: number): number {

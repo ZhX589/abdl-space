@@ -111,13 +111,12 @@ rankings.get('/', async (c) => {
     const feelingAvg = Number(r.feeling_avg) || null
     const feelingCount = Number(r.feeling_count) || 0
     const rawScore = computeAvgScore(ratingAvg, ratingCount, feelingAvg, feelingCount)
-    const { avgScore, rankScore } = adjustedScore(rawScore, ratingCount, gM, gC)
+    const avgScore = adjustedScore(rawScore, ratingCount, gM, gC)
     return {
       id: r.id,
       brand: r.brand,
       model: r.model,
       avg_score: avgScore,
-      rank_score: rankScore,
       rating_count: ratingCount,
       thickness: r.thickness,
       absorbency_adult: r.absorbency_adult,
@@ -126,7 +125,7 @@ rankings.get('/', async (c) => {
   })
 
   if (needsResort) {
-    ranked.sort((a, b) => b.rank_score - a.rank_score)
+    ranked.sort((a, b) => b.avg_score - a.avg_score)
     ranked = ranked.slice(0, limit)
   }
 

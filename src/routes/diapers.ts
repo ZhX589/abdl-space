@@ -138,7 +138,7 @@ diapers.get('/', async (c) => {
     const feelingAvg = Number(r.feeling_avg) || null
     const feelingCount = Number(r.feeling_count) || 0
     const rawScore = computeAvgScore(ratingAvg, ratingCount, feelingAvg, feelingCount)
-    const { avgScore, rankScore } = adjustedScore(rawScore, ratingCount, globalM, globalC)
+    const avgScore = adjustedScore(rawScore, ratingCount, globalM, globalC)
 
     return {
       id: r.id,
@@ -165,7 +165,6 @@ diapers.get('/', async (c) => {
         hip_max: s.hip_max
       })),
       avg_score: avgScore,
-      rank_score: rankScore,
       rating_count: ratingCount,
       feeling_count: feelingCount,
       images: imagesMap.get(r.id as number) || [],
@@ -310,7 +309,7 @@ diapers.get('/compare', async (c) => {
     const feelingAvg = Number(r.feeling_avg) || null
     const feelingCount = Number(r.feeling_count) || 0
     const rawScore = computeAvgScore(ratingAvg, ratingCount, feelingAvg, feelingCount)
-    const { avgScore } = adjustedScore(rawScore, ratingCount, gM, gC)
+    const avgScore = adjustedScore(rawScore, ratingCount, gM, gC)
 
     return {
       id: r.id,
@@ -335,7 +334,6 @@ diapers.get('/compare', async (c) => {
         value_score: { avg: 0 }
       },
       avg_score: avgScore,
-      rank_score: rankScore,
       rating_count: ratingCount
     }
   })
@@ -530,7 +528,7 @@ diapers.get('/:id', async (c) => {
     `SELECT COALESCE(AVG(cnt), 5) as avg_count, COALESCE(AVG(avg), 5) as avg_score
      FROM (SELECT diaper_id, COUNT(*) as cnt, AVG((absorption_score+fit_score+comfort_score+thickness_score+appearance_score+value_score)/6.0) as avg FROM ratings GROUP BY diaper_id)`
   )
-  const { avgScore } = adjustedScore(rawScore, ratingCount, gStats?.avg_count || 5, gStats?.avg_score || 5)
+  const avgScore = adjustedScore(rawScore, ratingCount, gStats?.avg_count || 5, gStats?.avg_score || 5)
 
   return c.json({
     diaper: {
@@ -559,7 +557,6 @@ diapers.get('/:id', async (c) => {
         hip_max: s.hip_max
       })),
       avg_score: avgScore,
-      rank_score: rankScore,
       rating_count: ratingCount,
       feeling_count: feelingCount,
       images: images.map(i => i.image_url),
