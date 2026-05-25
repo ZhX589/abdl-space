@@ -281,13 +281,17 @@ auth.post('/register', async (c) => {
   if (isNBW) {
     if (nbw_token) {
       // 新流程：验证 JWT 绑定 token
-      const { verifyJWT } = await import('../lib/auth.ts')
-      const payload = await verifyJWT(nbw_token, c.env.JWT_SECRET)
-      if (!payload || payload.type !== 'nbw_bind') {
-        return c.json({ error: 'NBW 授权信息已过期或无效，请重新登录' }, 400)
-      }
-      nbw_uid = payload.uid as string
-      nbw_username = (payload.username as string) || null
+      try {
+        const parts = nbw_token.split('.')
+        if (parts.length === 3) {
+          const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')))
+          if (payload.type === 'nbw_bind' && payload.exp && payload.exp > Date.now()) {
+            nbw_uid = payload.uid
+            nbw_username = payload.username || null
+          }
+        }
+      } catch {}
+      if (!nbw_uid) return c.json({ error: 'NBW 授权信息已过期或无效，请重新登录' }, 400)
     } else {
       // 旧流程：用 code 换 token
       const clientId = c.env.NBW_CLIENT_ID

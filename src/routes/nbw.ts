@@ -19,13 +19,33 @@ const tokenCookieOptions = 'HttpOnly; Secure; SameSite=None; Domain=.abdl-space.
  * 解决 Workers 多实例进程内 Map 不共享的问题
  */
 async function signNBWBindToken(data: { uid: string; username: string; avatar: string | null }, secret: string): Promise<string> {
-  return await signJWT({ ...data, type: 'nbw_bind', exp: Math.floor(Date.now() / 1000) + 600 }, secret)
+  const header = { alg: 'HS256', typ: 'JWT' }
+  const now = Date.now()
+  const payload = { ...data, type: 'nbw_bind', iat: now, exp: now + 10 * 60 * 1000 } // 10 分钟
+  const encoder = new TextEncoder()
+  const headerB64 = btoa(JSON.stringify(header)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+  const payloadB64 = btoa(JSON.stringify(payload)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+  const signInput = `${headerB64}.${payloadB64}`
+  const key = await crypto.subtle.importKey('raw', encoder.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
+  const signature = await crypto.subtle.sign('HMAC', key, encoder.encode(signInput))
+  const sigB64 = btoa(String.fromCharCode(...new Uint8Array(signature))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+  return `${signInput}.${sigB64}`
 }
 
 async function verifyNBWBindToken(token: string, secret: string): Promise<{ uid: string; username: string; avatar: string | null } | null> {
-  const payload = await import('../lib/auth.ts').then(m => m.verifyJWT(token, secret))
-  if (!payload || payload.type !== 'nbw_bind') return null
-  return { uid: payload.uid as string, username: payload.username as string, avatar: (payload.avatar as string) || null }
+  try {
+    const parts = token.split('.')
+    if (parts.length !== 3) return null
+    const encoder = new TextEncoder()
+    const key = await crypto.subtle.importKey('raw', encoder.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['verify'])
+    const signInput = `${parts[0]}.${parts[1]}`
+    const sig = Uint8Array.from(atob(parts[2].replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0))
+    const valid = await crypto.subtle.verify('HMAC', key, sig, encoder.encode(signInput))
+    if (!valid) return null
+    const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')))
+    if (payload.type !== 'nbw_bind' || !payload.exp || payload.exp < Date.now()) return null
+    return { uid: payload.uid, username: payload.username, avatar: payload.avatar || null }
+  } catch { return null }
 }
 
 /**
@@ -100,9 +120,15 @@ nbw.post('/callback', async (c) => {
   const db = c.env.abdl_space_db
 
   // 3. 检查是否已绑定
-  const existing = await queryOne<{ id: number; username: string; email: string; avatar: string | null; role: string }>(
-    db, 'SELECT id, username, email, avatar, role FROM users WHERE nbw_uid = ?', [nbwUser.uid]
-  )
+  let existing: { id: number; username: string; email: string; avatar: string | null; role: string } | null = null
+  try {
+    existing = await queryOne(
+      db, 'SELECT id, username, email, avatar, role FROM users WHERE nbw_uid = ?', [nbwUser.uid]
+    )
+  } catch (e) {
+    // nbw_uid 列不存在（迁移未执行），降级处理
+    console.error('nbw_uid query failed (migration needed?):', e)
+  }
 
   if (existing) {
     // 已绑定，直接登录
@@ -116,10 +142,16 @@ nbw.post('/callback', async (c) => {
   }
 
   // 4. 未绑定，签发短时效绑定 token 返回给前端
-  const bindToken = await signNBWBindToken(
-    { uid: nbwUser.uid, username: nbwUser.username || '', avatar: nbwUser.avatar || null },
-    c.env.JWT_SECRET
-  )
+  let bindToken: string
+  try {
+    bindToken = await signNBWBindToken(
+      { uid: nbwUser.uid, username: nbwUser.username || '', avatar: nbwUser.avatar || null },
+      c.env.JWT_SECRET
+    )
+  } catch (e) {
+    console.error('signNBWBindToken failed:', e)
+    return c.json({ error: '绑定令牌签发失败' }, 500)
+  }
 
   return c.json({
     action: 'choose',
