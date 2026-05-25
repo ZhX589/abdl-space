@@ -119,14 +119,13 @@ nbw.post('/callback', async (c) => {
 
   const db = c.env.abdl_space_db
 
-  // 3. 检查是否已绑定
+  // 3. 检查是否已绑定（CAST 兼容 4349.0 vs "4349" 的格式差异）
   let existing: { id: number; username: string; email: string; avatar: string | null; role: string } | null = null
   try {
     existing = await queryOne(
-      db, 'SELECT id, username, email, avatar, role FROM users WHERE nbw_uid = ?', [nbwUser.uid]
+      db, 'SELECT id, username, email, avatar, role FROM users WHERE CAST(nbw_uid AS TEXT) = ?', [String(nbwUser.uid)]
     )
   } catch (e) {
-    // nbw_uid 列不存在（迁移未执行），降级处理
     console.error('nbw_uid query failed (migration needed?):', e)
   }
 
@@ -192,14 +191,14 @@ nbw.post('/bind-existing', async (c) => {
 
   // 3. 检查该 NBW UID 是否已被其他用户绑定
   const alreadyBound = await queryOne<{ id: number }>(
-    db, 'SELECT id FROM users WHERE nbw_uid = ?', [cached.uid]
+    db, 'SELECT id FROM users WHERE CAST(nbw_uid AS TEXT) = ?', [String(cached.uid)]
   )
   if (alreadyBound && alreadyBound.id !== user.id) {
     return c.json({ error: '该宝宝新天地账户已被其他用户绑定' }, 409)
   }
 
   // 4. 绑定 + 登录
-  await run(db, 'UPDATE users SET nbw_uid = ?, nbw_username = ? WHERE id = ?', [cached.uid, cached.username || null, user.id])
+  await run(db, 'UPDATE users SET nbw_uid = ?, nbw_username = ? WHERE id = ?', [String(cached.uid), cached.username || null, user.id])
   const token = await signJWT({ sub: user.id, username: user.username, email: user.email, role: user.role }, c.env.JWT_SECRET)
   c.header('Set-Cookie', `token=${token}; ${tokenCookieOptions}`)
 
@@ -265,14 +264,14 @@ nbw.post('/bind', authMiddleware, async (c) => {
 
   // 检查该 NBW UID 是否已被其他用户绑定
   const alreadyBound = await queryOne<{ id: number }>(
-    db, 'SELECT id FROM users WHERE nbw_uid = ?', [nbwUser.uid]
+    db, 'SELECT id FROM users WHERE CAST(nbw_uid AS TEXT) = ?', [String(nbwUser.uid)]
   )
   if (alreadyBound && alreadyBound.id !== user.sub) {
     return c.json({ error: '该宝宝新天地账户已被其他用户绑定' }, 409)
   }
 
   // 绑定
-  await run(db, 'UPDATE users SET nbw_uid = ?, nbw_username = ? WHERE id = ?', [nbwUser.uid, nbwUser.username || null, user.sub])
+  await run(db, 'UPDATE users SET nbw_uid = ?, nbw_username = ? WHERE id = ?', [String(nbwUser.uid), nbwUser.username || null, user.sub])
 
   return c.json({ message: '绑定成功', nbw_uid: nbwUser.uid, nbw_username: nbwUser.username || null })
 })

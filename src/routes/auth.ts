@@ -348,7 +348,7 @@ auth.post('/register', async (c) => {
   const insertResult = await run(
     db,
     'INSERT INTO users (email, password_hash, username, email_verified, nbw_uid, nbw_username) VALUES (?, ?, ?, 1, ?, ?)',
-    [emailAddress, passwordHash, username, isNBW ? nbw_uid : null, isNBW ? nbw_username : null]
+    [emailAddress, passwordHash, username, isNBW ? String(nbw_uid) : null, isNBW ? nbw_username : null]
   )
   const userId = insertResult.meta.last_row_id as number
   const token = await signJWT({ sub: userId, username, email: emailAddress, role: 'user' }, c.env.JWT_SECRET)
