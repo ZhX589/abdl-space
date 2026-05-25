@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import type { Env, JWTPayload } from '../types/index.ts'
-import { query, computeAvgScore } from '../lib/db.ts'
+import { query, computeAvgScore, adjustedScore } from '../lib/db.ts'
 import { rateLimit } from '../lib/rate-limit.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
@@ -97,13 +97,23 @@ rankings.get('/', async (c) => {
 
   const rows = await query<Record<string, unknown>>(c.env.abdl_space_db, sql, params)
 
+  // 全局统计用于贝叶斯修正
+  const gStats = await query<{ avg_count: number; avg_score: number }>(
+    c.env.abdl_space_db,
+    `SELECT COALESCE(AVG(cnt), 5) as avg_count, COALESCE(AVG(avg), 5) as avg_score
+     FROM (SELECT diaper_id, COUNT(*) as cnt, AVG((absorption_score+fit_score+comfort_score+thickness_score+appearance_score+value_score)/6.0) as avg FROM ratings GROUP BY diaper_id)`
+  )
+  const gM = gStats[0]?.avg_count || 5
+  const gC = gStats[0]?.avg_score || 5
+
   return c.json({
     rankings: rows.map(r => {
       const ratingAvg = Number(r.rating_avg) || 0
       const ratingCount = Number(r.rating_count) || 0
       const feelingAvg = Number(r.feeling_avg) || null
       const feelingCount = Number(r.feeling_count) || 0
-      const avgScore = computeAvgScore(ratingAvg, ratingCount, feelingAvg, feelingCount)
+      const rawScore = computeAvgScore(ratingAvg, ratingCount, feelingAvg, feelingCount)
+      const { avgScore } = adjustedScore(rawScore, ratingCount, gM, gC)
       return {
         id: r.id,
         brand: r.brand,

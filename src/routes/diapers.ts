@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import type { Env, JWTPayload, Diaper, DiaperSize } from '../types/index.ts'
-import { query, queryOne, computeAvgScore } from '../lib/db.ts'
+import { query, queryOne, computeAvgScore, bayesianAverage, wilsonLower, adjustedScore } from '../lib/db.ts'
 import { rateLimit } from '../lib/rate-limit.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
@@ -118,12 +118,27 @@ diapers.get('/', async (c) => {
     }
   }
 
+  // 全局统计：用于贝叶斯平均和威尔逊区间
+  const globalStats = await queryOne<{ avg_count: number; avg_score: number }>(
+    c.env.abdl_space_db,
+    `SELECT
+       COALESCE(AVG(cnt), 5) as avg_count,
+       COALESCE(AVG(avg), 5) as avg_score
+     FROM (
+       SELECT diaper_id, COUNT(*) as cnt, AVG((absorption_score + fit_score + comfort_score + thickness_score + appearance_score + value_score) / 6.0) as avg
+       FROM ratings GROUP BY diaper_id
+     )`
+  )
+  const globalM = globalStats?.avg_count || 5   // 最低评分数阈值
+  const globalC = globalStats?.avg_score || 5    // 全局平均分
+
   const diapersList = diaperRows.map(r => {
     const ratingAvg = Number(r.rating_avg) || 0
     const ratingCount = Number(r.rating_count) || 0
     const feelingAvg = Number(r.feeling_avg) || null
     const feelingCount = Number(r.feeling_count) || 0
-    const avgScore = computeAvgScore(ratingAvg, ratingCount, feelingAvg, feelingCount)
+    const rawScore = computeAvgScore(ratingAvg, ratingCount, feelingAvg, feelingCount)
+    const { avgScore, rankScore } = adjustedScore(rawScore, ratingCount, globalM, globalC)
 
     return {
       id: r.id,
@@ -150,6 +165,7 @@ diapers.get('/', async (c) => {
         hip_max: s.hip_max
       })),
       avg_score: avgScore,
+      rank_score: rankScore,
       rating_count: ratingCount,
       feeling_count: feelingCount,
       images: imagesMap.get(r.id as number) || [],
@@ -279,12 +295,22 @@ diapers.get('/compare', async (c) => {
     }
   }
 
+  // 全局统计用于贝叶斯修正
+  const gStats = await queryOne<{ avg_count: number; avg_score: number }>(
+    c.env.abdl_space_db,
+    `SELECT COALESCE(AVG(cnt), 5) as avg_count, COALESCE(AVG(avg), 5) as avg_score
+     FROM (SELECT diaper_id, COUNT(*) as cnt, AVG((absorption_score+fit_score+comfort_score+thickness_score+appearance_score+value_score)/6.0) as avg FROM ratings GROUP BY diaper_id)`
+  )
+  const gM = gStats?.avg_count || 5
+  const gC = gStats?.avg_score || 5
+
   const compareData = diaperRows.map(r => {
     const ratingAvg = Number(r.rating_avg) || 0
     const ratingCount = Number(r.rating_count) || 0
     const feelingAvg = Number(r.feeling_avg) || null
     const feelingCount = Number(r.feeling_count) || 0
-    const avgScore = computeAvgScore(ratingAvg, ratingCount, feelingAvg, feelingCount)
+    const rawScore = computeAvgScore(ratingAvg, ratingCount, feelingAvg, feelingCount)
+    const { avgScore } = adjustedScore(rawScore, ratingCount, gM, gC)
 
     return {
       id: r.id,
@@ -309,6 +335,7 @@ diapers.get('/compare', async (c) => {
         value_score: { avg: 0 }
       },
       avg_score: avgScore,
+      rank_score: rankScore,
       rating_count: ratingCount
     }
   })
@@ -495,7 +522,15 @@ diapers.get('/:id', async (c) => {
   const ratingCount = Number(ratingStats?.rating_count) || 0
   const feelingAvg = Number(feelingStats?.feeling_avg) || null
   const feelingCount = Number(feelingStats?.feeling_count) || 0
-  const avgScore = computeAvgScore(ratingAvg, ratingCount, feelingAvg, feelingCount)
+  const rawScore = computeAvgScore(ratingAvg, ratingCount, feelingAvg, feelingCount)
+
+  // 全局统计用于贝叶斯修正
+  const gStats = await queryOne<{ avg_count: number; avg_score: number }>(
+    c.env.abdl_space_db,
+    `SELECT COALESCE(AVG(cnt), 5) as avg_count, COALESCE(AVG(avg), 5) as avg_score
+     FROM (SELECT diaper_id, COUNT(*) as cnt, AVG((absorption_score+fit_score+comfort_score+thickness_score+appearance_score+value_score)/6.0) as avg FROM ratings GROUP BY diaper_id)`
+  )
+  const { avgScore } = adjustedScore(rawScore, ratingCount, gStats?.avg_count || 5, gStats?.avg_score || 5)
 
   return c.json({
     diaper: {
@@ -524,6 +559,7 @@ diapers.get('/:id', async (c) => {
         hip_max: s.hip_max
       })),
       avg_score: avgScore,
+      rank_score: rankScore,
       rating_count: ratingCount,
       feeling_count: feelingCount,
       images: images.map(i => i.image_url),
