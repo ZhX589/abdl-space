@@ -14,11 +14,18 @@ const NBW_USERINFO_URL = 'https://www.newbabyworld.top/oauth/userinfo.php'
 
 const tokenCookieOptions = 'HttpOnly; Secure; SameSite=None; Domain=.abdl-space.top; Path=/; Max-Age=604800'
 
-// 临时存储 NBW OAuth token（code 只能换一次，缓存供 bind-existing 和注册使用）
-export const nbwTokenCache = new Map<string, { uid: string; username: string; avatar: string | null; expiresAt: number }>()
-function cleanupNbwCache() {
-  const now = Date.now()
-  for (const [k, v] of nbwTokenCache) { if (v.expiresAt < now) nbwTokenCache.delete(k) }
+/**
+ * 签发短时效 NBW 绑定 token（JWT 嵌入 uid/username/avatar，10 分钟有效）
+ * 解决 Workers 多实例进程内 Map 不共享的问题
+ */
+async function signNBWBindToken(data: { uid: string; username: string; avatar: string | null }, secret: string): Promise<string> {
+  return await signJWT({ ...data, type: 'nbw_bind', exp: Math.floor(Date.now() / 1000) + 600 }, secret)
+}
+
+async function verifyNBWBindToken(token: string, secret: string): Promise<{ uid: string; username: string; avatar: string | null } | null> {
+  const payload = await import('../lib/auth.ts').then(m => m.verifyJWT(token, secret))
+  if (!payload || payload.type !== 'nbw_bind') return null
+  return { uid: payload.uid as string, username: payload.username as string, avatar: (payload.avatar as string) || null }
 }
 
 /**
@@ -108,19 +115,15 @@ nbw.post('/callback', async (c) => {
     })
   }
 
-  // 4. 未绑定，缓存 NBW 用户信息，返回 uid 给前端
-  cleanupNbwCache()
-  const cacheKey = `${nbwUser.uid}_${Date.now()}`
-  nbwTokenCache.set(cacheKey, {
-    uid: nbwUser.uid,
-    username: nbwUser.username || '',
-    avatar: nbwUser.avatar || null,
-    expiresAt: Date.now() + 10 * 60 * 1000, // 10 分钟有效
-  })
+  // 4. 未绑定，签发短时效绑定 token 返回给前端
+  const bindToken = await signNBWBindToken(
+    { uid: nbwUser.uid, username: nbwUser.username || '', avatar: nbwUser.avatar || null },
+    c.env.JWT_SECRET
+  )
 
   return c.json({
     action: 'choose',
-    nbw_token: cacheKey,
+    nbw_token: bindToken,
     nbw_user: {
       uid: nbwUser.uid,
       username: nbwUser.username || '',
@@ -138,16 +141,9 @@ nbw.post('/bind-existing', async (c) => {
   try { body = await c.req.json() } catch { return c.json({ error: '无效请求' }, 400) }
   if (!body.login || !body.password || !body.nbw_token) return c.json({ error: '缺少必要参数' }, 400)
 
-  // 从缓存获取 NBW 用户信息
-  const cached = nbwTokenCache.get(body.nbw_token)
-  if (!cached || cached.expiresAt < Date.now()) {
-    return c.json({ error: '授权信息已过期，请重新登录' }, 400)
-  }
-  nbwTokenCache.delete(body.nbw_token) // 一次性使用
-
   const db = c.env.abdl_space_db
 
-  // 1. 验证 ABDL Space 账号密码
+  // 1. 先验证 ABDL Space 账号密码（token 在验证成功后再消费）
   const user = await queryOne<{ id: number; username: string; email: string; avatar: string | null; role: string; password_hash: string }>(
     db, 'SELECT id, username, email, avatar, role, password_hash FROM users WHERE username = ? OR email = ?',
     [body.login, body.login]
@@ -158,7 +154,11 @@ nbw.post('/bind-existing', async (c) => {
   const valid = await verifyPassword(body.password, user.password_hash)
   if (!valid) return c.json({ error: '用户名或密码错误' }, 401)
 
-  // 2. 检查该 NBW UID 是否已被其他用户绑定
+  // 2. 密码验证通过后，验证 NBW 绑定 token
+  const cached = await verifyNBWBindToken(body.nbw_token, c.env.JWT_SECRET)
+  if (!cached) return c.json({ error: '授权信息已过期或无效，请重新登录' }, 400)
+
+  // 3. 检查该 NBW UID 是否已被其他用户绑定
   const alreadyBound = await queryOne<{ id: number }>(
     db, 'SELECT id FROM users WHERE nbw_uid = ?', [cached.uid]
   )
@@ -166,7 +166,7 @@ nbw.post('/bind-existing', async (c) => {
     return c.json({ error: '该宝宝新天地账户已被其他用户绑定' }, 409)
   }
 
-  // 3. 绑定 + 登录
+  // 4. 绑定 + 登录
   await run(db, 'UPDATE users SET nbw_uid = ?, nbw_username = ? WHERE id = ?', [cached.uid, cached.username || null, user.id])
   const token = await signJWT({ sub: user.id, username: user.username, email: user.email, role: user.role }, c.env.JWT_SECRET)
   c.header('Set-Cookie', `token=${token}; ${tokenCookieOptions}`)
