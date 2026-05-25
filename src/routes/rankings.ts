@@ -134,3 +134,5 @@ rankings.get('/', async (c) => {
     type
   })
 })
+
+export default rankings

@@ -322,9 +322,6 @@ auth.post('/register', async (c) => {
         return c.json({ error: 'NBW 验证请求失败' }, 502)
       }
     }
-    } catch {
-      return c.json({ error: 'NBW 验证失败' }, 502)
-    }
   } else {
     result = await verifyCode(db, emailAddress, code, 'register')
     if (!result.valid) {
