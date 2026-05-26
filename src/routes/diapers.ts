@@ -57,8 +57,12 @@ diapers.get('/', async (c) => {
 
   const dbQuery = `
     SELECT d.*,
-      COALESCE(avg_scores.rating_avg, 0) as rating_avg,
       COALESCE(avg_scores.rating_count, 0) as rating_count,
+      COALESCE(avg_scores.absorption_score, 0) as absorption_score,
+      COALESCE(avg_scores.comfort_score, 0) as comfort_score,
+      COALESCE(avg_scores.thickness_score, 0) as thickness_score,
+      COALESCE(avg_scores.appearance_score, 0) as appearance_score,
+      COALESCE(avg_scores.value_score, 0) as value_score,
       COALESCE(feel_cnt.feeling_count, 0) as feeling_count,
       COALESCE(feel_cnt.feeling_avg, 0) as feeling_avg,
       b.logo as brand_logo,
