@@ -389,7 +389,7 @@ diapers.get('/compare', async (c) => {
   })
 
   return c.json({ diapers: compareData })
-}))
+})
 
 /**
  * GET /api/diapers/:id/ratings — 某纸尿裤的评分列表 + 分维度统计
