@@ -42,8 +42,9 @@ export function adjustedScore(
   rawScore: number, ratingCount: number,
   globalM: number, globalC: number
 ): number {
+  if (ratingCount === 0) return Math.round(globalC * 100) / 100
   const bayesian = bayesianAverage(rawScore, ratingCount, globalM, globalC)
-  const wilson = wilsonLower(bayesian / 10, Math.max(ratingCount, 1)) * 10
+  const wilson = wilsonLower(bayesian / 10, ratingCount) * 10
   return Math.round(wilson * 100) / 100
 }
 
