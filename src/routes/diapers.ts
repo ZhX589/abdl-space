@@ -164,7 +164,7 @@ diapers.get('/', async (c) => {
       value_score: Number(r.value_score) || 0,
     }
     const ratingCount = Number(r.rating_count) || 0
-    const avgScore = dimensionWeightedScore(rawDimAvgs, ratingCount, gStats, globalM)
+    const avgScore = dimensionWeightedScore(rawDimAvgs, ratingCount, gStats, globalM, !!r.is_baby_diaper)
 
     return {
       id: r.id,
@@ -351,7 +351,7 @@ diapers.get('/compare', async (c) => {
       appearance_score: Number(r.appearance_score) || 0,
       value_score: Number(r.value_score) || 0,
     }
-    const avgScore = dimensionWeightedScore(rawDimAvgs, ratingCount, gDimStats, gM)
+    const avgScore = dimensionWeightedScore(rawDimAvgs, ratingCount, gDimStats, gM, !!r.is_baby_diaper)
 
     return {
       id: r.id,
@@ -411,6 +411,13 @@ diapers.get('/:id/ratings', async (c) => {
     [id]
   )
 
+  const diaperInfo = await queryOne<{ is_baby_diaper: number }>(
+    c.env.abdl_space_db,
+    'SELECT is_baby_diaper FROM diapers WHERE id = ?',
+    [id]
+  )
+  const isBaby = !!diaperInfo?.is_baby_diaper
+
   const s = stats[0]
   const dimensionNames = ['absorption_score', 'comfort_score', 'thickness_score', 'appearance_score', 'value_score'] as const
   const dimensions = {} as Record<string, { avg: number; count: number }>
@@ -418,13 +425,14 @@ diapers.get('/:id/ratings', async (c) => {
     dimensions[dim] = { avg: s?.[dim] != null ? Number(s[dim]) : 0, count: s?.count != null ? Number(s.count) : 0 }
   }
 
-  // 加权总分
+  // 加权总分（成人款/儿童款不同权重）
+  const w = isBaby ? [0.07, 0.35, 0.03, 0.35, 0.20] : [0.30, 0.35, 0.10, 0.20, 0.05]
   const composite = s?.count ? Math.round((
-    (Number(s.absorption_score) || 0) * 0.30 +
-    (Number(s.comfort_score) || 0) * 0.35 +
-    (Number(s.thickness_score) || 0) * 0.10 +
-    (Number(s.appearance_score) || 0) * 0.20 +
-    (Number(s.value_score) || 0) * 0.05
+    (Number(s.absorption_score) || 0) * w[0] +
+    (Number(s.comfort_score) || 0) * w[1] +
+    (Number(s.thickness_score) || 0) * w[2] +
+    (Number(s.appearance_score) || 0) * w[3] +
+    (Number(s.value_score) || 0) * w[4]
   ) * 10) / 10 : 0
 
   return c.json({
@@ -602,7 +610,7 @@ diapers.get('/:id', async (c) => {
     appearance_score: Number(gStats?.g_appearance) || 5,
     value_score: Number(gStats?.g_value) || 5,
   }
-  const avgScore = dimensionWeightedScore(rawDimAvgs, ratingCount, gDimStats, gM)
+  const avgScore = dimensionWeightedScore(rawDimAvgs, ratingCount, gDimStats, gM, !!diaper.is_baby_diaper)
 
   return c.json({
     diaper: {

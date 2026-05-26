@@ -57,7 +57,7 @@ rankings.get('/', async (c) => {
 
   if (type === 'dimension') {
     sql = `
-      SELECT d.id, d.brand, d.model, d.thickness, d.absorbency_adult,
+      SELECT d.id, d.brand, d.model, d.thickness, d.absorbency_adult, d.is_baby_diaper,
         AVG(r.${dimension}) as dim_avg,
         COUNT(*) as rating_count,
         ${dimAvgExpr('absorption_score')},
@@ -72,7 +72,7 @@ rankings.get('/', async (c) => {
     `
   } else if (joinRating) {
     sql = `
-      SELECT d.id, d.brand, d.model, d.thickness, d.absorbency_adult,
+      SELECT d.id, d.brand, d.model, d.thickness, d.absorbency_adult, d.is_baby_diaper,
         COUNT(r.id) as rating_count,
         ${dimAvgExpr('absorption_score')},
         ${dimAvgExpr('comfort_score')},
@@ -85,7 +85,7 @@ rankings.get('/', async (c) => {
     `
   } else {
     sql = `
-      SELECT d.id, d.brand, d.model, d.thickness, d.absorbency_adult,
+      SELECT d.id, d.brand, d.model, d.thickness, d.absorbency_adult, d.is_baby_diaper,
         0 as rating_count, 0 as absorption_score, 0 as comfort_score,
         0 as thickness_score, 0 as appearance_score, 0 as value_score
       FROM diapers d
@@ -137,7 +137,7 @@ rankings.get('/', async (c) => {
       appearance_score: Number(r.appearance_score) || 0,
       value_score: Number(r.value_score) || 0,
     }
-    const avgScore = dimensionWeightedScore(dimAvgs, ratingCount, globalStats, gM)
+    const avgScore = dimensionWeightedScore(dimAvgs, ratingCount, globalStats, gM, !!r.is_baby_diaper)
     return {
       id: r.id,
       brand: r.brand,

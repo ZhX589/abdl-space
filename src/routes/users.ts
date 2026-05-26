@@ -289,7 +289,7 @@ users.get('/:id/worn', async (c) => {
 
   const worn = await query<Record<string, unknown>>(
     c.env.abdl_space_db,
-    `SELECT r.diaper_id, d.brand, d.model,
+    `SELECT r.diaper_id, d.brand, d.model, d.is_baby_diaper,
             r.absorption_score, r.comfort_score,
             r.thickness_score, r.appearance_score, r.value_score,
             r.created_at as rated_at
@@ -305,7 +305,7 @@ users.get('/:id/worn', async (c) => {
       diaper_id: r.diaper_id,
       diaper_name: r.brand && r.model ? `${r.brand} ${r.model}` : (r.brand || r.model || '未知'),
       brand: r.brand ?? null,
-      avg_score: Math.round(((Number(r.absorption_score) * 0.30 + Number(r.comfort_score) * 0.35 + Number(r.thickness_score) * 0.10 + Number(r.appearance_score) * 0.20 + Number(r.value_score) * 0.05)) * 10) / 10,
+      avg_score: (() => { const w = r.is_baby_diaper ? [0.07,0.35,0.03,0.35,0.20] : [0.30,0.35,0.10,0.20,0.05]; return Math.round((Number(r.absorption_score)*w[0] + Number(r.comfort_score)*w[1] + Number(r.thickness_score)*w[2] + Number(r.appearance_score)*w[3] + Number(r.value_score)*w[4]) * 10) / 10 })(),
       rated_at: r.rated_at,
     })),
     total: worn.length,

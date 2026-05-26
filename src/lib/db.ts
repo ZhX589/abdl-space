@@ -1,10 +1,9 @@
 import type { D1Database } from '@cloudflare/workers-types'
 
 /**
- * 评分维度权重
- * 每个维度先做贝叶斯平均，再按权重加权求总分
+ * 评分维度权重 — 成人款
  */
-const DIMENSION_WEIGHTS: Record<string, number> = {
+const ADULT_WEIGHTS: Record<string, number> = {
   absorption_score: 0.30,
   comfort_score: 0.35,
   thickness_score: 0.10,
@@ -13,20 +12,36 @@ const DIMENSION_WEIGHTS: Record<string, number> = {
 }
 
 /**
+ * 评分维度权重 — 儿童款
+ */
+const BABY_WEIGHTS: Record<string, number> = {
+  absorption_score: 0.07,
+  comfort_score: 0.35,
+  thickness_score: 0.03,
+  appearance_score: 0.35,
+  value_score: 0.20,
+}
+
+export const DIM_KEYS = Object.keys(ADULT_WEIGHTS)
+
+/**
  * 每维度独立贝叶斯平均 → 加权总分
  * @param dimAvgs  每维度的简单平均分 { absorption_score: 7.5, comfort_score: 8.2, ... }
  * @param ratingCount 该条目的评分总数
  * @param globalStats 每维度全局平均分 { absorption_score: 6.8, ... }
  * @param globalM  全局平均评分数（贝叶斯阈值）
+ * @param isBaby  是否为儿童款纸尿裤
  */
 export function dimensionWeightedScore(
   dimAvgs: Record<string, number>,
   ratingCount: number,
   globalStats: Record<string, number>,
-  globalM: number
+  globalM: number,
+  isBaby = false
 ): number {
+  const weights = isBaby ? BABY_WEIGHTS : ADULT_WEIGHTS
   let total = 0
-  for (const [dim, weight] of Object.entries(DIMENSION_WEIGHTS)) {
+  for (const [dim, weight] of Object.entries(weights)) {
     const R = dimAvgs[dim] || 0
     const C = globalStats[dim] || 5
     const bayesian = bayesianAverage(R, ratingCount, globalM, C)
