@@ -153,13 +153,22 @@ rankings.get('/', async (c) => {
   })
 
   if (needsResort) {
-    ranked.sort((a, b) => b.avg_score - a.avg_score)
+    ranked.sort((a, b) => {
+      // 0评分排最后
+      if (a.rating_count === 0 && b.rating_count > 0) return 1
+      if (b.rating_count === 0 && a.rating_count > 0) return -1
+      return b.avg_score - a.avg_score
+    })
     ranked = ranked.slice(0, limit)
   }
 
+  const baseAdult = dimensionWeightedScore({}, 0, globalStats, gM, false)
+  const baseBaby = dimensionWeightedScore({}, 0, globalStats, gM, true)
+
   return c.json({
     rankings: ranked,
-    type
+    type,
+    base_scores: { adult: baseAdult, baby: baseBaby }
   })
 })
 

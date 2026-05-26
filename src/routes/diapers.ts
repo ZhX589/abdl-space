@@ -198,8 +198,13 @@ diapers.get('/', async (c) => {
     }
   })
 
+  // 基准分：评分人数为0时的理论分数
+  const baseAdult = dimensionWeightedScore({}, 0, gStats, globalM, false)
+  const baseBaby = dimensionWeightedScore({}, 0, gStats, globalM, true)
+
   return c.json({
     diapers: diapersList,
+    base_scores: { adult: baseAdult, baby: baseBaby },
     pagination: {
       page,
       limit,
