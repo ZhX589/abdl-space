@@ -138,11 +138,13 @@ rankings.get('/', async (c) => {
       value_score: Number(r.value_score) || 0,
     }
     const avgScore = dimensionWeightedScore(dimAvgs, ratingCount, globalStats, gM, !!r.is_baby_diaper)
+    const baseScore = dimensionWeightedScore({}, 0, globalStats, gM, !!r.is_baby_diaper)
     return {
       id: r.id,
       brand: r.brand,
       model: r.model,
       avg_score: avgScore,
+      base_score: baseScore,
       rating_count: ratingCount,
       thickness: r.thickness,
       absorbency_adult: r.absorbency_adult,

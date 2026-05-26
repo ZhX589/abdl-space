@@ -165,6 +165,7 @@ diapers.get('/', async (c) => {
     }
     const ratingCount = Number(r.rating_count) || 0
     const avgScore = dimensionWeightedScore(rawDimAvgs, ratingCount, gStats, globalM, !!r.is_baby_diaper)
+    const baseScore = dimensionWeightedScore({}, 0, gStats, globalM, !!r.is_baby_diaper)
 
     return {
       id: r.id,
@@ -191,6 +192,7 @@ diapers.get('/', async (c) => {
         hip_max: s.hip_max
       })),
       avg_score: avgScore,
+      base_score: baseScore,
       rating_count: ratingCount,
       images: imagesMap.get(r.id as number) || []
     }
@@ -352,6 +354,7 @@ diapers.get('/compare', async (c) => {
       value_score: Number(r.value_score) || 0,
     }
     const avgScore = dimensionWeightedScore(rawDimAvgs, ratingCount, gDimStats, gM, !!r.is_baby_diaper)
+    const baseScore = dimensionWeightedScore({}, 0, gDimStats, gM, !!r.is_baby_diaper)
 
     return {
       id: r.id,
@@ -375,12 +378,13 @@ diapers.get('/compare', async (c) => {
         value_score: { avg: 0 }
       },
       avg_score: avgScore,
+      base_score: baseScore,
       rating_count: ratingCount
     }
   })
 
   return c.json({ diapers: compareData })
-})
+}))
 
 /**
  * GET /api/diapers/:id/ratings — 某纸尿裤的评分列表 + 分维度统计
@@ -611,6 +615,7 @@ diapers.get('/:id', async (c) => {
     value_score: Number(gStats?.g_value) || 5,
   }
   const avgScore = dimensionWeightedScore(rawDimAvgs, ratingCount, gDimStats, gM, !!diaper.is_baby_diaper)
+  const baseScore = dimensionWeightedScore({}, 0, gDimStats, gM, !!diaper.is_baby_diaper)
 
   return c.json({
     diaper: {
@@ -639,6 +644,7 @@ diapers.get('/:id', async (c) => {
         hip_max: s.hip_max
       })),
       avg_score: avgScore,
+      base_score: baseScore,
       rating_count: ratingCount,
       feeling_count: feelingCount,
       images: images.map(i => i.image_url),
