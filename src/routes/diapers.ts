@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import type { Env, JWTPayload, Diaper, DiaperSize } from '../types/index.ts'
-import { query, queryOne, computeAvgScore, bayesianAverage, wilsonLower, adjustedScore } from '../lib/db.ts'
+import { query, queryOne, computeAvgScore, bayesianAverage, adjustedScore } from '../lib/db.ts'
 import { rateLimit } from '../lib/rate-limit.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
