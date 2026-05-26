@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import type { Env, JWTPayload } from '../types/index.ts'
-import { query, computeAvgScore, adjustedScore } from '../lib/db.ts'
+import { query, dimensionWeightedScore } from '../lib/db.ts'
 import { rateLimit } from '../lib/rate-limit.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
@@ -11,7 +11,7 @@ const rankings = new Hono<AppType>()
 rankings.use('*', rateLimit('rankings', 60_000, 60))
 
 const VALID_TYPES = ['hot', 'absorbency', 'popular', 'dimension'] as const
-const VALID_DIMENSIONS = ['absorption_score', 'fit_score', 'comfort_score', 'thickness_score', 'appearance_score', 'value_score'] as const
+const VALID_DIMENSIONS = ['absorption_score', 'comfort_score', 'thickness_score', 'appearance_score', 'value_score'] as const
 
 /**
  * GET /api/rankings — 综合排行榜
@@ -49,6 +49,9 @@ rankings.get('/', async (c) => {
       break
   }
 
+  const dimAvgExpr = (alias: string) =>
+    `ROUND(AVG(r.${alias}), 1) as ${alias}`
+
   let sql: string
   const params: unknown[] = []
 
@@ -56,34 +59,35 @@ rankings.get('/', async (c) => {
     sql = `
       SELECT d.id, d.brand, d.model, d.thickness, d.absorbency_adult,
         AVG(r.${dimension}) as dim_avg,
-        ROUND(AVG((r.absorption_score + r.fit_score + r.comfort_score + r.thickness_score + r.appearance_score + r.value_score) / 6.0), 1) as rating_avg,
         COUNT(*) as rating_count,
-        COALESCE(ROUND(AVG((f.looseness + 5 + f.softness + 5 + f.dryness + 5 + f.odor_control + 5 + f.quietness + 5) / 5.0), 1), 0) as feeling_avg,
-        COUNT(DISTINCT f.id) as feeling_count
+        ${dimAvgExpr('absorption_score')},
+        ${dimAvgExpr('comfort_score')},
+        ${dimAvgExpr('thickness_score')},
+        ${dimAvgExpr('appearance_score')},
+        ${dimAvgExpr('value_score')}
       FROM diapers d
       JOIN ratings r ON r.diaper_id = d.id
-      LEFT JOIN feelings f ON f.diaper_id = d.id
       GROUP BY d.id
       HAVING dim_avg IS NOT NULL
     `
-    // 不在 SQL 层排序/截断，应用层用修正分数重排
   } else if (joinRating) {
     sql = `
       SELECT d.id, d.brand, d.model, d.thickness, d.absorbency_adult,
-        ROUND(AVG((r.absorption_score + r.fit_score + r.comfort_score + r.thickness_score + r.appearance_score + r.value_score) / 6.0), 1) as rating_avg,
         COUNT(r.id) as rating_count,
-        COALESCE(ROUND(AVG((f.looseness + 5 + f.softness + 5 + f.dryness + 5 + f.odor_control + 5 + f.quietness + 5) / 5.0), 1), 0) as feeling_avg,
-        COUNT(DISTINCT f.id) as feeling_count
+        ${dimAvgExpr('absorption_score')},
+        ${dimAvgExpr('comfort_score')},
+        ${dimAvgExpr('thickness_score')},
+        ${dimAvgExpr('appearance_score')},
+        ${dimAvgExpr('value_score')}
       FROM diapers d
       LEFT JOIN ratings r ON r.diaper_id = d.id
-      LEFT JOIN feelings f ON f.diaper_id = d.id
       GROUP BY d.id
     `
-    // 不在 SQL 层排序/截断，应用层用修正分数重排
   } else {
     sql = `
       SELECT d.id, d.brand, d.model, d.thickness, d.absorbency_adult,
-        0 as rating_avg, 0 as rating_count, 0 as feeling_avg, 0 as feeling_count
+        0 as rating_count, 0 as absorption_score, 0 as comfort_score,
+        0 as thickness_score, 0 as appearance_score, 0 as value_score
       FROM diapers d
       ORDER BY ${orderBy}
       LIMIT ?
@@ -93,25 +97,47 @@ rankings.get('/', async (c) => {
 
   const rows = await query<Record<string, unknown>>(c.env.abdl_space_db, sql, params)
 
-  // 全局统计用于贝叶斯修正
-  const gStats = await query<{ avg_count: number; avg_score: number }>(
+  // 全局每维度统计用于贝叶斯修正
+  const gStatsRows = await query<Record<string, unknown>>(
     c.env.abdl_space_db,
-    `SELECT COALESCE(AVG(cnt), 5) as avg_count, COALESCE(AVG(avg), 5) as avg_score
-     FROM (SELECT diaper_id, COUNT(*) as cnt, AVG((absorption_score+fit_score+comfort_score+thickness_score+appearance_score+value_score)/6.0) as avg FROM ratings GROUP BY diaper_id)`
+    `SELECT
+       COALESCE(AVG(cnt), 5) as avg_count,
+       COALESCE(AVG(absorption_score), 5) as g_absorption,
+       COALESCE(AVG(comfort_score), 5) as g_comfort,
+       COALESCE(AVG(thickness_score), 5) as g_thickness,
+       COALESCE(AVG(appearance_score), 5) as g_appearance,
+       COALESCE(AVG(value_score), 5) as g_value
+     FROM (
+       SELECT diaper_id, COUNT(*) as cnt,
+         AVG(absorption_score) as absorption_score,
+         AVG(comfort_score) as comfort_score,
+         AVG(thickness_score) as thickness_score,
+         AVG(appearance_score) as appearance_score,
+         AVG(value_score) as value_score
+       FROM ratings GROUP BY diaper_id
+     )`
   )
-  const gM = gStats[0]?.avg_count || 5
-  const gC = gStats[0]?.avg_score || 5
+  const gM = Number(gStatsRows[0]?.avg_count) || 5
+  const globalStats: Record<string, number> = {
+    absorption_score: Number(gStatsRows[0]?.g_absorption) || 5,
+    comfort_score: Number(gStatsRows[0]?.g_comfort) || 5,
+    thickness_score: Number(gStatsRows[0]?.g_thickness) || 5,
+    appearance_score: Number(gStatsRows[0]?.g_appearance) || 5,
+    value_score: Number(gStatsRows[0]?.g_value) || 5,
+  }
 
-  // 对 hot/dimension 类型，用修正分数重排后截断
   const needsResort = type === 'hot' || type === 'dimension'
 
   let ranked = rows.map(r => {
-    const ratingAvg = Number(r.rating_avg) || 0
     const ratingCount = Number(r.rating_count) || 0
-    const feelingAvg = Number(r.feeling_avg) || null
-    const feelingCount = Number(r.feeling_count) || 0
-    const rawScore = computeAvgScore(ratingAvg, ratingCount, feelingAvg, feelingCount)
-    const avgScore = adjustedScore(rawScore, ratingCount, gM, gC)
+    const dimAvgs: Record<string, number> = {
+      absorption_score: Number(r.absorption_score) || 0,
+      comfort_score: Number(r.comfort_score) || 0,
+      thickness_score: Number(r.thickness_score) || 0,
+      appearance_score: Number(r.appearance_score) || 0,
+      value_score: Number(r.value_score) || 0,
+    }
+    const avgScore = dimensionWeightedScore(dimAvgs, ratingCount, globalStats, gM)
     return {
       id: r.id,
       brand: r.brand,

@@ -270,7 +270,6 @@ users.get('/:id/ratings', async (c) => {
       user: { id: r.user_id, username: r.username, avatar: r.avatar ?? null, role: r.role },
       diaper_id: r.diaper_id,
       absorption_score: r.absorption_score,
-      fit_score: r.fit_score,
       comfort_score: r.comfort_score,
       thickness_score: r.thickness_score,
       appearance_score: r.appearance_score,
@@ -291,7 +290,7 @@ users.get('/:id/worn', async (c) => {
   const worn = await query<Record<string, unknown>>(
     c.env.abdl_space_db,
     `SELECT r.diaper_id, d.brand, d.model,
-            r.absorption_score, r.fit_score, r.comfort_score,
+            r.absorption_score, r.comfort_score,
             r.thickness_score, r.appearance_score, r.value_score,
             r.created_at as rated_at
      FROM ratings r
@@ -306,7 +305,7 @@ users.get('/:id/worn', async (c) => {
       diaper_id: r.diaper_id,
       diaper_name: r.brand && r.model ? `${r.brand} ${r.model}` : (r.brand || r.model || '未知'),
       brand: r.brand ?? null,
-      avg_score: Math.round(((r.absorption_score + r.fit_score + r.comfort_score + r.thickness_score + r.appearance_score + r.value_score) / 6) * 10) / 10,
+      avg_score: Math.round(((Number(r.absorption_score) * 0.30 + Number(r.comfort_score) * 0.35 + Number(r.thickness_score) * 0.10 + Number(r.appearance_score) * 0.20 + Number(r.value_score) * 0.05)) * 10) / 10,
       rated_at: r.rated_at,
     })),
     total: worn.length,

@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import type { Env, JWTPayload, Diaper, DiaperSize } from '../types/index.ts'
-import { query, queryOne, computeAvgScore, bayesianAverage, adjustedScore } from '../lib/db.ts'
+import { query, queryOne, dimensionWeightedScore } from '../lib/db.ts'
 import { rateLimit } from '../lib/rate-limit.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
@@ -67,8 +67,12 @@ diapers.get('/', async (c) => {
     FROM diapers d
     LEFT JOIN (
       SELECT r.diaper_id,
-        AVG((r.absorption_score + r.fit_score + r.comfort_score + r.thickness_score + r.appearance_score + r.value_score) / 6.0) as rating_avg,
-        COUNT(*) as rating_count
+        COUNT(*) as rating_count,
+        AVG(r.absorption_score) as absorption_score,
+        AVG(r.comfort_score) as comfort_score,
+        AVG(r.thickness_score) as thickness_score,
+        AVG(r.appearance_score) as appearance_score,
+        AVG(r.value_score) as value_score
       FROM ratings r
       GROUP BY r.diaper_id
     ) avg_scores ON avg_scores.diaper_id = d.id
@@ -119,26 +123,44 @@ diapers.get('/', async (c) => {
   }
 
   // 全局统计：用于贝叶斯平均和威尔逊区间
-  const globalStats = await queryOne<{ avg_count: number; avg_score: number }>(
+  const globalStats = await queryOne<Record<string, unknown>>(
     c.env.abdl_space_db,
     `SELECT
        COALESCE(AVG(cnt), 5) as avg_count,
-       COALESCE(AVG(avg), 5) as avg_score
+       COALESCE(AVG(absorption_score), 5) as g_absorption,
+       COALESCE(AVG(comfort_score), 5) as g_comfort,
+       COALESCE(AVG(thickness_score), 5) as g_thickness,
+       COALESCE(AVG(appearance_score), 5) as g_appearance,
+       COALESCE(AVG(value_score), 5) as g_value
      FROM (
-       SELECT diaper_id, COUNT(*) as cnt, AVG((absorption_score + fit_score + comfort_score + thickness_score + appearance_score + value_score) / 6.0) as avg
+       SELECT diaper_id, COUNT(*) as cnt,
+         AVG(absorption_score) as absorption_score,
+         AVG(comfort_score) as comfort_score,
+         AVG(thickness_score) as thickness_score,
+         AVG(appearance_score) as appearance_score,
+         AVG(value_score) as value_score
        FROM ratings GROUP BY diaper_id
      )`
   )
-  const globalM = globalStats?.avg_count || 5   // 最低评分数阈值
-  const globalC = globalStats?.avg_score || 5    // 全局平均分
+  const globalM = Number(globalStats?.avg_count) || 5
+  const gStats: Record<string, number> = {
+    absorption_score: Number(globalStats?.g_absorption) || 5,
+    comfort_score: Number(globalStats?.g_comfort) || 5,
+    thickness_score: Number(globalStats?.g_thickness) || 5,
+    appearance_score: Number(globalStats?.g_appearance) || 5,
+    value_score: Number(globalStats?.g_value) || 5,
+  }
 
   const diapersList = diaperRows.map(r => {
-    const ratingAvg = Number(r.rating_avg) || 0
+    const rawDimAvgs: Record<string, number> = {
+      absorption_score: Number(r.absorption_score) || 0,
+      comfort_score: Number(r.comfort_score) || 0,
+      thickness_score: Number(r.thickness_score) || 0,
+      appearance_score: Number(r.appearance_score) || 0,
+      value_score: Number(r.value_score) || 0,
+    }
     const ratingCount = Number(r.rating_count) || 0
-    const feelingAvg = Number(r.feeling_avg) || null
-    const feelingCount = Number(r.feeling_count) || 0
-    const rawScore = computeAvgScore(ratingAvg, ratingCount, feelingAvg, feelingCount)
-    const avgScore = adjustedScore(rawScore, ratingCount, globalM, globalC)
+    const avgScore = dimensionWeightedScore(rawDimAvgs, ratingCount, gStats, globalM)
 
     return {
       id: r.id,
@@ -166,8 +188,7 @@ diapers.get('/', async (c) => {
       })),
       avg_score: avgScore,
       rating_count: ratingCount,
-      feeling_count: feelingCount,
-      images: imagesMap.get(r.id as number) || [],
+      images: imagesMap.get(r.id as number) || []
     }
   })
 
@@ -222,25 +243,24 @@ diapers.get('/compare', async (c) => {
   const placeholders = ids.map(() => '?').join(',')
   const diapersQuery = `
     SELECT d.*,
-      COALESCE(avg_scores.rating_avg, 0) as rating_avg,
       COALESCE(avg_scores.rating_count, 0) as rating_count,
-      COALESCE(feel_cnt.feeling_count, 0) as feeling_count,
-      COALESCE(feel_cnt.feeling_avg, 0) as feeling_avg
+      COALESCE(avg_scores.absorption_score, 0) as absorption_score,
+      COALESCE(avg_scores.comfort_score, 0) as comfort_score,
+      COALESCE(avg_scores.thickness_score, 0) as thickness_score,
+      COALESCE(avg_scores.appearance_score, 0) as appearance_score,
+      COALESCE(avg_scores.value_score, 0) as value_score
     FROM diapers d
     LEFT JOIN (
       SELECT r.diaper_id,
-        AVG((r.absorption_score + r.fit_score + r.comfort_score + r.thickness_score + r.appearance_score + r.value_score) / 6.0) as rating_avg,
-        COUNT(*) as rating_count
+        COUNT(*) as rating_count,
+        AVG(r.absorption_score) as absorption_score,
+        AVG(r.comfort_score) as comfort_score,
+        AVG(r.thickness_score) as thickness_score,
+        AVG(r.appearance_score) as appearance_score,
+        AVG(r.value_score) as value_score
       FROM ratings r
       GROUP BY r.diaper_id
     ) avg_scores ON avg_scores.diaper_id = d.id
-    LEFT JOIN (
-      SELECT diaper_id,
-        AVG((looseness + 5 + softness + 5 + dryness + 5 + odor_control + 5 + quietness + 5) / 5.0) as feeling_avg,
-        COUNT(*) as feeling_count
-      FROM feelings
-      GROUP BY diaper_id
-    ) feel_cnt ON feel_cnt.diaper_id = d.id
     WHERE d.id IN (${placeholders})
   `
 
@@ -268,11 +288,10 @@ diapers.get('/compare', async (c) => {
   const dimensionsMap = new Map<number, Record<string, { avg: number }>>()
   if (diaperIds.length > 0) {
     const dimPlaceholders = diaperIds.map(() => '?').join(',')
-    const dimensions = await query<{ diaper_id: number; absorption_score: number; fit_score: number; comfort_score: number; thickness_score: number; appearance_score: number; value_score: number }>(
+    const dimensions = await query<{ diaper_id: number; absorption_score: number; comfort_score: number; thickness_score: number; appearance_score: number; value_score: number }>(
       c.env.abdl_space_db,
       `SELECT diaper_id,
         AVG(absorption_score) as absorption_score,
-        AVG(fit_score) as fit_score,
         AVG(comfort_score) as comfort_score,
         AVG(thickness_score) as thickness_score,
         AVG(appearance_score) as appearance_score,
@@ -285,7 +304,6 @@ diapers.get('/compare', async (c) => {
     for (const d of dimensions) {
       dimensionsMap.set(d.diaper_id, {
         absorption_score: { avg: Math.round(d.absorption_score * 10) / 10 },
-        fit_score: { avg: Math.round(d.fit_score * 10) / 10 },
         comfort_score: { avg: Math.round(d.comfort_score * 10) / 10 },
         thickness_score: { avg: Math.round(d.thickness_score * 10) / 10 },
         appearance_score: { avg: Math.round(d.appearance_score * 10) / 10 },
@@ -295,21 +313,41 @@ diapers.get('/compare', async (c) => {
   }
 
   // 全局统计用于贝叶斯修正
-  const gStats = await queryOne<{ avg_count: number; avg_score: number }>(
+  const gStats = await queryOne<Record<string, unknown>>(
     c.env.abdl_space_db,
-    `SELECT COALESCE(AVG(cnt), 5) as avg_count, COALESCE(AVG(avg), 5) as avg_score
-     FROM (SELECT diaper_id, COUNT(*) as cnt, AVG((absorption_score+fit_score+comfort_score+thickness_score+appearance_score+value_score)/6.0) as avg FROM ratings GROUP BY diaper_id)`
+    `SELECT COALESCE(AVG(cnt), 5) as avg_count,
+       COALESCE(AVG(absorption_score), 5) as g_absorption,
+       COALESCE(AVG(comfort_score), 5) as g_comfort,
+       COALESCE(AVG(thickness_score), 5) as g_thickness,
+       COALESCE(AVG(appearance_score), 5) as g_appearance,
+       COALESCE(AVG(value_score), 5) as g_value
+     FROM (SELECT diaper_id, COUNT(*) as cnt,
+       AVG(absorption_score) as absorption_score,
+       AVG(comfort_score) as comfort_score,
+       AVG(thickness_score) as thickness_score,
+       AVG(appearance_score) as appearance_score,
+       AVG(value_score) as value_score
+     FROM ratings GROUP BY diaper_id)`
   )
-  const gM = gStats?.avg_count || 5
-  const gC = gStats?.avg_score || 5
+  const gM = Number(gStats?.avg_count) || 5
+  const gDimStats: Record<string, number> = {
+    absorption_score: Number(gStats?.g_absorption) || 5,
+    comfort_score: Number(gStats?.g_comfort) || 5,
+    thickness_score: Number(gStats?.g_thickness) || 5,
+    appearance_score: Number(gStats?.g_appearance) || 5,
+    value_score: Number(gStats?.g_value) || 5,
+  }
 
   const compareData = diaperRows.map(r => {
-    const ratingAvg = Number(r.rating_avg) || 0
     const ratingCount = Number(r.rating_count) || 0
-    const feelingAvg = Number(r.feeling_avg) || null
-    const feelingCount = Number(r.feeling_count) || 0
-    const rawScore = computeAvgScore(ratingAvg, ratingCount, feelingAvg, feelingCount)
-    const avgScore = adjustedScore(rawScore, ratingCount, gM, gC)
+    const rawDimAvgs: Record<string, number> = {
+      absorption_score: Number(r.absorption_score) || 0,
+      comfort_score: Number(r.comfort_score) || 0,
+      thickness_score: Number(r.thickness_score) || 0,
+      appearance_score: Number(r.appearance_score) || 0,
+      value_score: Number(r.value_score) || 0,
+    }
+    const avgScore = dimensionWeightedScore(rawDimAvgs, ratingCount, gDimStats, gM)
 
     return {
       id: r.id,
@@ -327,7 +365,6 @@ diapers.get('/compare', async (c) => {
       })),
       dimensions: dimensionsMap.get(r.id as number) || {
         absorption_score: { avg: 0 },
-        fit_score: { avg: 0 },
         comfort_score: { avg: 0 },
         thickness_score: { avg: 0 },
         appearance_score: { avg: 0 },
@@ -361,23 +398,30 @@ diapers.get('/:id/ratings', async (c) => {
     c.env.abdl_space_db,
     `SELECT
        ROUND(AVG(absorption_score), 1) as absorption_score,
-       ROUND(AVG(fit_score), 1) as fit_score,
        ROUND(AVG(comfort_score), 1) as comfort_score,
        ROUND(AVG(thickness_score), 1) as thickness_score,
        ROUND(AVG(appearance_score), 1) as appearance_score,
        ROUND(AVG(value_score), 1) as value_score,
-       ROUND(AVG((absorption_score + fit_score + comfort_score + thickness_score + appearance_score + value_score) / 6.0), 1) as composite,
        COUNT(*) as count
      FROM ratings WHERE diaper_id = ?`,
     [id]
   )
 
   const s = stats[0]
-  const dimensionNames = ['absorption_score', 'fit_score', 'comfort_score', 'thickness_score', 'appearance_score', 'value_score'] as const
+  const dimensionNames = ['absorption_score', 'comfort_score', 'thickness_score', 'appearance_score', 'value_score'] as const
   const dimensions = {} as Record<string, { avg: number; count: number }>
   for (const dim of dimensionNames) {
     dimensions[dim] = { avg: s?.[dim] != null ? Number(s[dim]) : 0, count: s?.count != null ? Number(s.count) : 0 }
   }
+
+  // 加权总分
+  const composite = s?.count ? Math.round((
+    (Number(s.absorption_score) || 0) * 0.30 +
+    (Number(s.comfort_score) || 0) * 0.35 +
+    (Number(s.thickness_score) || 0) * 0.10 +
+    (Number(s.appearance_score) || 0) * 0.20 +
+    (Number(s.value_score) || 0) * 0.05
+  ) * 10) / 10 : 0
 
   return c.json({
     reviews: reviews.map(r => ({
@@ -385,7 +429,6 @@ diapers.get('/:id/ratings', async (c) => {
       user: { id: r.user_id, username: r.username, avatar: r.avatar || null, role: r.role },
       diaper_id: r.diaper_id,
       absorption_score: r.absorption_score,
-      fit_score: r.fit_score,
       comfort_score: r.comfort_score,
       thickness_score: r.thickness_score,
       appearance_score: r.appearance_score,
@@ -395,7 +438,7 @@ diapers.get('/:id/ratings', async (c) => {
       created_at: r.created_at
     })),
     stats: {
-      composite: s?.composite != null ? Number(s.composite) : 0,
+      composite,
       count: s?.count != null ? Number(s.count) : 0,
       dimensions
     }
@@ -495,7 +538,11 @@ diapers.get('/:id', async (c) => {
   const ratingStats = await queryOne<Record<string, unknown>>(
     c.env.abdl_space_db,
     `SELECT
-       AVG((absorption_score + fit_score + comfort_score + thickness_score + appearance_score + value_score) / 6.0) as rating_avg,
+       AVG(absorption_score) as absorption_score,
+       AVG(comfort_score) as comfort_score,
+       AVG(thickness_score) as thickness_score,
+       AVG(appearance_score) as appearance_score,
+       AVG(value_score) as value_score,
        COUNT(*) as rating_count
      FROM ratings WHERE diaper_id = ?`,
     [id]
@@ -516,19 +563,42 @@ diapers.get('/:id', async (c) => {
     [id]
   )
 
-  const ratingAvg = Number(ratingStats?.rating_avg) || 0
   const ratingCount = Number(ratingStats?.rating_count) || 0
-  const feelingAvg = Number(feelingStats?.feeling_avg) || null
   const feelingCount = Number(feelingStats?.feeling_count) || 0
-  const rawScore = computeAvgScore(ratingAvg, ratingCount, feelingAvg, feelingCount)
+  const rawDimAvgs: Record<string, number> = {
+    absorption_score: Number(ratingStats?.absorption_score) || 0,
+    comfort_score: Number(ratingStats?.comfort_score) || 0,
+    thickness_score: Number(ratingStats?.thickness_score) || 0,
+    appearance_score: Number(ratingStats?.appearance_score) || 0,
+    value_score: Number(ratingStats?.value_score) || 0,
+  }
 
   // 全局统计用于贝叶斯修正
-  const gStats = await queryOne<{ avg_count: number; avg_score: number }>(
+  const gStats = await queryOne<Record<string, unknown>>(
     c.env.abdl_space_db,
-    `SELECT COALESCE(AVG(cnt), 5) as avg_count, COALESCE(AVG(avg), 5) as avg_score
-     FROM (SELECT diaper_id, COUNT(*) as cnt, AVG((absorption_score+fit_score+comfort_score+thickness_score+appearance_score+value_score)/6.0) as avg FROM ratings GROUP BY diaper_id)`
+    `SELECT COALESCE(AVG(cnt), 5) as avg_count,
+       COALESCE(AVG(absorption_score), 5) as g_absorption,
+       COALESCE(AVG(comfort_score), 5) as g_comfort,
+       COALESCE(AVG(thickness_score), 5) as g_thickness,
+       COALESCE(AVG(appearance_score), 5) as g_appearance,
+       COALESCE(AVG(value_score), 5) as g_value
+     FROM (SELECT diaper_id, COUNT(*) as cnt,
+       AVG(absorption_score) as absorption_score,
+       AVG(comfort_score) as comfort_score,
+       AVG(thickness_score) as thickness_score,
+       AVG(appearance_score) as appearance_score,
+       AVG(value_score) as value_score
+     FROM ratings GROUP BY diaper_id)`
   )
-  const avgScore = adjustedScore(rawScore, ratingCount, gStats?.avg_count || 5, gStats?.avg_score || 5)
+  const gM = Number(gStats?.avg_count) || 5
+  const gDimStats: Record<string, number> = {
+    absorption_score: Number(gStats?.g_absorption) || 5,
+    comfort_score: Number(gStats?.g_comfort) || 5,
+    thickness_score: Number(gStats?.g_thickness) || 5,
+    appearance_score: Number(gStats?.g_appearance) || 5,
+    value_score: Number(gStats?.g_value) || 5,
+  }
+  const avgScore = dimensionWeightedScore(rawDimAvgs, ratingCount, gDimStats, gM)
 
   return c.json({
     diaper: {
@@ -566,7 +636,6 @@ diapers.get('/:id', async (c) => {
       user: { id: r.user_id, username: r.username, avatar: r.avatar || null, role: r.role },
       diaper_id: r.diaper_id,
       absorption_score: r.absorption_score,
-      fit_score: r.fit_score,
       comfort_score: r.comfort_score,
       thickness_score: r.thickness_score,
       appearance_score: r.appearance_score,

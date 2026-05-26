@@ -1,6 +1,41 @@
 import type { D1Database } from '@cloudflare/workers-types'
 
 /**
+ * 评分维度权重
+ * 每个维度先做贝叶斯平均，再按权重加权求总分
+ */
+const DIMENSION_WEIGHTS: Record<string, number> = {
+  absorption_score: 0.30,
+  comfort_score: 0.35,
+  thickness_score: 0.10,
+  appearance_score: 0.20,
+  value_score: 0.05,
+}
+
+/**
+ * 每维度独立贝叶斯平均 → 加权总分
+ * @param dimAvgs  每维度的简单平均分 { absorption_score: 7.5, comfort_score: 8.2, ... }
+ * @param ratingCount 该条目的评分总数
+ * @param globalStats 每维度全局平均分 { absorption_score: 6.8, ... }
+ * @param globalM  全局平均评分数（贝叶斯阈值）
+ */
+export function dimensionWeightedScore(
+  dimAvgs: Record<string, number>,
+  ratingCount: number,
+  globalStats: Record<string, number>,
+  globalM: number
+): number {
+  let total = 0
+  for (const [dim, weight] of Object.entries(DIMENSION_WEIGHTS)) {
+    const R = dimAvgs[dim] || 0
+    const C = globalStats[dim] || 5
+    const bayesian = bayesianAverage(R, ratingCount, globalM, C)
+    total += bayesian * weight
+  }
+  return Math.round(total * 100) / 100
+}
+
+/**
  * Compute composite avg_score per API.md §6 formula:
  * IF feeling_count > 0:
  *   avg_score = round(rating_avg × 0.9 + feeling_avg × 0.1, 1)

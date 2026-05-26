@@ -46,13 +46,12 @@ export interface DiaperSize {
   hip_max: number
 }
 
-/** 评分（6 维度 1–10） */
+/** 评分（5 维度 1–10） */
 export interface Rating {
   id: number
   user_id: number
   diaper_id: number
   absorption_score: number
-  fit_score: number
   comfort_score: number
   thickness_score: number
   appearance_score: number
@@ -193,7 +192,6 @@ export interface LoginResponse {
 export interface CreateRatingRequest {
   diaper_id: number
   absorption_score: number
-  fit_score: number
   comfort_score: number
   thickness_score: number
   appearance_score: number

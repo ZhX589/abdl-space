@@ -13,13 +13,13 @@ const ratings = new Hono<AppType>()
 ratings.post('/', authMiddleware, async (c) => {
   const user = c.get('user')
   const body = await c.req.json<CreateRatingRequest>()
-  const { diaper_id, absorption_score, fit_score, comfort_score, thickness_score, appearance_score, value_score, review } = body
+  const { diaper_id, absorption_score, comfort_score, thickness_score, appearance_score, value_score, review } = body
 
-  if (!diaper_id || absorption_score === undefined || fit_score === undefined || comfort_score === undefined || thickness_score === undefined || appearance_score === undefined || value_score === undefined) {
+  if (!diaper_id || absorption_score === undefined || comfort_score === undefined || thickness_score === undefined || appearance_score === undefined || value_score === undefined) {
     return c.json({ error: 'All score fields are required' }, 400)
   }
 
-  const scores = [absorption_score, fit_score, comfort_score, thickness_score, appearance_score, value_score]
+  const scores = [absorption_score, comfort_score, thickness_score, appearance_score, value_score]
   if (scores.some(s => s < 1 || s > 10)) {
     return c.json({ error: 'Scores must be 1-10' }, 400)
   }
@@ -41,9 +41,9 @@ ratings.post('/', authMiddleware, async (c) => {
 
   const result = await run(
     c.env.abdl_space_db,
-    `INSERT INTO ratings (user_id, diaper_id, absorption_score, fit_score, comfort_score, thickness_score, appearance_score, value_score, review)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [user.sub, diaper_id, absorption_score, fit_score, comfort_score, thickness_score, appearance_score, value_score, review ?? null]
+    `INSERT INTO ratings (user_id, diaper_id, absorption_score, comfort_score, thickness_score, appearance_score, value_score, review)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [user.sub, diaper_id, absorption_score, comfort_score, thickness_score, appearance_score, value_score, review ?? null]
   )
 
   return c.json({
@@ -76,7 +76,6 @@ ratings.get('/me/:diaperId', authMiddleware, async (c) => {
       user: { id: row.user_id, username: row.username, avatar: row.avatar ?? null, role: row.role },
       diaper_id: row.diaper_id,
       absorption_score: row.absorption_score,
-      fit_score: row.fit_score,
       comfort_score: row.comfort_score,
       thickness_score: row.thickness_score,
       appearance_score: row.appearance_score,

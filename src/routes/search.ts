@@ -29,7 +29,7 @@ search.get('/', async (c) => {
     const diaperRows = await query<Record<string, unknown>>(
       c.env.abdl_space_db,
       `SELECT d.id, d.brand, d.model,
-        ROUND(AVG((r.absorption_score + r.fit_score + r.comfort_score + r.thickness_score + r.appearance_score + r.value_score) / 6.0), 1) as rating_avg,
+        ROUND(AVG(r.absorption_score * 0.30 + r.comfort_score * 0.35 + r.thickness_score * 0.10 + r.appearance_score * 0.20 + r.value_score * 0.05), 1) as rating_avg,
         COUNT(r.id) as rating_count,
         COALESCE(ROUND(AVG((f.looseness + 5 + f.softness + 5 + f.dryness + 5 + f.odor_control + 5 + f.quietness + 5) / 5.0), 1), 0) as feeling_avg,
         COUNT(DISTINCT f.id) as feeling_count

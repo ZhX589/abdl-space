@@ -194,7 +194,7 @@ contentV1.get('/rankings', async (c) => {
   const limit = Math.min(50, Math.max(1, parseInt(c.req.query('limit') || '20')))
 
   const VALID_TYPES = ['hot', 'absorbency', 'popular', 'dimension'] as const
-  const VALID_DIMENSIONS = ['absorption_score', 'fit_score', 'comfort_score', 'thickness_score', 'appearance_score', 'value_score'] as const
+  const VALID_DIMENSIONS = ['absorption_score', 'comfort_score', 'thickness_score', 'appearance_score', 'value_score'] as const
 
   if (!VALID_TYPES.includes(type as typeof VALID_TYPES[number])) {
     return c.json({ error: `Invalid type. Valid: ${VALID_TYPES.join(', ')}` }, 400)
@@ -230,7 +230,7 @@ contentV1.get('/rankings', async (c) => {
     sql = `
       SELECT d.id, d.brand, d.model, d.thickness, d.absorbency_adult,
         AVG(r.${dimension}) as dim_avg,
-        ROUND(AVG((r.absorption_score + r.fit_score + r.comfort_score + r.thickness_score + r.appearance_score + r.value_score) / 6.0), 1) as rating_avg,
+        ROUND(AVG(r.absorption_score * 0.30 + r.comfort_score * 0.35 + r.thickness_score * 0.10 + r.appearance_score * 0.20 + r.value_score * 0.05), 1) as rating_avg,
         COUNT(*) as rating_count,
         COALESCE(ROUND(AVG((f.looseness + 5 + f.softness + 5 + f.dryness + 5 + f.odor_control + 5 + f.quietness + 5) / 5.0), 1), 0) as feeling_avg,
         COUNT(DISTINCT f.id) as feeling_count
@@ -246,7 +246,7 @@ contentV1.get('/rankings', async (c) => {
   } else if (joinRating) {
     sql = `
       SELECT d.id, d.brand, d.model, d.thickness, d.absorbency_adult,
-        ROUND(AVG((r.absorption_score + r.fit_score + r.comfort_score + r.thickness_score + r.appearance_score + r.value_score) / 6.0), 1) as rating_avg,
+        ROUND(AVG(r.absorption_score * 0.30 + r.comfort_score * 0.35 + r.thickness_score * 0.10 + r.appearance_score * 0.20 + r.value_score * 0.05), 1) as rating_avg,
         COUNT(r.id) as rating_count,
         COALESCE(ROUND(AVG((f.looseness + 5 + f.softness + 5 + f.dryness + 5 + f.odor_control + 5 + f.quietness + 5) / 5.0), 1), 0) as feeling_avg,
         COUNT(DISTINCT f.id) as feeling_count
