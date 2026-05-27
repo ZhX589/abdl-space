@@ -143,6 +143,7 @@ rankings.get('/', async (c) => {
       id: r.id,
       brand: r.brand,
       model: r.model,
+      is_baby_diaper: !!r.is_baby_diaper,
       avg_score: avgScore,
       base_score: baseScore,
       rating_count: ratingCount,

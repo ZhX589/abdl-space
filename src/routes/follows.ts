@@ -14,7 +14,7 @@ follows.post('/:userId', authMiddleware, async (c) => {
   const user = c.get('user')
   const targetId = parseInt(c.req.param('userId'))
 
-  if (targetId === user.sub) {
+  if (targetId === Number(user.sub)) {
     return c.json({ error: '不能关注自己' }, 400)
   }
 
