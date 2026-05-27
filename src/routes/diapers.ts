@@ -126,36 +126,52 @@ diapers.get('/', async (c) => {
     }
   }
 
-  // 全局统计：用于贝叶斯平均和威尔逊区间
-  const globalStats = await queryOne<Record<string, unknown>>(
-    c.env.abdl_space_db,
-    `SELECT
-       COALESCE(AVG(cnt), 5) as avg_count,
-       COALESCE(AVG(absorption_score), 5) as g_absorption,
-       COALESCE(AVG(comfort_score), 5) as g_comfort,
-       COALESCE(AVG(thickness_score), 5) as g_thickness,
-       COALESCE(AVG(appearance_score), 5) as g_appearance,
-       COALESCE(AVG(value_score), 5) as g_value
-     FROM (
-       SELECT diaper_id, COUNT(*) as cnt,
-         AVG(absorption_score) as absorption_score,
-         AVG(comfort_score) as comfort_score,
-         AVG(thickness_score) as thickness_score,
-         AVG(appearance_score) as appearance_score,
-         AVG(value_score) as value_score
-       FROM ratings GROUP BY diaper_id
-     )`
-  )
-  const globalM = Number(globalStats?.avg_count) || 5
-  const gStats: Record<string, number> = {
-    absorption_score: Number(globalStats?.g_absorption) || 5,
-    comfort_score: Number(globalStats?.g_comfort) || 5,
-    thickness_score: Number(globalStats?.g_thickness) || 5,
-    appearance_score: Number(globalStats?.g_appearance) || 5,
-    value_score: Number(globalStats?.g_value) || 5,
+  // 全局统计：按成人/婴儿分离，用于贝叶斯平均和威尔逊区间
+  async function loadGlobalStats(isBaby: boolean) {
+    const flag = isBaby ? 1 : 0
+    const rows = await query<Record<string, unknown>>(
+      c.env.abdl_space_db,
+      `SELECT
+         COALESCE(AVG(cnt), 5) as avg_count,
+         COALESCE(AVG(absorption_score), 5) as g_absorption,
+         COALESCE(AVG(comfort_score), 5) as g_comfort,
+         COALESCE(AVG(thickness_score), 5) as g_thickness,
+         COALESCE(AVG(appearance_score), 5) as g_appearance,
+         COALESCE(AVG(value_score), 5) as g_value
+       FROM (
+         SELECT r.diaper_id, COUNT(*) as cnt,
+           AVG(r.absorption_score) as absorption_score,
+           AVG(r.comfort_score) as comfort_score,
+           AVG(r.thickness_score) as thickness_score,
+           AVG(r.appearance_score) as appearance_score,
+           AVG(r.value_score) as value_score
+         FROM ratings r
+         JOIN diapers d ON r.diaper_id = d.id
+         WHERE d.is_baby_diaper = ?
+         GROUP BY r.diaper_id
+       )`,
+      [flag]
+    )
+    return {
+      m: Number(rows[0]?.avg_count) || 5,
+      stats: {
+        absorption_score: Number(rows[0]?.g_absorption) || 5,
+        comfort_score: Number(rows[0]?.g_comfort) || 5,
+        thickness_score: Number(rows[0]?.g_thickness) || 5,
+        appearance_score: Number(rows[0]?.g_appearance) || 5,
+        value_score: Number(rows[0]?.g_value) || 5,
+      }
+    }
   }
 
+  const [adultGS, babyGS] = await Promise.all([
+    loadGlobalStats(false),
+    loadGlobalStats(true),
+  ])
+
   const diapersList = diaperRows.map(r => {
+    const isBaby = !!r.is_baby_diaper
+    const gs = isBaby ? babyGS : adultGS
     const rawDimAvgs: Record<string, number> = {
       absorption_score: Number(r.absorption_score) || 0,
       comfort_score: Number(r.comfort_score) || 0,
@@ -164,8 +180,8 @@ diapers.get('/', async (c) => {
       value_score: Number(r.value_score) || 0,
     }
     const ratingCount = Number(r.rating_count) || 0
-    const avgScore = dimensionWeightedScore(rawDimAvgs, ratingCount, gStats, globalM, !!r.is_baby_diaper)
-    const baseScore = dimensionWeightedScore({}, 0, gStats, globalM, !!r.is_baby_diaper)
+    const avgScore = dimensionWeightedScore(rawDimAvgs, ratingCount, gs.stats, gs.m, isBaby)
+    const baseScore = dimensionWeightedScore({}, 0, gs.stats, gs.m, isBaby)
 
     return {
       id: r.id,
@@ -199,8 +215,8 @@ diapers.get('/', async (c) => {
   })
 
   // 基准分：评分人数为0时的理论分数
-  const baseAdult = dimensionWeightedScore({}, 0, gStats, globalM, false)
-  const baseBaby = dimensionWeightedScore({}, 0, gStats, globalM, true)
+  const baseAdult = dimensionWeightedScore({}, 0, adultGS.stats, adultGS.m, false)
+  const baseBaby = dimensionWeightedScore({}, 0, babyGS.stats, babyGS.m, true)
 
   return c.json({
     diapers: diapersList,
@@ -323,33 +339,48 @@ diapers.get('/compare', async (c) => {
     }
   }
 
-  // 全局统计用于贝叶斯修正
-  const gStats = await queryOne<Record<string, unknown>>(
-    c.env.abdl_space_db,
-    `SELECT COALESCE(AVG(cnt), 5) as avg_count,
-       COALESCE(AVG(absorption_score), 5) as g_absorption,
-       COALESCE(AVG(comfort_score), 5) as g_comfort,
-       COALESCE(AVG(thickness_score), 5) as g_thickness,
-       COALESCE(AVG(appearance_score), 5) as g_appearance,
-       COALESCE(AVG(value_score), 5) as g_value
-     FROM (SELECT diaper_id, COUNT(*) as cnt,
-       AVG(absorption_score) as absorption_score,
-       AVG(comfort_score) as comfort_score,
-       AVG(thickness_score) as thickness_score,
-       AVG(appearance_score) as appearance_score,
-       AVG(value_score) as value_score
-     FROM ratings GROUP BY diaper_id)`
-  )
-  const gM = Number(gStats?.avg_count) || 5
-  const gDimStats: Record<string, number> = {
-    absorption_score: Number(gStats?.g_absorption) || 5,
-    comfort_score: Number(gStats?.g_comfort) || 5,
-    thickness_score: Number(gStats?.g_thickness) || 5,
-    appearance_score: Number(gStats?.g_appearance) || 5,
-    value_score: Number(gStats?.g_value) || 5,
+  // 全局统计：按成人/婴儿分离，用于贝叶斯修正
+  async function loadGlobalStatsCompare(isBaby: boolean) {
+    const flag = isBaby ? 1 : 0
+    const rows = await query<Record<string, unknown>>(
+      c.env.abdl_space_db,
+      `SELECT COALESCE(AVG(cnt), 5) as avg_count,
+         COALESCE(AVG(absorption_score), 5) as g_absorption,
+         COALESCE(AVG(comfort_score), 5) as g_comfort,
+         COALESCE(AVG(thickness_score), 5) as g_thickness,
+         COALESCE(AVG(appearance_score), 5) as g_appearance,
+         COALESCE(AVG(value_score), 5) as g_value
+       FROM (SELECT r.diaper_id, COUNT(*) as cnt,
+         AVG(r.absorption_score) as absorption_score,
+         AVG(r.comfort_score) as comfort_score,
+         AVG(r.thickness_score) as thickness_score,
+         AVG(r.appearance_score) as appearance_score,
+         AVG(r.value_score) as value_score
+       FROM ratings r JOIN diapers d ON r.diaper_id = d.id
+       WHERE d.is_baby_diaper = ?
+       GROUP BY r.diaper_id)`,
+      [flag]
+    )
+    return {
+      m: Number(rows[0]?.avg_count) || 5,
+      stats: {
+        absorption_score: Number(rows[0]?.g_absorption) || 5,
+        comfort_score: Number(rows[0]?.g_comfort) || 5,
+        thickness_score: Number(rows[0]?.g_thickness) || 5,
+        appearance_score: Number(rows[0]?.g_appearance) || 5,
+        value_score: Number(rows[0]?.g_value) || 5,
+      }
+    }
   }
 
+  const [adultGSCompare, babyGSCompare] = await Promise.all([
+    loadGlobalStatsCompare(false),
+    loadGlobalStatsCompare(true),
+  ])
+
   const compareData = diaperRows.map(r => {
+    const isBaby = !!r.is_baby_diaper
+    const gs = isBaby ? babyGSCompare : adultGSCompare
     const ratingCount = Number(r.rating_count) || 0
     const rawDimAvgs: Record<string, number> = {
       absorption_score: Number(r.absorption_score) || 0,
@@ -358,8 +389,8 @@ diapers.get('/compare', async (c) => {
       appearance_score: Number(r.appearance_score) || 0,
       value_score: Number(r.value_score) || 0,
     }
-    const avgScore = dimensionWeightedScore(rawDimAvgs, ratingCount, gDimStats, gM, !!r.is_baby_diaper)
-    const baseScore = dimensionWeightedScore({}, 0, gDimStats, gM, !!r.is_baby_diaper)
+    const avgScore = dimensionWeightedScore(rawDimAvgs, ratingCount, gs.stats, gs.m, isBaby)
+    const baseScore = dimensionWeightedScore({}, 0, gs.stats, gs.m, isBaby)
 
     return {
       id: r.id,
@@ -594,8 +625,9 @@ diapers.get('/:id', async (c) => {
     value_score: Number(ratingStats?.value_score) || 0,
   }
 
-  // 全局统计用于贝叶斯修正
-  const gStats = await queryOne<Record<string, unknown>>(
+  // 全局统计：按成人/婴儿分离，用于贝叶斯修正
+  const isBaby = !!diaper.is_baby_diaper
+  const detailGSRows = await query<Record<string, unknown>>(
     c.env.abdl_space_db,
     `SELECT COALESCE(AVG(cnt), 5) as avg_count,
        COALESCE(AVG(absorption_score), 5) as g_absorption,
@@ -603,24 +635,27 @@ diapers.get('/:id', async (c) => {
        COALESCE(AVG(thickness_score), 5) as g_thickness,
        COALESCE(AVG(appearance_score), 5) as g_appearance,
        COALESCE(AVG(value_score), 5) as g_value
-     FROM (SELECT diaper_id, COUNT(*) as cnt,
-       AVG(absorption_score) as absorption_score,
-       AVG(comfort_score) as comfort_score,
-       AVG(thickness_score) as thickness_score,
-       AVG(appearance_score) as appearance_score,
-       AVG(value_score) as value_score
-     FROM ratings GROUP BY diaper_id)`
+     FROM (SELECT r.diaper_id, COUNT(*) as cnt,
+       AVG(r.absorption_score) as absorption_score,
+       AVG(r.comfort_score) as comfort_score,
+       AVG(r.thickness_score) as thickness_score,
+       AVG(r.appearance_score) as appearance_score,
+       AVG(r.value_score) as value_score
+     FROM ratings r JOIN diapers d ON r.diaper_id = d.id
+     WHERE d.is_baby_diaper = ?
+     GROUP BY r.diaper_id)`,
+    [isBaby ? 1 : 0]
   )
-  const gM = Number(gStats?.avg_count) || 5
+  const gM = Number(detailGSRows[0]?.avg_count) || 5
   const gDimStats: Record<string, number> = {
-    absorption_score: Number(gStats?.g_absorption) || 5,
-    comfort_score: Number(gStats?.g_comfort) || 5,
-    thickness_score: Number(gStats?.g_thickness) || 5,
-    appearance_score: Number(gStats?.g_appearance) || 5,
-    value_score: Number(gStats?.g_value) || 5,
+    absorption_score: Number(detailGSRows[0]?.g_absorption) || 5,
+    comfort_score: Number(detailGSRows[0]?.g_comfort) || 5,
+    thickness_score: Number(detailGSRows[0]?.g_thickness) || 5,
+    appearance_score: Number(detailGSRows[0]?.g_appearance) || 5,
+    value_score: Number(detailGSRows[0]?.g_value) || 5,
   }
-  const avgScore = dimensionWeightedScore(rawDimAvgs, ratingCount, gDimStats, gM, !!diaper.is_baby_diaper)
-  const baseScore = dimensionWeightedScore({}, 0, gDimStats, gM, !!diaper.is_baby_diaper)
+  const avgScore = dimensionWeightedScore(rawDimAvgs, ratingCount, gDimStats, gM, isBaby)
+  const baseScore = dimensionWeightedScore({}, 0, gDimStats, gM, isBaby)
 
   return c.json({
     diaper: {
