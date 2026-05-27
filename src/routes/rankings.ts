@@ -119,7 +119,7 @@ rankings.get('/', async (c) => {
          FROM ratings r
          JOIN diapers d ON r.diaper_id = d.id
          WHERE d.is_baby_diaper = ?
-         GROUP BY r.diiper_id
+         GROUP BY r.diaper_id
        )`,
       [flag]
     )
