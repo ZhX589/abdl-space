@@ -41,9 +41,9 @@ ratings.post('/', authMiddleware, async (c) => {
 
   const result = await run(
     c.env.abdl_space_db,
-    `INSERT INTO ratings (user_id, diaper_id, absorption_score, comfort_score, thickness_score, appearance_score, value_score, review)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    [user.sub, diaper_id, absorption_score, comfort_score, thickness_score, appearance_score, value_score, review ?? null]
+    `INSERT INTO ratings (user_id, diaper_id, absorption_score, fit_score, comfort_score, thickness_score, appearance_score, value_score, review)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [user.sub, diaper_id, absorption_score, 0, comfort_score, thickness_score, appearance_score, value_score, review ?? null]
   )
 
   return c.json({
