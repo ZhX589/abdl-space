@@ -33,6 +33,8 @@ import oauthClients from './routes/oauth_clients.ts'
 import contentKeys from './routes/content_keys.ts'
 import contentV1 from './routes/content_v1.ts'
 import nbw from './routes/nbw.ts'
+import keySplit from './routes/key_split.ts'
+import keySplitProxy from './routes/key_split_proxy.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
@@ -110,6 +112,10 @@ app.route('/api/oauth/clients', oauthClients)
 app.route('/api/content/keys', contentKeys)
 app.route('/api/v1/content', contentV1)
 app.route('/api/auth/nbw', nbw)
+
+// Key Split — API Key 代理与统计
+app.route('/api/key-split', keySplit)
+app.route('/v1', keySplitProxy)
 
 /**
  * POST /api/admin/reset/password — admin 只能改自己的密码（需鉴权）
