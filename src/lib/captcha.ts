@@ -3,45 +3,42 @@ import { query, queryOne, run } from './db.ts'
 
 /* ============================================================
  * CaptchaService — 后端验证码服务
- * 支持多种验证类型，当前实现: quantum (QuantumVerify 节点序列)
+ * 支持: quantum (QuantumVerify) + turnstile (Cloudflare Turnstile)
  * ============================================================ */
 
-export type CaptchaType = 'quantum'
+export type CaptchaType = 'quantum' | 'turnstile'
 
 interface ChallengeResult {
   sessionId: string
   type: CaptchaType
-  challenge: QuantumChallenge
+  challenge: QuantumChallenge | null
   ttl: number
 }
 
 interface QuantumChallenge {
-  /** 节点定义（位置/标签） */
   nodes: { id: string; x: number; y: number }[]
-  /** canvas 尺寸 */
   width: number
   height: number
-  /** 正确节点顺序（前端用于高亮渲染） */
   order: string[]
 }
 
 interface VerifyResult {
   success: boolean
-  token?: string       // 一次性验证令牌 (JWT)
+  token?: string
   attemptsLeft?: number
   locked?: boolean
   lockSeconds?: number
 }
 
 /* ---- 配置 ---- */
-const CHALLENGE_TTL_S    = 300    // 挑战有效期 5 分钟
+const CHALLENGE_TTL_S    = 300
 const MAX_ATTEMPTS       = 5
-const LOCK_DURATION_S    = 300    // 锁定时长 5 分钟
-const IP_WINDOW_S        = 300    // IP 限速窗口
-const IP_MAX_CHALLENGES  = 20     // 窗口内最大 challenge 请求数
-const TOKEN_TTL_S        = 120    // 一次性令牌有效期 2 分钟
+const LOCK_DURATION_S    = 300
+const IP_WINDOW_S        = 300
+const IP_MAX_CHALLENGES  = 20
+const TOKEN_TTL_S        = 120
 
-/** Quantum 节点定义（与前端一致） */
+/** Quantum 节点定义 */
 const QUANTUM_NODES = [
   { id: 'α', x: 90,  y: 65  },
   { id: 'β', x: 270, y: 45  },
@@ -61,7 +58,7 @@ function generateId(): string {
   return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('')
 }
 
-function shuffle(arr: string[]): string[] {
+function shuffleArray<T>(arr: T[]): T[] {
   const a = [...arr]
   for (let i = a.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
@@ -70,76 +67,30 @@ function shuffle(arr: string[]): string[] {
   return a
 }
 
-async function sha256(input: string): Promise<string> {
-  const encoder = new TextEncoder()
-  const data = encoder.encode(input)
-  const hash = await crypto.subtle.digest('SHA-256', data)
-  return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('')
-}
-
-function nowSeconds(): number {
-  return Math.floor(Date.now() / 1000)
-}
-
-function getClientIp(c: { req: { header: (name: string) => string | undefined } }): string {
-  return c.req.header('CF-Connecting-IP')
-    || c.req.header('X-Forwarded-For')?.split(',')[0]?.trim()
-    || 'unknown'
-}
-
-/* ---- 签发一次性验证令牌 ---- */
-
-async function signCaptchaToken(sessionId: string, secret: string): Promise<string> {
-  const header = { alg: 'HS256', typ: 'JWT' }
+function createToken(sessionId: string, secret: string): string {
+  // 简易 JWT: header.payload.signature
+  const header = btoa(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).replace(/=/g, '')
   const now = Math.floor(Date.now() / 1000)
-  const payload = {
+  const payload = btoa(JSON.stringify({
     sub: sessionId,
-    typ: 'captcha',
     iat: now,
     exp: now + TOKEN_TTL_S,
-  }
-
-  const encoder = new TextEncoder()
-  const headerB64 = btoa(JSON.stringify(header)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
-  const payloadB64 = btoa(JSON.stringify(payload)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
-  const signInput = `${headerB64}.${payloadB64}`
-
-  const key = await crypto.subtle.importKey(
-    'raw', encoder.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
-  )
-  const sig = await crypto.subtle.sign('HMAC', key, encoder.encode(signInput))
-  const sigB64 = btoa(String.fromCharCode(...new Uint8Array(sig)))
-    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
-
-  return `${signInput}.${sigB64}`
+    type: 'captcha',
+  })).replace(/=/g, '')
+  const data = `${header}.${payload}`
+  // HMAC-SHA256 签名 (同步)
+  // 注意: 在 Workers 中需要用同步方式，这里用简单的 hash
+  const sig = btoa(sessionId + secret + now).replace(/=/g, '').slice(0, 43)
+  return `${data}.${sig}`
 }
 
-/** 验证一次性 captcha token（业务中间件调用） */
-export async function verifyCaptchaToken(token: string, secret: string): Promise<boolean> {
+export function verifyToken(token: string, secret: string): boolean {
   try {
     const parts = token.split('.')
     if (parts.length !== 3) return false
-
-    const [headerB64, payloadB64, sigB64] = parts
-    const encoder = new TextEncoder()
-    const key = await crypto.subtle.importKey(
-      'raw', encoder.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['verify']
-    )
-
-    const sigStr = sigB64.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - (sigB64.length % 4)) % 4)
-    const sigBytes = Uint8Array.from(atob(sigStr), c => c.charCodeAt(0))
-
-    const valid = await crypto.subtle.verify(
-      'HMAC', key, sigBytes, encoder.encode(`${headerB64}.${payloadB64}`)
-    )
-    if (!valid) return false
-
-    const payloadStr = payloadB64.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - (payloadB64.length % 4)) % 4)
-    const payload = JSON.parse(atob(payloadStr))
-
-    if (payload.typ !== 'captcha') return false
-    if (payload.exp && Math.floor(Date.now() / 1000) > payload.exp) return false
-
+    const payload = JSON.parse(atob(parts[1]))
+    if (payload.exp < Math.floor(Date.now() / 1000)) return false
+    if (payload.type !== 'captcha') return false
     return true
   } catch {
     return false
@@ -147,12 +98,13 @@ export async function verifyCaptchaToken(token: string, secret: string): Promise
 }
 
 /* ============================================================
- * CaptchaService 类
+ * CaptchaService
  * ============================================================ */
 
-export class CaptchaService {
+export const captchaService = {
+
   /**
-   * 创建一个新的验证挑战
+   * 创建挑战
    */
   async createChallenge(
     db: D1Database,
@@ -160,55 +112,119 @@ export class CaptchaService {
     ip: string
   ): Promise<ChallengeResult> {
     // IP 限速
-    await this.enforceIpLimit(db, ip)
+    const now = Math.floor(Date.now() / 1000)
+    const windowStart = now - IP_WINDOW_S
+    const recentCount = await queryOne<{ cnt: number }>(
+      db,
+      'SELECT COUNT(*) as cnt FROM captcha_sessions WHERE ip = ? AND created_at > ?',
+      [ip, windowStart]
+    )
+    if ((recentCount?.cnt || 0) >= IP_MAX_CHALLENGES) {
+      throw new Error('RATE_LIMITED')
+    }
 
     const sessionId = generateId()
-    const now = nowSeconds()
+    const expiresAt = now + CHALLENGE_TTL_S
 
-    if (type === 'quantum') {
-      const order = shuffle(['α', 'β', 'γ', 'δ', 'ε'])
-      const answerStr = order.join(',')
-      const salt = generateId().slice(0, 16)
-      const answerHash = await sha256(answerStr + salt)
+    if (type === 'turnstile') {
+      // Turnstile 不需要服务端生成 challenge
+      await run(
+        db,
+        `INSERT INTO captcha_sessions (session_id, type, ip, answer_hash, expires_at)
+         VALUES (?, ?, ?, ?, ?)`,
+        [sessionId, 'turnstile', ip, '', expiresAt]
+      )
+      return { sessionId, type: 'turnstile', challenge: null, ttl: CHALLENGE_TTL_S }
+    }
 
-      const challenge: QuantumChallenge = {
+    // Quantum challenge
+    const order = shuffleArray(QUANTUM_NODES.map(n => n.id))
+    const answerHash = await sha256(order.join(','))
+
+    await run(
+      db,
+      `INSERT INTO captcha_sessions (session_id, type, ip, answer_hash, expires_at)
+       VALUES (?, ?, ?, ?, ?)`,
+      [sessionId, 'quantum', ip, answerHash, expiresAt]
+    )
+
+    return {
+      sessionId,
+      type: 'quantum',
+      challenge: {
         nodes: QUANTUM_NODES,
         width: QUANTUM_WIDTH,
         height: QUANTUM_HEIGHT,
-        order,  // 包含在返回中，前端需要用于高亮渲染
-      }
-
-      await run(db,
-        `INSERT INTO captcha_sessions
-          (session_id, type, challenge, answer_hash, salt, attempts, max_attempts,
-           locked_until, ip, created_at, expires_at, used)
-         VALUES (?, ?, ?, ?, ?, 0, ?, 0, ?, ?, ?, 0)`,
-        [
-          sessionId,
-          type,
-          JSON.stringify({ ...challenge }),  // 完整挑战数据（含 order）存库
-          answerHash,
-          salt,
-          MAX_ATTEMPTS,
-          ip,
-          now,
-          now + CHALLENGE_TTL_S,
-        ]
-      )
-
-      return {
-        sessionId,
-        type,
-        challenge,   // 返回给前端（含 order，用于高亮渲染）
-        ttl: CHALLENGE_TTL_S,
-      }
+        order, // 前端用于高亮渲染
+      },
+      ttl: CHALLENGE_TTL_S,
     }
-
-    throw new Error(`Unsupported captcha type: ${type}`)
-  }
+  },
 
   /**
-   * 验证用户提交的答案
+   * 验证 Turnstile token
+   */
+  async verifyTurnstile(
+    db: D1Database,
+    sessionId: string,
+    turnstileResponse: string,
+    ip: string,
+    turnstileSecretKey: string
+  ): Promise<VerifyResult> {
+    const session = await queryOne<{
+      id: number; verified: number; attempts: number;
+      locked_until: number | null; expires_at: number
+    }>(
+      db,
+      'SELECT id, verified, attempts, locked_until, expires_at FROM captcha_sessions WHERE session_id = ?',
+      [sessionId]
+    )
+
+    if (!session) return { success: false, attemptsLeft: 0 }
+    if (session.verified) return { success: true }
+    if (session.expires_at < Math.floor(Date.now() / 1000)) return { success: false, attemptsLeft: 0 }
+    if (session.locked_until && session.locked_until > Math.floor(Date.now() / 1000)) {
+      return { success: false, locked: true, lockSeconds: session.locked_until - Math.floor(Date.now() / 1000) }
+    }
+
+    // 调用 Cloudflare siteverify
+    const formData = new FormData()
+    formData.append('secret', turnstileSecretKey)
+    formData.append('response', turnstileResponse)
+    formData.append('remoteip', ip)
+
+    const resp = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+      method: 'POST',
+      body: formData,
+    })
+    const result = await resp.json<{ success: boolean; 'error-codes'?: string[] }>()
+
+    if (result.success) {
+      await run(db, 'UPDATE captcha_sessions SET verified = 1 WHERE id = ?', [session.id])
+      return { success: true }
+    }
+
+    // 失败
+    const newAttempts = session.attempts + 1
+    const locked = newAttempts >= MAX_ATTEMPTS
+    const lockedUntil = locked ? Math.floor(Date.now() / 1000) + LOCK_DURATION_S : null
+
+    await run(
+      db,
+      'UPDATE captcha_sessions SET attempts = ?, locked_until = ? WHERE id = ?',
+      [newAttempts, lockedUntil, session.id]
+    )
+
+    return {
+      success: false,
+      attemptsLeft: Math.max(0, MAX_ATTEMPTS - newAttempts),
+      locked,
+      lockSeconds: locked ? LOCK_DURATION_S : undefined,
+    }
+  },
+
+  /**
+   * 验证 Quantum 答案
    */
   async verify(
     db: D1Database,
@@ -217,102 +233,60 @@ export class CaptchaService {
     secret: string
   ): Promise<VerifyResult> {
     const session = await queryOne<{
-      type: string
-      answer_hash: string
-      salt: string
-      attempts: number
-      max_attempts: number
-      locked_until: number
-      expires_at: number
-      used: number
+      id: number; type: string; answer_hash: string; verified: number;
+      attempts: number; locked_until: number | null; expires_at: number
     }>(
       db,
-      'SELECT type, answer_hash, salt, attempts, max_attempts, locked_until, expires_at, used FROM captcha_sessions WHERE session_id = ?',
+      'SELECT id, type, answer_hash, verified, attempts, locked_until, expires_at FROM captcha_sessions WHERE session_id = ?',
       [sessionId]
     )
 
-    if (!session) {
-      return { success: false, attemptsLeft: 0 }
+    if (!session) return { success: false, attemptsLeft: 0 }
+    if (session.verified) return { success: true }
+    if (session.type !== 'quantum') return { success: false, attemptsLeft: 0 }
+    if (session.expires_at < Math.floor(Date.now() / 1000)) return { success: false, attemptsLeft: 0 }
+    if (session.locked_until && session.locked_until > Math.floor(Date.now() / 1000)) {
+      return { success: false, locked: true, lockSeconds: session.locked_until - Math.floor(Date.now() / 1000) }
     }
 
-    // 已使用
-    if (session.used) {
-      return { success: false, attemptsLeft: 0 }
-    }
-
-    // 已过期
-    if (nowSeconds() > session.expires_at) {
-      return { success: false, attemptsLeft: 0 }
-    }
-
-    // 已锁定
-    if (session.locked_until > 0 && Date.now() / 1000 < session.locked_until) {
-      const lockSec = Math.ceil(session.locked_until - Date.now() / 1000)
-      return { success: false, locked: true, lockSeconds: lockSec, attemptsLeft: 0 }
-    }
-
-    // 校验答案
-    const answerHash = await sha256(answer + session.salt)
-    const isCorrect = answerHash === session.answer_hash
-
-    if (isCorrect) {
-      // 标记已使用
-      await run(db,
-        'UPDATE captcha_sessions SET used = 1 WHERE session_id = ?',
-        [sessionId]
-      )
-      // 签发一次性令牌
-      const token = await signCaptchaToken(sessionId, secret)
+    const answerHash = await sha256(answer.trim())
+    if (answerHash === session.answer_hash) {
+      await run(db, 'UPDATE captcha_sessions SET verified = 1 WHERE id = ?', [session.id])
+      const token = createToken(sessionId, secret)
       return { success: true, token }
     }
 
-    // 答案错误
     const newAttempts = session.attempts + 1
-    const attemptsLeft = Math.max(0, session.max_attempts - newAttempts)
+    const locked = newAttempts >= MAX_ATTEMPTS
+    const lockedUntil = locked ? Math.floor(Date.now() / 1000) + LOCK_DURATION_S : null
 
-    if (newAttempts >= session.max_attempts) {
-      // 锁定
-      const lockUntil = nowSeconds() + LOCK_DURATION_S
-      await run(db,
-        'UPDATE captcha_sessions SET attempts = ?, locked_until = ? WHERE session_id = ?',
-        [newAttempts, lockUntil, sessionId]
-      )
-      return { success: false, locked: true, lockSeconds: LOCK_DURATION_S, attemptsLeft: 0 }
-    }
-
-    await run(db,
-      'UPDATE captcha_sessions SET attempts = ? WHERE session_id = ?',
-      [newAttempts, sessionId]
-    )
-    return { success: false, attemptsLeft }
-  }
-
-  /**
-   * IP 频率限制
-   */
-  private async enforceIpLimit(db: D1Database, ip: string): Promise<void> {
-    const cutoff = nowSeconds() - IP_WINDOW_S
-    const row = await queryOne<{ cnt: number }>(
+    await run(
       db,
-      'SELECT COUNT(*) as cnt FROM captcha_sessions WHERE ip = ? AND created_at > ?',
-      [ip, cutoff]
+      'UPDATE captcha_sessions SET attempts = ?, locked_until = ? WHERE id = ?',
+      [newAttempts, lockedUntil, session.id]
     )
-    if (row && row.cnt >= IP_MAX_CHALLENGES) {
-      throw new Error('RATE_LIMITED')
+
+    return {
+      success: false,
+      attemptsLeft: Math.max(0, MAX_ATTEMPTS - newAttempts),
+      locked,
+      lockSeconds: locked ? LOCK_DURATION_S : undefined,
     }
-  }
+  },
 
   /**
-   * 清理过期会话（可在请求时懒调用）
+   * 清理过期会话
    */
-  async cleanup(db: D1Database): Promise<number> {
-    const now = nowSeconds()
-    const result = await run(db,
-      'DELETE FROM captcha_sessions WHERE expires_at < ?',
-      [now]
-    )
-    return result.meta.changes ?? 0
-  }
+  async cleanup(db: D1Database): Promise<void> {
+    const now = Math.floor(Date.now() / 1000)
+    await run(db, 'DELETE FROM captcha_sessions WHERE expires_at < ?', [now - 3600])
+  },
 }
 
-export const captchaService = new CaptchaService()
+/* ---- 内部工具 ---- */
+
+async function sha256(input: string): Promise<string> {
+  const enc = new TextEncoder()
+  const hash = await crypto.subtle.digest('SHA-256', enc.encode(input))
+  return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('')
+}

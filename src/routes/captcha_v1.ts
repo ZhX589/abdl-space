@@ -4,6 +4,7 @@ import type { Env } from '../types/index.ts'
 import { captchaService } from '../lib/captcha.ts'
 import { validateApiKey, recordKeyUsage } from './captcha_keys.ts'
 import { rateLimit } from '../lib/rate-limit.ts'
+import { assessRisk } from '../lib/risk-assessment.ts'
 import { EMBED_JS } from '../lib/embed-bundle.ts'
 
 type AppType = { Bindings: Env }
@@ -71,8 +72,8 @@ captchaV1.post('/create', async (c) => {
 
   let body: { type?: string }
   try { body = await c.req.json() } catch { body = {} }
-  const type = (body.type || 'quantum') as 'quantum'
-  if (type !== 'quantum') return c.json({ error: `Unsupported type: ${type}` }, 400)
+  const type = (body.type || 'quantum') as 'quantum' | 'turnstile'
+  if (type !== 'quantum' && type !== 'turnstile') return c.json({ error: `Unsupported type: ${type}` }, 400)
 
   const ip = getClientIp(c)
   try {
@@ -136,10 +137,83 @@ captchaV1.post('/check', async (c) => {
 })
 
 /**
+ * POST /api/v1/captcha/risk — 获取风险等级
+ * Headers: Authorization: Bearer cv_xxxx
+ * Response: { risk, flow, turnstile_site_key }
+ */
+captchaV1.post('/risk', async (c) => {
+  const rawKey = extractApiKey(c)
+  if (!rawKey) return c.json({ error: 'Missing Authorization header' }, 401)
+
+  const keyInfo = await validateApiKey(c.env.abdl_space_db, rawKey)
+  if (!keyInfo.valid) return c.json({ error: 'Invalid or disabled API key' }, 401)
+
+  c.executionCtx.waitUntil(recordKeyUsage(c.env.abdl_space_db, keyInfo.keyId!))
+
+  const ip = getClientIp(c)
+  const ua = c.req.header('User-Agent')
+  const { level } = await assessRisk(c.env.abdl_space_db, ip, ua)
+
+  let flow: 'turnstile' | 'quantum' | 'both'
+  if (level === 'high') {
+    flow = 'both'
+  } else {
+    flow = Math.random() < 0.5 ? 'turnstile' : 'quantum'
+  }
+
+  return c.json({
+    risk: level,
+    flow,
+    turnstile_site_key: c.env.TURNSTILE_SITE_KEY || '',
+  })
+})
+
+/**
+ * POST /api/v1/captcha/turnstile/verify — 验证 Turnstile
+ * Headers: Authorization: Bearer cv_xxxx
+ * Body: { session_id, token }
+ * Response: { verified, attempts_left?, locked?, lock_seconds? }
+ */
+captchaV1.post('/turnstile/verify', async (c) => {
+  const rawKey = extractApiKey(c)
+  if (!rawKey) return c.json({ error: 'Missing Authorization header' }, 401)
+
+  const keyInfo = await validateApiKey(c.env.abdl_space_db, rawKey)
+  if (!keyInfo.valid) return c.json({ error: 'Invalid or disabled API key' }, 401)
+
+  c.executionCtx.waitUntil(recordKeyUsage(c.env.abdl_space_db, keyInfo.keyId!))
+
+  const ip = getClientIp(c)
+  let body: { session_id?: string; token?: string }
+  try { body = await c.req.json() } catch { return c.json({ error: 'Invalid body' }, 400) }
+
+  const { session_id, token } = body
+  if (!session_id || !token) return c.json({ error: 'session_id and token are required' }, 400)
+
+  const secretKey = c.env.TURNSTILE_SECRET_KEY
+  if (!secretKey) return c.json({ error: 'Turnstile not configured' }, 500)
+
+  try {
+    const result = await captchaService.verifyTurnstile(
+      c.env.abdl_space_db, session_id, token, ip, secretKey
+    )
+    return c.json({
+      verified: result.success,
+      attempts_left: result.attemptsLeft,
+      locked: result.locked || undefined,
+      lock_seconds: result.lockSeconds || undefined,
+    })
+  } catch (err) {
+    console.error('v1 turnstile verify error:', err)
+    return c.json({ error: 'Internal error' }, 500)
+  }
+})
+
+/**
  * GET /api/v1/captcha/types — 可用验证类型列表
  */
 captchaV1.get('/types', (c) => {
-  return c.json({ types: ['quantum'] })
+  return c.json({ types: ['quantum', 'turnstile'] })
 })
 
 export default captchaV1

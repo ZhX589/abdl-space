@@ -276,6 +276,9 @@ export interface Env {
   JWT_SECRET: string
   FRONTEND_ORIGIN?: string
   RESEND_API_KEY: string
+  TURNSTILE_SITE_KEY?: string
+  TURNSTILE_SECRET_KEY?: string
+  ENCRYPT_KEY?: string
 }
 
 /** JWT payload 结构 */
