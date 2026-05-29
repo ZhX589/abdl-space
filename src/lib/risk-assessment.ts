@@ -44,7 +44,7 @@ export async function assessRisk(
     queryOne<{ cnt: number }>(
       db,
       `SELECT COALESCE(SUM(attempts), 0) as cnt FROM captcha_sessions
-       WHERE ip = ? AND created_at > ? AND verified = 0 AND attempts > 0`,
+       WHERE ip = ? AND created_at > ? AND used = 0 AND attempts > 0`,
       [ip, oneHourAgo]
     ),
   ])

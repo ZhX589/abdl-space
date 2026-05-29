@@ -172,16 +172,16 @@ export const captchaService = {
     turnstileSecretKey: string
   ): Promise<VerifyResult> {
     const session = await queryOne<{
-      id: number; verified: number; attempts: number;
+      id: number; used: number; attempts: number;
       locked_until: number | null; expires_at: number
     }>(
       db,
-      'SELECT id, verified, attempts, locked_until, expires_at FROM captcha_sessions WHERE session_id = ?',
+      'SELECT id, used, attempts, locked_until, expires_at FROM captcha_sessions WHERE session_id = ?',
       [sessionId]
     )
 
     if (!session) return { success: false, attemptsLeft: 0 }
-    if (session.verified) return { success: true }
+    if (session.used) return { success: true }
     if (session.expires_at < Math.floor(Date.now() / 1000)) return { success: false, attemptsLeft: 0 }
     if (session.locked_until && session.locked_until > Math.floor(Date.now() / 1000)) {
       return { success: false, locked: true, lockSeconds: session.locked_until - Math.floor(Date.now() / 1000) }
@@ -200,7 +200,7 @@ export const captchaService = {
     const result = await resp.json<{ success: boolean; 'error-codes'?: string[] }>()
 
     if (result.success) {
-      await run(db, 'UPDATE captcha_sessions SET verified = 1 WHERE id = ?', [session.id])
+      await run(db, 'UPDATE captcha_sessions SET used = 1 WHERE id = ?', [session.id])
       return { success: true }
     }
 
@@ -233,16 +233,16 @@ export const captchaService = {
     secret: string
   ): Promise<VerifyResult> {
     const session = await queryOne<{
-      id: number; type: string; answer_hash: string; verified: number;
+      id: number; type: string; answer_hash: string; used: number;
       attempts: number; locked_until: number | null; expires_at: number
     }>(
       db,
-      'SELECT id, type, answer_hash, verified, attempts, locked_until, expires_at FROM captcha_sessions WHERE session_id = ?',
+      'SELECT id, type, answer_hash, used, attempts, locked_until, expires_at FROM captcha_sessions WHERE session_id = ?',
       [sessionId]
     )
 
     if (!session) return { success: false, attemptsLeft: 0 }
-    if (session.verified) return { success: true }
+    if (session.used) return { success: true }
     if (session.type !== 'quantum') return { success: false, attemptsLeft: 0 }
     if (session.expires_at < Math.floor(Date.now() / 1000)) return { success: false, attemptsLeft: 0 }
     if (session.locked_until && session.locked_until > Math.floor(Date.now() / 1000)) {
@@ -251,7 +251,7 @@ export const captchaService = {
 
     const answerHash = await sha256(answer.trim())
     if (answerHash === session.answer_hash) {
-      await run(db, 'UPDATE captcha_sessions SET verified = 1 WHERE id = ?', [session.id])
+      await run(db, 'UPDATE captcha_sessions SET used = 1 WHERE id = ?', [session.id])
       const token = createToken(sessionId, secret)
       return { success: true, token }
     }
