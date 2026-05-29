@@ -198,7 +198,9 @@ app.get('/usage/stats', authMiddleware, async (c) => {
   const since = Math.floor(Date.now() / 1000) - days * 86400
 
   const total = await queryOne(c.env.abdl_space_db,
-    `SELECT SUM(ul.prompt_tokens) as prompt, SUM(ul.completion_tokens) as completion, SUM(ul.total_tokens) as total, COUNT(*) as requests
+    `SELECT SUM(ul.prompt_tokens) as prompt, SUM(ul.completion_tokens) as completion, SUM(ul.total_tokens) as total, COUNT(*) as requests,
+           SUM(CASE WHEN ul.status >= 200 AND ul.status < 400 THEN 1 ELSE 0 END) as success,
+           ROUND(AVG(ul.latency_ms)) as avg_latency
      FROM ks_usage_logs ul JOIN ks_sub_keys sk ON ul.sub_key_id = sk.id WHERE sk.owner_id = ? AND ul.request_at >= ?`,
     [user.sub, since])
 
