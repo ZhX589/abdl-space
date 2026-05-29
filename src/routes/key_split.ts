@@ -244,14 +244,37 @@ app.get('/usage/logs', authMiddleware, async (c) => {
 
 app.get('/stats', authMiddleware, async (c) => {
   const user = c.get('user')
-  const keyCount = await queryOne(c.env.abdl_space_db, 'SELECT COUNT(*) as count FROM ks_sub_keys WHERE owner_id = ?', [user.sub])
-  const channelCount = await queryOne(c.env.abdl_space_db, 'SELECT COUNT(*) as count FROM ks_channels WHERE owner_id = ?', [user.sub])
-  const totalTokens = await queryOne(c.env.abdl_space_db,
-    `SELECT SUM(ul.total_tokens) as total FROM ks_usage_logs ul JOIN ks_sub_keys sk ON ul.sub_key_id = sk.id WHERE sk.owner_id = ?`, [user.sub])
+  const todayStart = Math.floor(Date.now() / 1000) - (Date.now() / 1000 % 86400) - 28800 // UTC+8 今天 0 点
+
+  const [keyCount, channelCount, totalStats, todayCount, topModel, topKey] = await Promise.all([
+    queryOne(c.env.abdl_space_db, 'SELECT COUNT(*) as count FROM ks_sub_keys WHERE owner_id = ?', [user.sub]),
+    queryOne(c.env.abdl_space_db, 'SELECT COUNT(*) as count FROM ks_channels WHERE owner_id = ?', [user.sub]),
+    queryOne(c.env.abdl_space_db,
+      `SELECT SUM(ul.total_tokens) as total_tokens, COUNT(*) as total_requests,
+              SUM(CASE WHEN ul.status >= 200 AND ul.status < 400 THEN 1 ELSE 0 END) as success_requests,
+              ROUND(AVG(ul.latency_ms)) as avg_latency
+       FROM ks_usage_logs ul JOIN ks_sub_keys sk ON ul.sub_key_id = sk.id WHERE sk.owner_id = ?`, [user.sub]),
+    queryOne(c.env.abdl_space_db,
+      `SELECT COUNT(*) as count FROM ks_usage_logs ul JOIN ks_sub_keys sk ON ul.sub_key_id = sk.id WHERE sk.owner_id = ? AND ul.request_at >= ?`,
+      [user.sub, todayStart]),
+    queryOne(c.env.abdl_space_db,
+      `SELECT ul.model, COUNT(*) as requests FROM ks_usage_logs ul JOIN ks_sub_keys sk ON ul.sub_key_id = sk.id WHERE sk.owner_id = ? GROUP BY ul.model ORDER BY requests DESC LIMIT 1`,
+      [user.sub]),
+    queryOne(c.env.abdl_space_db,
+      `SELECT sk.name, sk.key_prefix, COUNT(*) as requests FROM ks_usage_logs ul JOIN ks_sub_keys sk ON ul.sub_key_id = sk.id WHERE sk.owner_id = ? GROUP BY sk.id ORDER BY requests DESC LIMIT 1`,
+      [user.sub]),
+  ])
+
   return c.json({
     subKeys: keyCount?.count || 0,
     channels: channelCount?.count || 0,
-    totalTokens: totalTokens?.total || 0
+    totalTokens: totalStats?.total_tokens || 0,
+    totalRequests: totalStats?.total_requests || 0,
+    successRequests: totalStats?.success_requests || 0,
+    avgLatency: totalStats?.avg_latency || 0,
+    todayRequests: todayCount?.count || 0,
+    topModel: topModel?.model || null,
+    topKey: topKey ? { name: topKey.name, prefix: topKey.key_prefix, requests: topKey.requests } : null,
   })
 })
 
