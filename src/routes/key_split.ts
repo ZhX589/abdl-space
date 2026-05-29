@@ -18,13 +18,19 @@ function generateSubKey(): string {
   return 'sk-' + Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('')
 }
 
-async function encryptKey(plaintext: string, password: string): Promise<string> {
+/** 从主密钥派生 AES-256-GCM 密钥（HKDF，密钥分离） */
+async function deriveAesKey(masterKey: string): Promise<CryptoKey> {
   const enc = new TextEncoder()
-  const keyMaterial = await crypto.subtle.importKey('raw', enc.encode(password), 'PBKDF2', false, ['deriveKey'])
-  const key = await crypto.subtle.deriveKey(
-    { name: 'PBKDF2', salt: enc.encode('key-split-salt-v2'), iterations: 600000, hash: 'SHA-256' },
-    keyMaterial, { name: 'AES-GCM', length: 256 }, false, ['encrypt']
+  const keyMaterial = await crypto.subtle.importKey('raw', enc.encode(masterKey), 'HKDF', false, ['deriveKey'])
+  return crypto.subtle.deriveKey(
+    { name: 'HKDF', hash: 'SHA-256', salt: enc.encode('abdl-key-split-v1'), info: new Uint8Array() },
+    keyMaterial, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']
   )
+}
+
+async function encryptKey(plaintext: string, password: string): Promise<string> {
+  const key = await deriveAesKey(password)
+  const enc = new TextEncoder()
   const iv = crypto.getRandomValues(new Uint8Array(12))
   const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, enc.encode(plaintext))
   const combined = new Uint8Array(iv.length + new Uint8Array(ct).length)
@@ -33,12 +39,7 @@ async function encryptKey(plaintext: string, password: string): Promise<string> 
 }
 
 async function decryptKey(cipherB64: string, password: string): Promise<string> {
-  const enc = new TextEncoder()
-  const keyMaterial = await crypto.subtle.importKey('raw', enc.encode(password), 'PBKDF2', false, ['deriveKey'])
-  const key = await crypto.subtle.deriveKey(
-    { name: 'PBKDF2', salt: enc.encode('key-split-salt-v2'), iterations: 600000, hash: 'SHA-256' },
-    keyMaterial, { name: 'AES-GCM', length: 256 }, false, ['decrypt']
-  )
+  const key = await deriveAesKey(password)
   const combined = new Uint8Array(atob(cipherB64).split('').map(c => c.charCodeAt(0)))
   const iv = combined.slice(0, 12); const ct = combined.slice(12)
   const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ct)
@@ -51,6 +52,17 @@ function pickChannel(channels: any[]): any | null {
   return channels[Math.floor(Math.random() * channels.length)]
 }
 
+/** URL 验证：仅允许 http/https，禁止内网地址 */
+function validateBaseUrl(raw: string): string | null {
+  try {
+    const cleaned = raw.replace(/\/+$/, '').replace(/\/v1$/, '')
+    const u = new URL(cleaned)
+    if (!['http:', 'https:'].includes(u.protocol)) return null
+    if (/^(127\.|10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|0\.|169\.254\.|::1|localhost)/i.test(u.hostname)) return null
+    return u.toString().replace(/\/+$/, '')
+  } catch { return null }
+}
+
 // ═══════════════ 渠道管理 ═══════════════
 
 app.get('/channels', authMiddleware, async (c) => {
@@ -60,31 +72,51 @@ app.get('/channels', authMiddleware, async (c) => {
 })
 
 app.post('/channels', authMiddleware, async (c) => {
-  const user = c.get('user')
-  const { name, base_url, api_key, models } = await c.req.json()
-  if (!name || !base_url || !api_key) return c.json({ error: 'name, base_url, api_key required' }, 400)
-  const encKey = await encryptKey(api_key, c.env.ENCRYPT_KEY || c.env.JWT_SECRET)
-  const result = await run(c.env.abdl_space_db,
-    'INSERT INTO ks_channels (owner_id, name, base_url, api_key_enc, models) VALUES (?, ?, ?, ?, ?)',
-    [user.sub, name, base_url.replace(/\/+$/, ''), encKey, JSON.stringify(models || [])])
-  return c.json({ id: result.meta.last_row_id }, 201)
+  try {
+    const user = c.get('user')
+    const { name, base_url, api_key, models } = await c.req.json()
+    if (!name || !base_url || !api_key) return c.json({ error: 'name, base_url, api_key required' }, 400)
+    if (name.length > 100) return c.json({ error: 'name too long (max 100)' }, 400)
+    const safeUrl = validateBaseUrl(base_url)
+    if (!safeUrl) return c.json({ error: 'Invalid base_url: must be http(s) and not a private address' }, 400)
+    const encKey = await encryptKey(api_key, c.env.ENCRYPT_KEY || c.env.JWT_SECRET)
+    const result = await run(c.env.abdl_space_db,
+      'INSERT INTO ks_channels (owner_id, name, base_url, api_key_enc, models) VALUES (?, ?, ?, ?, ?)',
+      [user.sub, name, safeUrl, encKey, JSON.stringify(models || [])])
+    return c.json({ id: result.meta.last_row_id }, 201)
+  } catch (e) {
+    console.error('POST /channels error:', e)
+    return c.json({ error: 'Internal error' }, 500)
+  }
 })
 
 app.put('/channels/:id', authMiddleware, async (c) => {
-  const user = c.get('user')
-  const id = c.req.param('id')
-  const body = await c.req.json()
-  const sets: string[] = []; const vals: any[] = []
-  if (body.name !== undefined) { sets.push('name = ?'); vals.push(body.name) }
-  if (body.base_url !== undefined) { sets.push('base_url = ?'); vals.push(body.base_url.replace(/\/+$/, '')) }
-  if (body.api_key !== undefined) { sets.push('api_key_enc = ?'); vals.push(await encryptKey(body.api_key, c.env.ENCRYPT_KEY || c.env.JWT_SECRET)) }
-  if (body.models !== undefined) { sets.push('models = ?'); vals.push(JSON.stringify(body.models)) }
-  if (body.enabled !== undefined) { sets.push('enabled = ?'); vals.push(body.enabled ? 1 : 0) }
-  if (!sets.length) return c.json({ error: 'No fields' }, 400)
-  sets.push('updated_at = unixepoch()')
-  vals.push(id, user.sub)
-  await run(c.env.abdl_space_db, `UPDATE ks_channels SET ${sets.join(', ')} WHERE id = ? AND owner_id = ?`, vals)
-  return c.json({ ok: true })
+  try {
+    const user = c.get('user')
+    const id = c.req.param('id')
+    const body = await c.req.json()
+    const sets: string[] = []; const vals: any[] = []
+    if (body.name !== undefined) {
+      if (body.name.length > 100) return c.json({ error: 'name too long (max 100)' }, 400)
+      sets.push('name = ?'); vals.push(body.name)
+    }
+    if (body.base_url !== undefined) {
+      const safeUrl = validateBaseUrl(body.base_url)
+      if (!safeUrl) return c.json({ error: 'Invalid base_url' }, 400)
+      sets.push('base_url = ?'); vals.push(safeUrl)
+    }
+    if (body.api_key !== undefined) { sets.push('api_key_enc = ?'); vals.push(await encryptKey(body.api_key, c.env.ENCRYPT_KEY || c.env.JWT_SECRET)) }
+    if (body.models !== undefined) { sets.push('models = ?'); vals.push(JSON.stringify(body.models)) }
+    if (body.enabled !== undefined) { sets.push('enabled = ?'); vals.push(body.enabled ? 1 : 0) }
+    if (!sets.length) return c.json({ error: 'No fields' }, 400)
+    sets.push('updated_at = unixepoch()')
+    vals.push(id, user.sub)
+    await run(c.env.abdl_space_db, `UPDATE ks_channels SET ${sets.join(', ')} WHERE id = ? AND owner_id = ?`, vals)
+    return c.json({ ok: true })
+  } catch (e) {
+    console.error('PUT /channels error:', e)
+    return c.json({ error: 'Internal error' }, 500)
+  }
 })
 
 app.delete('/channels/:id', authMiddleware, async (c) => {
@@ -99,7 +131,8 @@ app.post('/channels/:id/test', authMiddleware, async (c) => {
   if (!ch) return c.json({ error: 'Not found' }, 404)
   try {
     const realKey = await decryptKey(ch.api_key_enc, c.env.ENCRYPT_KEY || c.env.JWT_SECRET)
-    const res = await fetch(`${ch.base_url}/v1/models`, {
+    const baseUrl = ch.base_url.replace(/\/v1$/, '')
+    const res = await fetch(`${baseUrl}/v1/models`, {
       headers: { 'Authorization': `Bearer ${realKey}` },
       signal: AbortSignal.timeout(10000)
     })
@@ -112,18 +145,19 @@ app.post('/channels/:id/test', authMiddleware, async (c) => {
 app.get('/keys', authMiddleware, async (c) => {
   const user = c.get('user')
   const rows = await queryAll(c.env.abdl_space_db, 'SELECT * FROM ks_sub_keys WHERE owner_id = ? ORDER BY id DESC', [user.sub])
-  return c.json(rows)
+  // 不暴露 key_hash
+  return c.json(rows.map((r: any) => ({ ...r, key_hash: undefined })))
 })
 
 app.post('/keys', authMiddleware, async (c) => {
   const user = c.get('user')
-  const { name, channel_ids, quota_tokens } = await c.req.json()
+  const { name, channel_ids, quota_tokens, rate_limit } = await c.req.json()
   const rawKey = generateSubKey()
   const keyHash = await sha256(rawKey)
   const keyPrefix = rawKey.slice(0, 11)
   await run(c.env.abdl_space_db,
-    'INSERT INTO ks_sub_keys (key_hash, key_prefix, name, channel_ids, quota_tokens, owner_id) VALUES (?, ?, ?, ?, ?, ?)',
-    [keyHash, keyPrefix, name || '', JSON.stringify(channel_ids || []), quota_tokens ?? -1, user.sub])
+    'INSERT INTO ks_sub_keys (key_hash, key_prefix, name, channel_ids, quota_tokens, rate_limit, owner_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    [keyHash, keyPrefix, name || '', JSON.stringify(channel_ids || []), quota_tokens ?? -1, rate_limit ?? 60, user.sub])
   return c.json({ key: rawKey, prefix: keyPrefix, name }, 201)
 })
 
@@ -135,8 +169,10 @@ app.put('/keys/:id', authMiddleware, async (c) => {
   if (body.name !== undefined) { sets.push('name = ?'); vals.push(body.name) }
   if (body.channel_ids !== undefined) { sets.push('channel_ids = ?'); vals.push(JSON.stringify(body.channel_ids)) }
   if (body.quota_tokens !== undefined) { sets.push('quota_tokens = ?'); vals.push(body.quota_tokens) }
+  if (body.rate_limit !== undefined) { sets.push('rate_limit = ?'); vals.push(body.rate_limit) }
   if (body.enabled !== undefined) { sets.push('enabled = ?'); vals.push(body.enabled ? 1 : 0) }
   if (!sets.length) return c.json({ error: 'No fields' }, 400)
+  sets.push('updated_at = unixepoch()')
   vals.push(id, user.sub)
   await run(c.env.abdl_space_db, `UPDATE ks_sub_keys SET ${sets.join(', ')} WHERE id = ? AND owner_id = ?`, vals)
   return c.json({ ok: true })

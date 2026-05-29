@@ -110,6 +110,18 @@ export async function run(
 }
 
 /**
+ * 执行 D1 查询并返回所有结果行（query 的语义别名）
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export async function queryAll<T extends Record<string, any>>(
+  db: D1Database,
+  sql: string,
+  params: unknown[] = []
+): Promise<T[]> {
+  return query<T>(db, sql, params)
+}
+
+/**
  * 获取单行记录，未找到时返回 null
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

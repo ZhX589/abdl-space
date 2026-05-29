@@ -42,7 +42,7 @@ const app = new Hono<AppType>()
 
 app.use('*', async (c, next) => {
   // /api/v1/* 路由由各自处理 CORS（允许所有来源）
-  if (c.req.path.startsWith('/api/v1/')) return next()
+  if (c.req.path.startsWith('/api/v1/') || c.req.path.startsWith('/v1/')) return next()
   return corsWithOrigin(c, next)
 })
 app.use('*', logger())
