@@ -14,6 +14,23 @@ const NBW_USERINFO_URL = 'https://www.newbabyworld.top/oauth/userinfo.php'
 
 const tokenCookieOptions = 'HttpOnly; Secure; SameSite=None; Domain=.abdl-space.top; Path=/; Max-Age=604800'
 
+/** 根据请求来源返回对应的 NBW OAuth 配置 */
+function getNBWConfig(c: any): { clientId: string; clientSecret: string; redirectUri: string } {
+  const origin = c.req.header('Origin') || c.req.header('Referer') || ''
+  if (origin.includes('m.abdl-space.top')) {
+    return {
+      clientId: c.env.NBW_CLIENT_ID_MOBILE || c.env.NBW_CLIENT_ID || '',
+      clientSecret: c.env.NBW_CLIENT_SECRET_MOBILE || c.env.NBW_CLIENT_SECRET || '',
+      redirectUri: c.env.NBW_REDIRECT_URI_MOBILE || c.env.NBW_REDIRECT_URI || '',
+    }
+  }
+  return {
+    clientId: c.env.NBW_CLIENT_ID || '',
+    clientSecret: c.env.NBW_CLIENT_SECRET || '',
+    redirectUri: c.env.NBW_REDIRECT_URI || '',
+  }
+}
+
 /**
  * 签发短时效 NBW 绑定 token（JWT 嵌入 uid/username/avatar，10 分钟有效）
  * 解决 Workers 多实例进程内 Map 不共享的问题
@@ -50,11 +67,13 @@ async function verifyNBWBindToken(token: string, secret: string): Promise<{ uid:
 
 /**
  * GET /api/auth/nbw/config — 返回公开的 OAuth 配置（不含 secret）
+ * 根据请求来源（Origin/Referer）返回对应的 OAuth 配置
  */
 nbw.get('/config', (c) => {
+  const { clientId, redirectUri } = getNBWConfig(c)
   return c.json({
-    client_id: c.env.NBW_CLIENT_ID || '',
-    redirect_uri: c.env.NBW_REDIRECT_URI || '',
+    client_id: clientId,
+    redirect_uri: redirectUri,
   });
 });
 
@@ -64,9 +83,7 @@ nbw.get('/config', (c) => {
  * Response: { action: 'login', token, user } | { action: 'register', nbw_user }
  */
 nbw.post('/callback', async (c) => {
-  const clientId = c.env.NBW_CLIENT_ID
-  const clientSecret = c.env.NBW_CLIENT_SECRET
-  const redirectUri = c.env.NBW_REDIRECT_URI
+  const { clientId, clientSecret, redirectUri } = getNBWConfig(c)
 
   if (!clientId || !clientSecret || !redirectUri) {
     return c.json({ error: 'NewBabyWorld OAuth 未配置' }, 500)
@@ -216,9 +233,7 @@ nbw.post('/bind-existing', async (c) => {
  */
 nbw.post('/bind', authMiddleware, async (c) => {
   const user = c.get('user')
-  const clientId = c.env.NBW_CLIENT_ID
-  const clientSecret = c.env.NBW_CLIENT_SECRET
-  const redirectUri = c.env.NBW_REDIRECT_URI
+  const { clientId, clientSecret, redirectUri } = getNBWConfig(c)
 
   if (!clientId || !clientSecret || !redirectUri) {
     return c.json({ error: 'NewBabyWorld OAuth 未配置' }, 500)
