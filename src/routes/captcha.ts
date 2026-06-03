@@ -34,13 +34,19 @@ captcha.post('/risk', async (c) => {
     || 'unknown'
   const ua = c.req.header('User-Agent')
 
-  const { level } = await assessRisk(c.env.abdl_space_db, ip, ua)
+  let level: 'low' | 'high' = 'low'
+  try {
+    const result = await assessRisk(c.env.abdl_space_db, ip, ua)
+    level = result.level
+  } catch (err) {
+    console.error('risk assessment error:', err)
+    // fallback: 降级为 low，不影响用户体验
+  }
 
   let flow: 'turnstile' | 'quantum' | 'both'
   if (level === 'high') {
     flow = 'both'
   } else {
-    // 低风险: 随机选择
     flow = Math.random() < 0.5 ? 'turnstile' : 'quantum'
   }
 
