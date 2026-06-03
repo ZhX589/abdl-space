@@ -53,7 +53,7 @@ async function verifyNBWBindToken(token: string, secret: string): Promise<{ uid:
 
 /**
  * GET /api/auth/nbw/config — 返回公开的 OAuth 配置（不含 secret）
- * 根据请求来源（Origin/Referer）返回对应的 OAuth 配置
+ * 根据请求来源（Origin）返回对应的 OAuth 配置
  */
 nbw.get('/config', (c) => {
   const { clientId, redirectUri } = getNBWConfig(c)

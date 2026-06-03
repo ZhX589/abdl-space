@@ -4,6 +4,7 @@ import { hashPassword, verifyPassword, signJWT } from '../lib/auth.ts'
 import { queryOne, query, run } from '../lib/db.ts'
 import { authMiddleware } from '../middleware/auth.ts'
 import { getNBWConfig } from '../lib/nbw.ts'
+import { sendTencentEmail } from '../lib/ses.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
@@ -11,7 +12,7 @@ const auth = new Hono<AppType>()
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 const CODE_TTL_MINUTES = 5
-const RESEND_COOLDOWN_SECONDS = 60
+const EMAIL_COOLDOWN_SECONDS = 60
 const MAX_CODE_REQUESTS = 5
 const MAX_VERIFY_ATTEMPTS = 5  // 验证码最多尝试 5 次
 const RATE_LIMIT_WINDOW = 60   // 秒
@@ -74,41 +75,7 @@ async function cleanupRateLimits(db: D1Database): Promise<void> {
   await run(db, "DELETE FROM rate_limits WHERE expires_at < datetime('now')")
 }
 
-async function sendEmail(to: string, subject: string, html: string, apiKey: string): Promise<void> {
-  const res = await fetch('https://api.resend.com/emails', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      from: 'ABDL Space <admin@abdl-space.top>',
-      to: [to],
-      subject,
-      html,
-    }),
-  })
-  if (!res.ok) {
-    const err = await res.text()
-    throw new Error(`Resend API error: ${res.status} ${err}`)
-  }
-}
 
-function codeEmailHtml(code: string): string {
-  return `
-    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 480px; margin: 0 auto; padding: 32px;">
-      <div style="text-align: center; margin-bottom: 24px;">
-        <h2 style="color: #333; margin: 0;">ABDL Space</h2>
-      </div>
-      <div style="background: #f8f9fa; border-radius: 12px; padding: 24px; text-align: center;">
-        <p style="color: #666; font-size: 14px; margin: 0 0 12px;">您的验证码为：</p>
-        <div style="font-size: 36px; font-weight: 700; letter-spacing: 8px; color: #333; font-family: monospace;">${code}</div>
-        <p style="color: #999; font-size: 12px; margin: 16px 0 0;">验证码 ${CODE_TTL_MINUTES} 分钟内有效，请勿泄露给他人</p>
-      </div>
-      <p style="color: #bbb; font-size: 11px; text-align: center; margin-top: 24px;">如非本人操作，请忽略此邮件</p>
-    </div>
-  `
-}
 
 // ============================================================
 // POST /api/auth/send-code — 发送邮箱验证码
@@ -151,9 +118,9 @@ auth.post('/send-code', async (c) => {
   }
 
   // 邮箱+类型限流（D1）
-  const emailLimit = await checkD1RateLimit(db, `email:${type}:${emailAddress}`, RESEND_COOLDOWN_SECONDS, 1)
+  const emailLimit = await checkD1RateLimit(db, `email:${type}:${emailAddress}`, EMAIL_COOLDOWN_SECONDS, 1)
   if (!emailLimit.allowed) {
-    return c.json({ error: `请等待 ${RESEND_COOLDOWN_SECONDS} 秒后再发送` }, 429)
+    return c.json({ error: `请等待 ${EMAIL_COOLDOWN_SECONDS} 秒后再发送` }, 429)
   }
 
   // 检查累计未过期未使用次数
@@ -185,7 +152,7 @@ auth.post('/send-code', async (c) => {
     [emailAddress, codeHash, type, expiresAt]
   )
 
-  // 发送邮件
+  // 发送邮件（腾讯云 SES 模板）
   const subjects: Record<string, string> = {
     register: '【ABDL Space】注册验证码',
     bind: '【ABDL Space】邮箱绑定验证码',
@@ -193,9 +160,15 @@ auth.post('/send-code', async (c) => {
   }
 
   try {
-    await sendEmail(emailAddress, subjects[type], codeEmailHtml(code), c.env.RESEND_API_KEY)
+    await sendTencentEmail(
+      emailAddress,
+      subjects[type],
+      Number(c.env.SES_TEMPLATE_ID),
+      JSON.stringify({ code }),
+      { TENCENT_SECRET_ID: c.env.TENCENT_SECRET_ID, TENCENT_SECRET_KEY: c.env.TENCENT_SECRET_KEY, SES_FROM_EMAIL: c.env.SES_FROM_EMAIL }
+    )
   } catch (err) {
-    console.error('Resend error:', err)
+    console.error('SES error:', err)
     return c.json({ error: '发送验证码失败，请稍后再试' }, 500)
   }
 
