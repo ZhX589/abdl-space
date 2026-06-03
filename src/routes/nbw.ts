@@ -4,6 +4,7 @@ import { queryOne, run } from '../lib/db.ts'
 import { signJWT } from '../lib/auth.ts'
 import { hashPassword } from '../lib/auth.ts'
 import { authMiddleware } from '../middleware/auth.ts'
+import { getNBWConfig } from '../lib/nbw.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
@@ -14,22 +15,7 @@ const NBW_USERINFO_URL = 'https://www.newbabyworld.top/oauth/userinfo.php'
 
 const tokenCookieOptions = 'HttpOnly; Secure; SameSite=None; Domain=.abdl-space.top; Path=/; Max-Age=604800'
 
-/** 根据请求来源返回对应的 NBW OAuth 配置 */
-function getNBWConfig(c: any): { clientId: string; clientSecret: string; redirectUri: string } {
-  const origin = c.req.header('Origin') || c.req.header('Referer') || ''
-  if (origin.includes('m.abdl-space.top')) {
-    return {
-      clientId: c.env.NBW_CLIENT_ID_MOBILE || c.env.NBW_CLIENT_ID || '',
-      clientSecret: c.env.NBW_CLIENT_SECRET_MOBILE || c.env.NBW_CLIENT_SECRET || '',
-      redirectUri: c.env.NBW_REDIRECT_URI_MOBILE || c.env.NBW_REDIRECT_URI || '',
-    }
-  }
-  return {
-    clientId: c.env.NBW_CLIENT_ID || '',
-    clientSecret: c.env.NBW_CLIENT_SECRET || '',
-    redirectUri: c.env.NBW_REDIRECT_URI || '',
-  }
-}
+
 
 /**
  * 签发短时效 NBW 绑定 token（JWT 嵌入 uid/username/avatar，10 分钟有效）

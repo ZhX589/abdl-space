@@ -3,6 +3,7 @@ import type { Env, JWTPayload, RegisterRequest, LoginRequest, LoginResponse, Use
 import { hashPassword, verifyPassword, signJWT } from '../lib/auth.ts'
 import { queryOne, query, run } from '../lib/db.ts'
 import { authMiddleware } from '../middleware/auth.ts'
+import { getNBWConfig } from '../lib/nbw.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
@@ -294,9 +295,7 @@ auth.post('/register', async (c) => {
       if (!nbw_uid) return c.json({ error: 'NBW 授权信息已过期或无效，请重新登录' }, 400)
     } else {
       // 旧流程：用 code 换 token
-      const clientId = c.env.NBW_CLIENT_ID
-      const clientSecret = c.env.NBW_CLIENT_SECRET
-      const redirectUri = c.env.NBW_REDIRECT_URI
+      const { clientId, clientSecret, redirectUri } = getNBWConfig(c)
       if (!clientId || !clientSecret || !redirectUri) {
         return c.json({ error: 'NewBabyWorld OAuth 未配置' }, 500)
       }
