@@ -131,6 +131,8 @@ export const EMBED_JS = `/**
       if (!this.container) throw new Error('ABDLCaptcha: container not found');
       this.options = options;
       this.apiKey = options.apiKey;
+      // apiBase: 内部接口基础路径（如 ''），不走 API Key 鉴权；未设置则走 v1 外部接口
+      this.apiBase = options.apiBase !== undefined ? options.apiBase : null;
       this.onSuccess = options.onSuccess || (() => {});
       this.onError = options.onError || (() => {});
       this.sessionId = null;
@@ -204,13 +206,15 @@ export const EMBED_JS = `/**
 
     async fetchChallenge() {
       this.setStatus('正在加载...');
-      console.log('[ABDLCaptcha] fetchChallenge, apiKey:', this.apiKey ? this.apiKey.slice(0, 11) + '...' : 'EMPTY');
+      const useInternal = this.apiBase !== null;
+      const url = useInternal
+        ? \`\${this.apiBase}/api/captcha/challenge\`
+        : \`\${API_BASE}/api/v1/captcha/create\`;
+      const headers = { 'Content-Type': 'application/json' };
+      if (!useInternal) headers['Authorization'] = \`Bearer \${this.apiKey}\`;
+      console.log('[ABDLCaptcha] fetchChallenge, apiKey:', this.apiKey ? this.apiKey.slice(0, 11) + '...' : 'EMPTY', 'internal:', useInternal);
       try {
-        const res = await fetch(\`\${API_BASE}/api/v1/captcha/create\`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': \`Bearer \${this.apiKey}\` },
-          body: JSON.stringify({ type: 'quantum' }),
-        });
+        const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ type: 'quantum' }) });
         const data = await res.json();
         console.log('[ABDLCaptcha] create response:', res.status, data);
         if (!res.ok) throw new Error(data.error || 'Failed to create challenge');
@@ -332,15 +336,21 @@ export const EMBED_JS = `/**
 
     async submitAnswer() {
       try {
-        console.log('[ABDLCaptcha] submitAnswer:', { sessionId: this.sessionId, answer: this.userSequence.join(','), hasApiKey: !!this.apiKey });
-        const res = await fetch(\`\${API_BASE}/api/v1/captcha/check\`, {
+        const useInternal = this.apiBase !== null;
+        const url = useInternal
+          ? \`\${this.apiBase}/api/captcha/verify\`
+          : \`\${API_BASE}/api/v1/captcha/check\`;
+        const headers = { 'Content-Type': 'application/json' };
+        if (!useInternal) headers['Authorization'] = \`Bearer \${this.apiKey}\`;
+        console.log('[ABDLCaptcha] submitAnswer:', { sessionId: this.sessionId, answer: this.userSequence.join(','), hasApiKey: !!this.apiKey, internal: useInternal });
+        const res = await fetch(url, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': \`Bearer \${this.apiKey}\` },
+          headers,
           body: JSON.stringify({ session_id: this.sessionId, answer: this.userSequence.join(',') }),
         });
         const data = await res.json();
         console.log('[ABDLCaptcha] check response:', data);
-        if (data.verified && data.token) {
+        if ((data.verified || data.success) && data.token) {
           this.setStatus('✓ 验证成功', 'ok');
           this.onSuccess(data.token);
         } else if (data.locked) {
