@@ -78,7 +78,7 @@ posts.get('/', async (c) => {
   const params: unknown[] = []
 
   if (search) {
-    conditions.push('p.content LIKE ?')
+    conditions.push("p.content LIKE ? ESCAPE '\\'")
     // BUG-550: Escape LIKE wildcards
     const escapedSearch = search.replace(/%/g, '\%').replace(/_/g, '\_')
     params.push(`%${escapedSearch}%`)
@@ -367,8 +367,12 @@ posts.post('/', authMiddleware, async (c) => {
       // BUG-548: Validate image URL format
       try {
         const parsed = new URL(img.url)
-        if (!['https:', 'http:'].includes(parsed.protocol)) continue
-      } catch { continue }
+        if (!['https:', 'http:'].includes(parsed.protocol)) {
+          return c.json({ error: '图片 URL 必须以 http(s) 开头' }, 400)
+        }
+      } catch {
+        return c.json({ error: `无效的图片 URL: ${img.url}` }, 400)
+      }
       if (img.is_nsfw) postHasNsfw = true
       await run(
         c.env.abdl_space_db,
@@ -510,6 +514,15 @@ posts.post('/:id/comments', authMiddleware, async (c) => {
     for (let i = 0; i < images.length; i++) {
       const img = typeof images[i] === 'string' ? { url: images[i], is_nsfw: false } : images[i]
       if (!img.url) continue
+      // Validate image URL format
+      try {
+        const parsed = new URL(img.url)
+        if (!['https:', 'http:'].includes(parsed.protocol)) {
+          return c.json({ error: '图片 URL 必须以 http(s) 开头' }, 400)
+        }
+      } catch {
+        return c.json({ error: `无效的图片 URL: ${img.url}` }, 400)
+      }
       await run(
         c.env.abdl_space_db,
         'INSERT INTO comment_images (comment_id, image_url, is_nsfw, sort_order) VALUES (?, ?, ?, ?)',

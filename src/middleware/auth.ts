@@ -29,7 +29,7 @@ async function lookupOAuthToken(db: D1Database, token: string): Promise<JWTPaylo
     username: user.username,
     email: user.email,
     role: user.role,
-    iat: 0,  // BUG-354 fix: don't override iat; authMiddleware checks password_changed_at
+    iat: 0,  // OAuth token: skip password_changed_at check
     exp: row.access_expires_at,
   }
 }
@@ -57,9 +57,30 @@ async function extractUser(c: Context<AppType>): Promise<JWTPayload | null> {
     if (match) {
       const payload = await verifyJWT(match[1], c.env.JWT_SECRET)
       if (payload) return payload
-      // BUG-349: Also try OAuth token in cookie
+      // Also try OAuth token in cookie
       const oauthUser = await lookupOAuthToken(c.env.abdl_space_db, match[1])
       if (oauthUser) return oauthUser
+    }
+  }
+  return null
+}
+
+/**
+ * BUG-177: 密码修改后旧 JWT 失效（仅 JWT，跳过 OAuth token）
+ * 抽取为共享函数，authMiddleware 和 adminMiddleware 都调用
+ */
+async function assertSessionNotStale(payload: JWTPayload, db: D1Database): Promise<string | null> {
+  if (payload.iat <= 0) return null // OAuth token, skip check
+  const user = await queryOne<{ password_changed_at: string | null }>(
+    db,
+    'SELECT password_changed_at FROM users WHERE id = ?',
+    [payload.sub]
+  )
+  if (user?.password_changed_at) {
+    const pwdChangedSec = Math.floor(new Date(user.password_changed_at).getTime() / 1000)
+    const tokenIat = payload.iat > 1e12 ? Math.floor(payload.iat / 1000) : payload.iat
+    if (tokenIat < pwdChangedSec) {
+      return 'Session expired, please login again'
     }
   }
   return null
@@ -75,20 +96,9 @@ export async function authMiddleware(c: Context<AppType>, next: Next): Promise<R
     return c.json({ error: 'Authentication required' }, 401)
   }
 
-  // BUG-177: Check if password was changed after token was issued (JWT only, skip for OAuth)
-  if (payload.iat > 0) {
-    const user = await queryOne<{ password_changed_at: string | null }>(
-      c.env.abdl_space_db,
-      'SELECT password_changed_at FROM users WHERE id = ?',
-      [payload.sub]
-    )
-    if (user?.password_changed_at) {
-      const pwdChangedSec = Math.floor(new Date(user.password_changed_at).getTime() / 1000)
-      const tokenIat = payload.iat > 1e12 ? Math.floor(payload.iat / 1000) : payload.iat
-      if (tokenIat < pwdChangedSec) {
-        return c.json({ error: 'Session expired, please login again' }, 401)
-      }
-    }
+  const staleError = await assertSessionNotStale(payload, c.env.abdl_space_db)
+  if (staleError) {
+    return c.json({ error: staleError }, 401)
   }
 
   c.set('user', payload)
@@ -104,9 +114,16 @@ export async function adminMiddleware(c: Context<AppType>, next: Next): Promise<
   if (!payload) {
     return c.json({ error: 'Authentication required' }, 401)
   }
+
+  const staleError = await assertSessionNotStale(payload, c.env.abdl_space_db)
+  if (staleError) {
+    return c.json({ error: staleError }, 401)
+  }
+
   if (payload.role !== 'admin') {
     return c.json({ error: 'Admin access required' }, 403)
   }
+
   c.set('user', payload)
   await next()
 }
