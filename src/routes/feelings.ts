@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import type { Env, JWTPayload, CreateFeelingRequest } from '../types/index.ts'
-import { queryOne, run } from '../lib/db.ts'
+import { queryOne, query, run } from '../lib/db.ts'
 import { authMiddleware } from '../middleware/auth.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
@@ -12,6 +12,17 @@ const feelings = new Hono<AppType>()
  */
 feelings.post('/', authMiddleware, async (c) => {
   const user = c.get('user')
+
+  // BUG-1000: Rate limit - max 5 submissions per minute per user
+  const recentCount = await queryOne<{ cnt: number }>(
+    c.env.abdl_space_db,
+    "SELECT COUNT(*) as cnt FROM feelings WHERE user_id = ? AND created_at > datetime('now', '-1 minute')",
+    [user.sub]
+  )
+  if (recentCount && recentCount.cnt >= 5) {
+    return c.json({ error: '操作太频繁，请稍后再试' }, 429)
+  }
+
   const body = await c.req.json<CreateFeelingRequest>()
   const { diaper_id, size, looseness, softness, dryness, odor_control, quietness } = body
 
@@ -20,6 +31,10 @@ feelings.post('/', authMiddleware, async (c) => {
   }
 
   const scores = [looseness, softness, dryness, odor_control, quietness]
+  // BUG-1001: Validate score types
+  if (!scores.every(s => typeof s === 'number' && Number.isInteger(s))) {
+    return c.json({ error: 'Scores must be integers' }, 400)
+  }
   if (scores.some(s => s < -5 || s > 5)) {
     return c.json({ error: 'Scores must be -5 to 5' }, 400)
   }

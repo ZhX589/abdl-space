@@ -13,43 +13,64 @@ const messages = new Hono<AppType>()
 messages.get('/conversations', authMiddleware, async (c) => {
   const user = c.get('user')
 
-  // 先获取所有对方用户ID和最新消息
+  // Fix BUG-003: Use subquery to get latest message per conversation
+  // Fix BUG-007: Batch query user info and unread counts
   const rows = await query<Record<string, unknown>>(
     c.env.abdl_space_db,
-    `SELECT
-       CASE WHEN sender_id = ? THEN receiver_id ELSE sender_id END as other_id,
-       content as last_msg,
-       created_at as last_time
-     FROM messages
-     WHERE sender_id = ? OR receiver_id = ?
-     GROUP BY other_id
-     ORDER BY MAX(created_at) DESC`,
-    [user.sub, user.sub, user.sub]
+    `SELECT other_id, content as last_msg, created_at as last_time
+     FROM (
+       SELECT
+         CASE WHEN sender_id = ? THEN receiver_id ELSE sender_id END as other_id,
+         content, created_at,
+         ROW_NUMBER() OVER (
+           PARTITION BY CASE WHEN sender_id = ? THEN receiver_id ELSE sender_id END
+           ORDER BY created_at DESC
+         ) as rn
+       FROM messages
+       WHERE sender_id = ? OR receiver_id = ?
+     )
+     WHERE rn = 1
+     ORDER BY created_at DESC`,
+    [user.sub, user.sub, user.sub, user.sub]
   )
 
-  const conversations = await Promise.all(rows.map(async (r) => {
-    const otherUser = await queryOne<{ id: number; username: string; avatar: string | null }>(
-      c.env.abdl_space_db,
-      'SELECT id, username, avatar FROM users WHERE id = ?',
-      [r.other_id]
-    )
+  const otherIds = rows.map(r => r.other_id as number)
 
-    // 未读数单独查询
-    const unread = await queryOne<{ count: number }>(
+  // Batch query user info
+  const usersMap = new Map<number, { username: string; avatar: string | null }>()
+  if (otherIds.length > 0) {
+    const otherUsers = await query<{ id: number; username: string; avatar: string | null }>(
       c.env.abdl_space_db,
-      'SELECT COUNT(*) as count FROM messages WHERE sender_id = ? AND receiver_id = ? AND read = 0',
-      [r.other_id, user.sub]
+      `SELECT id, username, avatar FROM users WHERE id IN (${otherIds.map(() => '?').join(',')})`,
+      otherIds
     )
+    for (const u of otherUsers) usersMap.set(u.id, { username: u.username, avatar: u.avatar })
+  }
 
+  // Batch query unread counts
+  const unreadMap = new Map<number, number>()
+  if (otherIds.length > 0) {
+    const unreadRows = await query<{ sender_id: number; cnt: number }>(
+      c.env.abdl_space_db,
+      `SELECT sender_id, COUNT(*) as cnt FROM messages
+       WHERE receiver_id = ? AND read = 0 AND sender_id IN (${otherIds.map(() => '?').join(',')})
+       GROUP BY sender_id`,
+      [user.sub, ...otherIds]
+    )
+    for (const u of unreadRows) unreadMap.set(u.sender_id, u.cnt)
+  }
+
+  const conversations = rows.map(r => {
+    const u = usersMap.get(r.other_id as number)
     return {
       user_id: r.other_id,
-      username: otherUser?.username || '未知用户',
-      avatar: otherUser?.avatar ?? null,
+      username: u?.username || '未知用户',
+      avatar: u?.avatar ?? null,
       last_message: r.last_msg,
       last_message_at: r.last_time,
-      unread_count: unread?.count ?? 0,
+      unread_count: unreadMap.get(r.other_id as number) ?? 0,
     }
-  }))
+  })
 
   return c.json({ conversations })
 })

@@ -79,7 +79,9 @@ posts.get('/', async (c) => {
 
   if (search) {
     conditions.push('p.content LIKE ?')
-    params.push(`%${search}%`)
+    // BUG-550: Escape LIKE wildcards
+    const escapedSearch = search.replace(/%/g, '\%').replace(/_/g, '\_')
+    params.push(`%${escapedSearch}%`)
   }
 
   const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
@@ -105,55 +107,79 @@ posts.get('/', async (c) => {
     [...params, limit, offset]
   )
 
-  const postsList = await Promise.all(rows.map(async (r) => {
-    let hasLiked = false
-    if (userId) {
-      const liked = await queryOne<{ count: number }>(
+  // Batch query: likes, images, reposts (avoids N+1)
+  const postIds = rows.map(r => r.id as number)
+  const repostIds = rows.map(r => r.repost_id).filter(Boolean) as number[]
+
+  // Batch: user's likes for all posts
+  let likedSet = new Set<number>()
+  if (userId && postIds.length > 0) {
+    const placeholders = postIds.map(() => '?').join(',')
+    const likedRows = await query<{ target_id: number }>(
+      c.env.abdl_space_db,
+      `SELECT target_id FROM likes WHERE user_id = ? AND target_type = 'post' AND target_id IN (${placeholders})`,
+      [userId, ...postIds]
+    )
+    likedSet = new Set(likedRows.map(r => r.target_id))
+  }
+
+  // Batch: all images for posts
+  const allImages = postIds.length > 0
+    ? await query<{ post_id: number; image_url: string; is_nsfw: number }>(
         c.env.abdl_space_db,
-        "SELECT COUNT(*) as count FROM likes WHERE user_id = ? AND target_type = 'post' AND target_id = ?",
-        [userId, r.id]
+        `SELECT post_id, image_url, is_nsfw FROM post_images WHERE post_id IN (${postIds.map(() => '?').join(',')}) ORDER BY sort_order`,
+        postIds
       )
-      hasLiked = (liked?.count ?? 0) > 0
-    }
+    : []
+  const imagesMap = new Map<number, { image_url: string; is_nsfw: number }[]>()
+  for (const img of allImages) {
+    if (!imagesMap.has(img.post_id)) imagesMap.set(img.post_id, [])
+    imagesMap.get(img.post_id)!.push({ image_url: img.image_url, is_nsfw: img.is_nsfw })
+  }
 
-    // 获取帖子图片
-    const images = await safeGetImages(c.env.abdl_space_db, r.id)
-
-    // 获取转发的原帖数据
-    let repost: Record<string, unknown> | null = null
-    if (r.repost_id) {
-      const origPost = await queryOne<Record<string, unknown>>(
-        c.env.abdl_space_db,
-        `SELECT p.id, p.user_id, p.content, p.created_at, u.username, u.avatar, u.role
-         FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`,
-        [r.repost_id]
-      )
-      if (origPost) {
-        const origImages = await safeGetImages(c.env.abdl_space_db, r.repost_id)
-        repost = {
-          id: origPost.id,
-          user: { id: origPost.user_id, username: origPost.username, avatar: origPost.avatar ?? null, role: origPost.role },
-          content: origPost.content,
-          images: origImages.map(img => ({ image_url: img.image_url, is_nsfw: !!img.is_nsfw })),
-          created_at: origPost.created_at
-        }
-      }
+  // Batch: repost data + repost images
+  const repostMap = new Map<number, Record<string, unknown>>()
+  if (repostIds.length > 0) {
+    const repostRows = await query<Record<string, unknown>>(
+      c.env.abdl_space_db,
+      `SELECT p.id, p.user_id, p.content, p.created_at, u.username, u.avatar, u.role
+       FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id IN (${repostIds.map(() => '?').join(',')})`,
+      repostIds
+    )
+    const repostImages = await query<{ post_id: number; image_url: string; is_nsfw: number }>(
+      c.env.abdl_space_db,
+      `SELECT post_id, image_url, is_nsfw FROM post_images WHERE post_id IN (${repostIds.map(() => '?').join(',')}) ORDER BY sort_order`,
+      repostIds
+    )
+    const repostImagesMap = new Map<number, { image_url: string; is_nsfw: number }[]>()
+    for (const img of repostImages) {
+      if (!repostImagesMap.has(img.post_id)) repostImagesMap.set(img.post_id, [])
+      repostImagesMap.get(img.post_id)!.push({ image_url: img.image_url, is_nsfw: img.is_nsfw })
     }
-
-    return {
-      id: r.id,
-      user: { id: r.user_id, username: r.username, avatar: r.avatar ?? null, role: r.role },
-      content: r.content,
-      diaper_id: r.diaper_id ?? null,
-      pinned: !!r.pinned,
-      repost_id: r.repost_id ?? null,
-      repost,
-      like_count: r.like_count,
-      has_liked: hasLiked,
-      comment_count: r.comment_count,
-      images: images.map(img => ({ image_url: img.image_url, is_nsfw: !!img.is_nsfw })),
-      created_at: r.created_at
+    for (const orig of repostRows) {
+      repostMap.set(orig.id as number, {
+        id: orig.id,
+        user: { id: orig.user_id, username: orig.username, avatar: orig.avatar ?? null, role: orig.role },
+        content: orig.content,
+        images: (repostImagesMap.get(orig.id as number) || []).map(img => ({ image_url: img.image_url, is_nsfw: !!img.is_nsfw })),
+        created_at: orig.created_at
+      })
     }
+  }
+
+  const postsList = rows.map(r => ({
+    id: r.id,
+    user: { id: r.user_id, username: r.username, avatar: r.avatar ?? null, role: r.role },
+    content: r.content,
+    diaper_id: r.diaper_id ?? null,
+    pinned: !!r.pinned,
+    repost_id: r.repost_id ?? null,
+    repost: r.repost_id ? repostMap.get(r.repost_id as number) ?? null : null,
+    like_count: r.like_count,
+    has_liked: likedSet.has(r.id as number),
+    comment_count: r.comment_count,
+    images: (imagesMap.get(r.id as number) || []).map(img => ({ image_url: img.image_url, is_nsfw: !!img.is_nsfw })),
+    created_at: r.created_at
   }))
 
   return c.json({
@@ -212,36 +238,51 @@ posts.get('/:id', async (c) => {
     [postId]
   )
 
-  const commentsWithLikes = await Promise.all(comments.map(async (cmt) => {
-    let cmtHasLiked = false
-    if (userId) {
-      const liked = await queryOne<{ count: number }>(
-        c.env.abdl_space_db,
-        "SELECT COUNT(*) as count FROM likes WHERE user_id = ? AND target_type = 'comment' AND target_id = ?",
-        [userId, cmt.id]
-      )
-      cmtHasLiked = (liked?.count ?? 0) > 0
-    }
+  // Batch query comment likes and images (BUG-006 fix: avoid N+1)
+  const commentIds = comments.map(cmt => cmt.id as number)
 
-    const likeCount = await queryOne<{ count: number }>(
+  let cmtLikedSet = new Set<number>()
+  if (userId && commentIds.length > 0) {
+    const likedRows = await query<{ target_id: number }>(
       c.env.abdl_space_db,
-      "SELECT COUNT(*) as count FROM likes WHERE target_type = 'comment' AND target_id = ?",
-      [cmt.id]
+      `SELECT target_id FROM likes WHERE user_id = ? AND target_type = 'comment' AND target_id IN (${commentIds.map(() => '?').join(',')})`,
+      [userId, ...commentIds]
     )
+    cmtLikedSet = new Set(likedRows.map(r => r.target_id))
+  }
 
-    const commentImages = await safeGetCommentImages(c.env.abdl_space_db, cmt.id);
+  const cmtLikeCounts = commentIds.length > 0
+    ? await query<{ target_id: number; cnt: number }>(
+        c.env.abdl_space_db,
+        `SELECT target_id, COUNT(*) as cnt FROM likes WHERE target_type = 'comment' AND target_id IN (${commentIds.map(() => '?').join(',')}) GROUP BY target_id`,
+        commentIds
+      )
+    : []
+  const cmtLikeMap = new Map(cmtLikeCounts.map(r => [r.target_id, r.cnt]))
 
-    return {
-      id: cmt.id,
-      post_id: cmt.post_id,
-      user: { id: cmt.user_id, username: cmt.username, avatar: cmt.avatar ?? null, role: cmt.role },
-      parent_id: cmt.parent_id ?? null,
-      content: cmt.content,
-      images: commentImages.map(img => ({ image_url: img.image_url, is_nsfw: !!img.is_nsfw })),
-      like_count: likeCount?.count ?? 0,
-      has_liked: cmtHasLiked,
-      created_at: cmt.created_at
-    }
+  const allCmtImages = commentIds.length > 0
+    ? await query<{ comment_id: number; image_url: string; is_nsfw: number }>(
+        c.env.abdl_space_db,
+        `SELECT comment_id, image_url, is_nsfw FROM comment_images WHERE comment_id IN (${commentIds.map(() => '?').join(',')}) ORDER BY sort_order`,
+        commentIds
+      )
+    : []
+  const cmtImagesMap = new Map<number, { image_url: string; is_nsfw: number }[]>()
+  for (const img of allCmtImages) {
+    if (!cmtImagesMap.has(img.comment_id)) cmtImagesMap.set(img.comment_id, [])
+    cmtImagesMap.get(img.comment_id)!.push({ image_url: img.image_url, is_nsfw: img.is_nsfw })
+  }
+
+  const commentsWithLikes = comments.map(cmt => ({
+    id: cmt.id,
+    post_id: cmt.post_id,
+    user: { id: cmt.user_id, username: cmt.username, avatar: cmt.avatar ?? null, role: cmt.role },
+    parent_id: cmt.parent_id ?? null,
+    content: cmt.content,
+    images: (cmtImagesMap.get(cmt.id as number) || []).map(img => ({ image_url: img.image_url, is_nsfw: !!img.is_nsfw })),
+    like_count: cmtLikeMap.get(cmt.id as number) ?? 0,
+    has_liked: cmtLikedSet.has(cmt.id as number),
+    created_at: cmt.created_at
   }))
 
   // 获取帖子图片
@@ -323,6 +364,11 @@ posts.post('/', authMiddleware, async (c) => {
     for (let i = 0; i < images.length; i++) {
       const img = typeof images[i] === 'string' ? { url: images[i], is_nsfw: false } : images[i]
       if (!img.url) continue
+      // BUG-548: Validate image URL format
+      try {
+        const parsed = new URL(img.url)
+        if (!['https:', 'http:'].includes(parsed.protocol)) continue
+      } catch { continue }
       if (img.is_nsfw) postHasNsfw = true
       await run(
         c.env.abdl_space_db,

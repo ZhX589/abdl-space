@@ -39,8 +39,12 @@ async function encryptKey(plaintext: string, password: string): Promise<string> 
 }
 
 async function decryptKey(cipherB64: string, password: string): Promise<string> {
+  if (!cipherB64 || !cipherB64.includes('+') && !cipherB64.includes('/') && cipherB64.length < 20) {
+    throw new Error('Invalid encrypted key format')
+  }
   const key = await deriveAesKey(password)
   const combined = new Uint8Array(atob(cipherB64).split('').map(c => c.charCodeAt(0)))
+  if (combined.length < 13) throw new Error('Encrypted data too short')
   const iv = combined.slice(0, 12); const ct = combined.slice(12)
   const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ct)
   return new TextDecoder().decode(pt)

@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS users (
   style_preference TEXT,                 -- 最长 100
   bio TEXT,                              -- 最长 500
   email_verified INTEGER DEFAULT 0,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  password_changed_at DATETIME           -- BUG-177: invalidate old sessions after password reset
 );
 
 -- 纸尿裤主表

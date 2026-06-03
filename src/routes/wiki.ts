@@ -151,6 +151,11 @@ wiki.put('/:slug', authMiddleware, async (c) => {
   )
   if (!page) return c.json({ error: 'Page not found' }, 404)
 
+  // Permission check: must be author or admin
+  if (page.author_id !== null && page.author_id !== user.sub && user.role !== 'admin') {
+    return c.json({ error: 'Forbidden: not the page author' }, 403)
+  }
+
   const body = await c.req.json<{ title?: string; content?: string; is_published?: number }>()
   const { title, content, is_published } = body
 

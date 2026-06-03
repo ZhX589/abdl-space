@@ -1,30 +1,9 @@
 import type { JWTPayload } from '../types/index.ts'
 
-const PBKDF2_ITERATIONS = 100000
+const PBKDF2_ITERATIONS = 600000  // OWASP 2023 recommended minimum for PBKDF2-SHA256
 const SALT_LENGTH = 16
 const KEY_LENGTH = 64
-const JWT_EXPIRES_IN = 7 * 24 * 60 * 60 * 1000
-
-const rateLimitMap = new Map<string, { count: number; resetAt: number }>()
-const RATE_LIMIT_WINDOW = 60_000
-const RATE_LIMIT_MAX = 5
-
-function checkRateLimit(ip: string): { allowed: boolean; remaining: number; resetIn: number } {
-  const now = Date.now()
-  const entry = rateLimitMap.get(ip)
-
-  if (!entry || now > entry.resetAt) {
-    rateLimitMap.set(ip, { count: 1, resetAt: now + RATE_LIMIT_WINDOW })
-    return { allowed: true, remaining: RATE_LIMIT_MAX - 1, resetIn: RATE_LIMIT_WINDOW }
-  }
-
-  if (entry.count >= RATE_LIMIT_MAX) {
-    return { allowed: false, remaining: 0, resetIn: entry.resetAt - now }
-  }
-
-  entry.count++
-  return { allowed: true, remaining: RATE_LIMIT_MAX - entry.count, resetIn: entry.resetAt - now }
-}
+const JWT_EXPIRES_IN = 7 * 24 * 60 * 60 // 7 days in seconds (RFC 7519)
 
 function getClientIp(c: { req: { header: (name: string) => string | undefined } }): string {
   return c.req.header('CF-Connecting-IP') || c.req.header('X-Forwarded-For')?.split(',')[0]?.trim() || 'unknown'
@@ -145,7 +124,7 @@ export async function verifyPassword(password: string, storedHash: string): Prom
  */
 export async function signJWT(payload: Omit<JWTPayload, 'iat' | 'exp'>, secret: string): Promise<string> {
   const header = { alg: 'HS256', typ: 'JWT' }
-  const now = Date.now()
+  const now = Math.floor(Date.now() / 1000)
   const fullPayload: JWTPayload = {
     ...payload,
     iat: now,
@@ -198,11 +177,14 @@ export async function verifyJWT(token: string, secret: string): Promise<JWTPaylo
   try {
     const payloadJson = new TextDecoder().decode(base64urlDecode(payloadB64))
     const payload: JWTPayload = JSON.parse(payloadJson)
-    if (payload.exp < Date.now()) return null
+    const nowSec = Math.floor(Date.now() / 1000)
+    // Backward compat: if exp > 1e12, it's old millisecond format
+    const expSec = payload.exp > 1e12 ? Math.floor(payload.exp / 1000) : payload.exp
+    if (expSec < nowSec) return null
     return payload
   } catch {
     return null
   }
 }
 
-export { checkRateLimit, getClientIp }
+export { getClientIp }

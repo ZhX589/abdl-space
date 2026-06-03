@@ -76,6 +76,12 @@ admin.get('/users', adminMiddleware, async (c) => {
  */
 admin.delete('/users/:id', adminMiddleware, async (c) => {
   const id = parseInt(c.req.param('id') || '')
+  const currentUser = c.get('user')
+
+  // BUG-181: Prevent admin from deleting themselves
+  if (id === currentUser.sub) {
+    return c.json({ error: '不能删除自己的账户' }, 400)
+  }
 
   const user = await queryOne<{ id: number }>(c.env.abdl_space_db, 'SELECT id FROM users WHERE id = ?', [id])
   if (!user) return c.json({ error: 'User not found' }, 404)
@@ -93,12 +99,15 @@ admin.delete('/users/:id', adminMiddleware, async (c) => {
   await run(db, 'DELETE FROM user_settings WHERE user_id = ?', [id])
   await run(db, 'DELETE FROM experience WHERE user_id = ?', [id])
   await run(db, 'DELETE FROM reports WHERE user_id = ? OR reporter_id = ?', [id, id])
+  // 删除 OAuth tokens 和 clients
+  await run(db, 'DELETE FROM oauth_tokens WHERE user_id = ?', [id])
+  await run(db, 'DELETE FROM oauth_clients WHERE owner_id = ?', [id])
   // 删除用户帖子的图片
-  const userPosts = await query<{ id: number }>(db, 'SELECT id FROM posts WHERE author_id = ?', [id])
+  const userPosts = await query<{ id: number }>(db, 'SELECT id FROM posts WHERE user_id = ?', [id])
   for (const post of userPosts) {
     await run(db, 'DELETE FROM post_images WHERE post_id = ?', [post.id])
   }
-  await run(db, 'DELETE FROM posts WHERE author_id = ?', [id])
+  await run(db, 'DELETE FROM posts WHERE user_id = ?', [id])
   // 删除验证码记录
   await run(db, 'DELETE FROM email_verifications WHERE user_id = ?', [id])
   // 删除用户
@@ -182,6 +191,15 @@ admin.delete('/posts/:id', adminMiddleware, async (c) => {
   const post = await queryOne<{ id: number }>(c.env.abdl_space_db, 'SELECT id FROM posts WHERE id = ?', [id])
   if (!post) return c.json({ error: 'Post not found' }, 404)
 
+  // Clean up related data first
+  await run(c.env.abdl_space_db, "DELETE FROM likes WHERE target_type = 'post' AND target_id = ?", [id])
+  await run(c.env.abdl_space_db, 'DELETE FROM post_images WHERE post_id = ?', [id])
+  // Clean up comment likes
+  const comments = await query<{ id: number }>(c.env.abdl_space_db, 'SELECT id FROM post_comments WHERE post_id = ?', [id])
+  for (const cmt of comments) {
+    await run(c.env.abdl_space_db, "DELETE FROM likes WHERE target_type = 'comment' AND target_id = ?", [cmt.id])
+  }
+  await run(c.env.abdl_space_db, 'DELETE FROM post_comments WHERE post_id = ?', [id])
   await run(c.env.abdl_space_db, 'DELETE FROM posts WHERE id = ?', [id])
   return c.json({ message: '已删除' })
 })

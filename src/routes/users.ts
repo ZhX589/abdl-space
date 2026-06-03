@@ -214,7 +214,9 @@ users.get('/:id/posts', async (c) => {
 
   const posts = await query<Record<string, unknown>>(
     c.env.abdl_space_db,
-    `SELECT p.*, u.username, u.avatar, u.role
+    `SELECT p.*, u.username, u.avatar, u.role,
+            (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
+            (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count
      FROM posts p JOIN users u ON p.user_id = u.id
      WHERE p.user_id = ?
      ORDER BY p.created_at DESC
@@ -222,28 +224,16 @@ users.get('/:id/posts', async (c) => {
     [id, limit]
   )
 
-  const postsList = await Promise.all(posts.map(async (r) => {
-    const likeCount = await queryOne<{ count: number }>(
-      c.env.abdl_space_db,
-      "SELECT COUNT(*) as count FROM likes WHERE target_type = 'post' AND target_id = ?",
-      [r.id]
-    )
-    const commentCount = await queryOne<{ count: number }>(
-      c.env.abdl_space_db,
-      'SELECT COUNT(*) as count FROM post_comments WHERE post_id = ?',
-      [r.id]
-    )
-    return {
-      id: r.id,
-      user: { id: r.user_id, username: r.username, avatar: r.avatar ?? null, role: r.role },
-      content: r.content,
-      diaper_id: r.diaper_id ?? null,
-      pinned: !!r.pinned,
-      like_count: likeCount?.count ?? 0,
-      has_liked: false,
-      comment_count: commentCount?.count ?? 0,
-      created_at: r.created_at
-    }
+  const postsList = posts.map(r => ({
+    id: r.id,
+    user: { id: r.user_id, username: r.username, avatar: r.avatar ?? null, role: r.role },
+    content: r.content,
+    diaper_id: r.diaper_id ?? null,
+    pinned: !!r.pinned,
+    like_count: r.like_count ?? 0,
+    has_liked: false,
+    comment_count: r.comment_count ?? 0,
+    created_at: r.created_at
   }))
 
   return c.json({ posts: postsList, pagination: { page: 1, limit, total: postsList.length, totalPages: 1 } })

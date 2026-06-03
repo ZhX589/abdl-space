@@ -67,16 +67,35 @@ reports.get('/admin', adminMiddleware, async (c) => {
     [status]
   )
 
-  const enriched = await Promise.all(rows.map(async (r) => {
-    let content = ''
-    if (r.target_type === 'post') {
-      const post = await queryOne<{ content: string }>(c.env.abdl_space_db, 'SELECT content FROM posts WHERE id = ?', [r.target_id])
-      content = post?.content?.slice(0, 100) || '(已删除)'
-    } else {
-      const comment = await queryOne<{ content: string }>(c.env.abdl_space_db, 'SELECT content FROM post_comments WHERE id = ?', [r.target_id])
-      content = comment?.content?.slice(0, 100) || '(已删除)'
-    }
-    return { ...r, content_preview: content }
+  // Batch query content previews (BUG-008 fix: avoid N+1)
+  const postIds = rows.filter(r => r.target_type === 'post').map(r => r.target_id as number)
+  const commentIds = rows.filter(r => r.target_type === 'comment').map(r => r.target_id as number)
+
+  const postContents = new Map<number, string>()
+  if (postIds.length > 0) {
+    const posts = await query<{ id: number; content: string }>(
+      c.env.abdl_space_db,
+      `SELECT id, content FROM posts WHERE id IN (${postIds.map(() => '?').join(',')})`,
+      postIds
+    )
+    for (const p of posts) postContents.set(p.id, p.content?.slice(0, 100) || '(已删除)')
+  }
+
+  const commentContents = new Map<number, string>()
+  if (commentIds.length > 0) {
+    const comments = await query<{ id: number; content: string }>(
+      c.env.abdl_space_db,
+      `SELECT id, content FROM post_comments WHERE id IN (${commentIds.map(() => '?').join(',')})`,
+      commentIds
+    )
+    for (const c of comments) commentContents.set(c.id, c.content?.slice(0, 100) || '(已删除)')
+  }
+
+  const enriched = rows.map(r => ({
+    ...r,
+    content_preview: r.target_type === 'post'
+      ? (postContents.get(r.target_id as number) || '(已删除)')
+      : (commentContents.get(r.target_id as number) || '(已删除)')
   }))
 
   return c.json({ reports: enriched, pagination: { page, limit, total: countResult[0]?.total ?? 0 } })

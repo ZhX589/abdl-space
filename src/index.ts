@@ -45,6 +45,16 @@ app.use('*', async (c, next) => {
   if (c.req.path.startsWith('/api/v1/') || c.req.path.startsWith('/v1/')) return next()
   return corsWithOrigin(c, next)
 })
+
+// Security headers (BUG-193)
+app.use('*', async (c, next) => {
+  await next()
+  c.header('X-Content-Type-Options', 'nosniff')
+  c.header('X-Frame-Options', 'DENY')
+  c.header('Referrer-Policy', 'strict-origin-when-cross-origin')
+  c.header('X-XSS-Protection', '0')
+})
+
 app.use('*', logger())
 
 const ALLOWED_ORIGINS = [

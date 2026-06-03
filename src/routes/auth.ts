@@ -441,7 +441,7 @@ auth.post('/reset-password', async (c) => {
   }
 
   const passwordHash = await hashPassword(newPassword)
-  await run(db, 'UPDATE users SET password_hash = ? WHERE id = ?', [passwordHash, user.id])
+  await run(db, 'UPDATE users SET password_hash = ?, password_changed_at = CURRENT_TIMESTAMP WHERE id = ?', [passwordHash, user.id])
 
   return c.json({ message: '密码已重置，请重新登录' })
 })

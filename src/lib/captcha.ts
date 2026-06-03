@@ -128,11 +128,12 @@ export const captchaService = {
 
     if (type === 'turnstile') {
       // Turnstile 不需要服务端生成 challenge
+      const salt = generateId()
       await run(
         db,
-        `INSERT INTO captcha_sessions (session_id, type, ip, answer_hash, expires_at)
-         VALUES (?, ?, ?, ?, ?)`,
-        [sessionId, 'turnstile', ip, '', expiresAt]
+        `INSERT INTO captcha_sessions (session_id, type, ip, challenge, answer_hash, salt, created_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [sessionId, 'turnstile', ip, '', '', salt, now, expiresAt]
       )
       return { sessionId, type: 'turnstile', challenge: null, ttl: CHALLENGE_TTL_S }
     }
@@ -140,12 +141,18 @@ export const captchaService = {
     // Quantum challenge
     const order = shuffleArray(QUANTUM_NODES.map(n => n.id))
     const answerHash = await sha256(order.join(','))
+    const salt = generateId()
+    const challengeData = JSON.stringify({
+      nodes: QUANTUM_NODES,
+      width: QUANTUM_WIDTH,
+      height: QUANTUM_HEIGHT,
+    })
 
     await run(
       db,
-      `INSERT INTO captcha_sessions (session_id, type, ip, answer_hash, expires_at)
-       VALUES (?, ?, ?, ?, ?)`,
-      [sessionId, 'quantum', ip, answerHash, expiresAt]
+      `INSERT INTO captcha_sessions (session_id, type, ip, challenge, answer_hash, salt, created_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [sessionId, 'quantum', ip, challengeData, answerHash, salt, now, expiresAt]
     )
 
     return {
