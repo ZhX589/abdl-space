@@ -275,9 +275,22 @@ export interface Env {
   abdl_space_db: D1Database
   JWT_SECRET: string
   FRONTEND_ORIGIN?: string
-  RESEND_API_KEY: string
+  // 腾讯云 SES
+  TENCENT_SECRET_ID: string
+  TENCENT_SECRET_KEY: string
+  SES_FROM_EMAIL: string
+  SES_TEMPLATE_ID: string
+  // NBW OAuth
+  NBW_CLIENT_ID?: string
+  NBW_CLIENT_SECRET?: string
+  NBW_REDIRECT_URI?: string
+  NBW_CLIENT_ID_MOBILE?: string
+  NBW_CLIENT_SECRET_MOBILE?: string
+  NBW_REDIRECT_URI_MOBILE?: string
+  // 其他
   TURNSTILE_SITE_KEY?: string
   TURNSTILE_SECRET_KEY?: string
+  DEEPSEEK_API_KEY?: string
   ENCRYPT_KEY?: string
 }
 

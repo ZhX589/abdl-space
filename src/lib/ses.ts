@@ -1,12 +1,17 @@
 /**
  * 腾讯云 SES 邮件发送（TC3-HMAC-SHA256 签名）
  * 替代 Resend，用于发送验证码等触发类邮件
+ *
+ * 参考文档：
+ * - SendEmail: https://cloud.tencent.com/document/api/1288/51034
+ * - 签名方法 v3: https://cloud.tencent.com/document/api/1288/51058
  */
 
 const SES_HOST = 'ses.tencentcloudapi.com'
 const SES_SERVICE = 'ses'
 const SES_VERSION = '2020-10-02'
 const SES_REGION = 'ap-guangzhou'
+const FETCH_TIMEOUT_MS = 10_000
 
 /** HMAC-SHA256 */
 async function hmacSha256(key: ArrayBuffer | Uint8Array | string, data: string): Promise<ArrayBuffer> {
@@ -29,7 +34,7 @@ function toHex(buf: ArrayBuffer): string {
 
 /**
  * TC3-HMAC-SHA256 签名
- * @returns Authorization header value
+ * @returns HTTP headers（含 Authorization）
  */
 async function signRequest(
   secretId: string,
@@ -56,7 +61,7 @@ async function signRequest(
   const hashedCanonical = await sha256Hex(canonicalRequest)
   const stringToSign = `TC3-HMAC-SHA256\n${timestamp}\n${credentialScope}\n${hashedCanonical}`
 
-  // 3. Signature
+  // 3. Signature（三层 HMAC 链）
   const secretDate = await hmacSha256(`TC3${secretKey}`, dateStr)
   const secretService = await hmacSha256(secretDate, SES_SERVICE)
   const secretSigning = await hmacSha256(secretService, 'tc3_request')
@@ -73,21 +78,35 @@ async function signRequest(
   }
 }
 
+export interface SESConfig {
+  TENCENT_SECRET_ID: string
+  TENCENT_SECRET_KEY: string
+  SES_FROM_EMAIL: string
+}
+
 /**
  * 发送模板邮件
  * @param to - 收件人邮箱
  * @param subject - 邮件主题
  * @param templateId - 腾讯云 SES 模板 ID
  * @param templateData - 模板变量 JSON 字符串，如 '{"code":"123456"}'
- * @param env - 环境变量（需含 TENCENT_SECRET_ID, TENCENT_SECRET_KEY, SES_FROM_EMAIL）
+ * @param env - SES 配置
  */
 export async function sendTencentEmail(
   to: string,
   subject: string,
   templateId: number,
   templateData: string,
-  env: { TENCENT_SECRET_ID: string; TENCENT_SECRET_KEY: string; SES_FROM_EMAIL: string }
+  env: SESConfig
 ): Promise<{ messageId: string; requestId: string }> {
+  // P2 #3: 显式检查 env，缺失时给明确错误
+  if (!env.TENCENT_SECRET_ID || !env.TENCENT_SECRET_KEY || !env.SES_FROM_EMAIL) {
+    throw new Error('SES env missing: TENCENT_SECRET_ID / TENCENT_SECRET_KEY / SES_FROM_EMAIL')
+  }
+  if (!templateId || isNaN(templateId)) {
+    throw new Error('SES_TEMPLATE_ID is missing or not a number')
+  }
+
   const timestamp = Math.floor(Date.now() / 1000)
   const payload = JSON.stringify({
     FromEmailAddress: env.SES_FROM_EMAIL,
@@ -108,14 +127,30 @@ export async function sendTencentEmail(
     timestamp
   )
 
-  const res = await fetch(`https://${SES_HOST}`, {
-    method: 'POST',
-    headers,
-    body: payload,
-  })
+  // P2 #4: fetch 超时 + json 解析保护
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
 
-  const data = await res.json() as {
-    Response?: { MessageId?: string; RequestId?: string; Error?: { Code: string; Message: string } }
+  let res: Response
+  try {
+    res = await fetch(`https://${SES_HOST}`, {
+      method: 'POST',
+      headers,
+      body: payload,
+      signal: controller.signal,
+    })
+  } catch (e) {
+    clearTimeout(timeout)
+    throw new Error(`SES fetch failed: ${e instanceof Error ? e.message : 'timeout'}`)
+  }
+  clearTimeout(timeout)
+
+  let data: { Response?: { MessageId?: string; RequestId?: string; Error?: { Code: string; Message: string } } }
+  try {
+    data = await res.json()
+  } catch {
+    const text = await res.text().catch(() => '')
+    throw new Error(`SES invalid response (${res.status}): ${text.slice(0, 200)}`)
   }
 
   if (!res.ok || data.Response?.Error) {
