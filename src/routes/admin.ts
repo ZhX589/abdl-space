@@ -421,4 +421,69 @@ admin.delete('/brands/:id', adminMiddleware, async (c) => {
   return c.json({ message: '删除成功' })
 })
 
+// ============================================================
+// GET /api/admin/security/logs — 安全日志列表
+// ============================================================
+admin.get('/security/logs', async (c) => {
+  const db = c.env.abdl_space_db
+  const page = Number(c.req.query('page') || '1')
+  const limit = Math.min(Number(c.req.query('limit') || '50'), 200)
+  const eventType = c.req.query('type') || ''
+  const offset = (page - 1) * limit
+
+  let where = '1=1'
+  const params: any[] = []
+  if (eventType) { where += ' AND event_type = ?'; params.push(eventType) }
+
+  const total = await queryOne<{ cnt: number }>(db, `SELECT COUNT(*) as cnt FROM security_logs WHERE ${where}`, params)
+  const logs = await query(db,
+    `SELECT * FROM security_logs WHERE ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+    [...params, limit, offset]
+  )
+  return c.json({ logs, total: total?.cnt || 0, page, limit })
+})
+
+// ============================================================
+// GET /api/admin/security/stats — 安全统计
+// ============================================================
+admin.get('/security/stats', async (c) => {
+  const db = c.env.abdl_space_db
+  const now = Math.floor(Date.now() / 1000)
+  const dayAgo = now - 86400
+  const weekAgo = now - 604800
+
+  const [dayCount, weekCount, typeStats, scoreDistribution] = await Promise.all([
+    queryOne<{ cnt: number }>(db, 'SELECT COUNT(*) as cnt FROM security_logs WHERE created_at > ?', [dayAgo]),
+    queryOne<{ cnt: number }>(db, 'SELECT COUNT(*) as cnt FROM security_logs WHERE created_at > ?', [weekAgo]),
+    query(db, 'SELECT event_type, COUNT(*) as cnt FROM security_logs WHERE created_at > ? GROUP BY event_type ORDER BY cnt DESC', [weekAgo]),
+    query(db, `SELECT
+      CASE
+        WHEN score < 20 THEN 'critical'
+        WHEN score < 40 THEN 'warning'
+        WHEN score < 60 THEN 'info'
+        ELSE 'normal'
+      END as level,
+      COUNT(*) as cnt
+    FROM security_logs WHERE created_at > ? GROUP BY level`, [weekAgo]),
+  ])
+
+  // 24小时趋势（每小时）
+  const trend = await query(db,
+    `SELECT
+      CAST((created_at / 3600) * 3600 AS INTEGER) as hour,
+      COUNT(*) as cnt
+    FROM security_logs WHERE created_at > ?
+    GROUP BY hour ORDER BY hour`,
+    [dayAgo]
+  )
+
+  return c.json({
+    dayCount: dayCount?.cnt || 0,
+    weekCount: weekCount?.cnt || 0,
+    typeStats: typeStats || [],
+    scoreDistribution: scoreDistribution || [],
+    trend: trend || [],
+  })
+})
+
 export default admin
