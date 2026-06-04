@@ -1,6 +1,6 @@
 import type { Context, Next } from 'hono'
 import type { Env, JWTPayload } from '../types/index.ts'
-import { verifyCaptchaToken } from '../lib/captcha.ts'
+import { verifyToken } from '../lib/captcha.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
@@ -17,7 +17,7 @@ export async function captchaMiddleware(c: Context<AppType>, next: Next) {
     return c.json({ error: '请完成人机验证', code: 'CAPTCHA_REQUIRED' }, 403)
   }
 
-  const valid = await verifyCaptchaToken(token, c.env.JWT_SECRET)
+  const valid = await verifyToken(token, c.env.JWT_SECRET)
 
   if (!valid) {
     return c.json({ error: '验证令牌无效或已过期，请重新验证', code: 'CAPTCHA_INVALID' }, 403)

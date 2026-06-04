@@ -424,7 +424,7 @@ admin.delete('/brands/:id', adminMiddleware, async (c) => {
 // ============================================================
 // GET /api/admin/security/logs — 安全日志列表
 // ============================================================
-admin.get('/security/logs', async (c) => {
+admin.get('/security/logs', adminMiddleware, async (c) => {
   const db = c.env.abdl_space_db
   const page = Number(c.req.query('page') || '1')
   const limit = Math.min(Number(c.req.query('limit') || '50'), 200)
@@ -446,7 +446,7 @@ admin.get('/security/logs', async (c) => {
 // ============================================================
 // GET /api/admin/security/stats — 安全统计
 // ============================================================
-admin.get('/security/stats', async (c) => {
+admin.get('/security/stats', adminMiddleware, async (c) => {
   const db = c.env.abdl_space_db
   const now = Math.floor(Date.now() / 1000)
   const dayAgo = now - 86400

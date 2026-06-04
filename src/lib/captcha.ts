@@ -201,19 +201,26 @@ function createToken(sessionId: string, secret: string): string {
     exp: now + TOKEN_TTL_S,
     type: 'captcha',
   })).replace(/=/g, '')
-  const data = `${header}.${payload}`
-  const sig = btoa(sessionId + secret + now).replace(/=/g, '').slice(0, 43)
-  return `${data}.${sig}`
+  return `${header}.${payload}`  // 签名在外部异步追加
 }
 
-export function verifyToken(token: string, secret: string): boolean {
+async function signToken(token: string, secret: string): Promise<string> {
+  const enc = new TextEncoder()
+  const key = await crypto.subtle.importKey('raw', enc.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
+  const sig = await crypto.subtle.sign('HMAC', key, enc.encode(token))
+  return btoa(String.fromCharCode(...new Uint8Array(sig))).replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_')
+}
+
+export async function verifyToken(token: string, secret: string): Promise<boolean> {
   try {
     const parts = token.split('.')
     if (parts.length !== 3) return false
     const payload = JSON.parse(atob(parts[1]))
     if (payload.exp < Math.floor(Date.now() / 1000)) return false
     if (payload.type !== 'captcha') return false
-    return true
+    // 验证 HMAC 签名
+    const expected = await signToken(`${parts[0]}.${parts[1]}`, secret)
+    return parts[2] === expected
   } catch {
     return false
   }
@@ -378,11 +385,10 @@ export const captchaService = {
     if (ctx && session.challenge) {
       try {
         const challengeData = JSON.parse(session.challenge)
-        const order = answer.split(',')
-        const ctxValid = await verifyContextToken(ctx, sessionId, challengeData.nodes, order, secret)
-        if (!ctxValid) {
-          // 上下文不匹配 → 高度可疑，记录但不直接拒绝（降分）
+        const storedCtx = challengeData.ctx
+        if (storedCtx && ctx !== storedCtx) {
           console.warn(`[Captcha] Context mismatch for session ${sessionId.slice(0, 8)}`)
+          await logSuspiciousBehavior(db, sessionId, 'context_mismatch', behavior, 0)
         }
       } catch {
         // 解析失败，忽略
@@ -393,14 +399,15 @@ export const captchaService = {
     if (behaviorScore < 30) {
       console.warn(`[Captcha] Low behavior score (${behaviorScore}) for session ${sessionId.slice(0, 8)}`)
       // 可以选择直接拒绝，或记录到数据库
-      await logSuspiciousBehavior(db, sessionId, behavior, behaviorScore)
+      await logSuspiciousBehavior(db, sessionId, 'low_behavior_score', behavior, behaviorScore)
     }
 
     const answerHash = await sha256(answer.trim())
     if (answerHash === session.answer_hash) {
       await run(db, 'UPDATE captcha_sessions SET used = 1 WHERE session_id = ?', [sessionId])
       const token = createToken(sessionId, secret)
-      return { success: true, token, behaviorScore }
+      const signedToken = await signToken(token, secret)
+      return { success: true, token: signedToken, behaviorScore }
     }
 
     const newAttempts = session.attempts + 1
@@ -432,21 +439,23 @@ export const captchaService = {
 async function logSuspiciousBehavior(
   db: D1Database,
   sessionId: string,
+  eventType: string,
   behavior: BehaviorData | undefined,
   score: number
 ): Promise<void> {
   try {
     await run(
       db,
-      `INSERT INTO security_logs (session_id, event_type, score, details, created_at)
-       VALUES (?, ?, ?, ?, ?)`,
+      `INSERT INTO security_logs (session_id, event_type, score, ip, user_agent, details, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [
         sessionId,
-        'low_behavior_score',
+        eventType,
         score,
+        '',
+        behavior?.screen || '',
         JSON.stringify({
           behavior: behavior || null,
-          ua: behavior?.screen || '',
           tz: behavior?.tz || '',
         }),
         Math.floor(Date.now() / 1000),
