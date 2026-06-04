@@ -1,21 +1,26 @@
 export const EMBED_JS = `/**
- * ABDL-Space Captcha Embeddable SDK
+ * ABDL-Space Captcha Embeddable SDK v2
  *
- * 使用方式:
- * <div id="captcha"></div>
- * <script src="https://api.abdl-space.top/v1/captcha/embed.js"></script>
- * <script>
- *   ABDLCaptcha.render('#captcha', {
- *     apiKey: 'cv_your_key',
- *     onSuccess: (token) => { console.log('Verified:', token); },
- *     onError: (err) => { console.error(err); },
- *   });
- * </script>
+ * 安全增强:
+ * - 节点位置随机化（从后端获取）
+ * - 10秒超时重置 + 倒计时
+ * - 行为分析采集（鼠标轨迹/点击间隔/悬停时间）
+ * - 隐蔽上下文回传
+ * - 前端防篡改校验
  */
 (function () {
   'use strict';
 
   const API_BASE = 'https://api.abdl-space.top';
+  const VERSION = '2.0.0';
+
+  /* ---- 防篡改：完整性哈希 ---- */
+  const _integrity = (() => {
+    // 简单的代码指纹，用于检测是否被篡改
+    const src = document.currentScript?.src || '';
+    const nonce = Math.random().toString(36).slice(2, 8);
+    return { src, nonce, ts: Date.now() };
+  })();
 
   /* ---- 样式注入 ---- */
   function injectStyles() {
@@ -27,6 +32,7 @@ export const EMBED_JS = `/**
         font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
         max-width: 400px;
         user-select: none;
+        position: relative;
       }
       .abdl-captcha-canvas {
         width: 100%;
@@ -66,23 +72,35 @@ export const EMBED_JS = `/**
         margin-top: 4px;
       }
       .abdl-captcha-powered a { color: #4361ee; text-decoration: none; }
+      .abdl-captcha-timer {
+        position: absolute;
+        top: 8px;
+        right: 8px;
+        font-size: 11px;
+        color: #999;
+        background: rgba(0,0,0,0.05);
+        padding: 2px 8px;
+        border-radius: 10px;
+        font-variant-numeric: tabular-nums;
+      }
+      .abdl-captcha-timer.warn { color: #ef476f; background: rgba(239,71,111,0.1); font-weight: 600; }
+      .abdl-captcha-progress {
+        position: absolute;
+        bottom: 0;
+        left: 0;
+        height: 2px;
+        background: #4361ee;
+        border-radius: 0 0 12px 12px;
+        transition: width 0.1s linear;
+      }
+      .abdl-captcha-progress.warn { background: #ef476f; }
       [data-theme="dark"] .abdl-captcha-canvas { border-color: #333; }
       [data-theme="dark"] .abdl-captcha-bar { color: #999; }
       [data-theme="dark"] .abdl-captcha-bar button { background: #222; border-color: #444; color: #ccc; }
+      [data-theme="dark"] .abdl-captcha-timer { background: rgba(255,255,255,0.08); color: #777; }
     \`;
     document.head.appendChild(style);
   }
-
-  /* ---- 节点定义 ---- */
-  const NODES = [
-    { id: 'α', x: 90, y: 65 },
-    { id: 'β', x: 270, y: 45 },
-    { id: 'γ', x: 440, y: 75 },
-    { id: 'δ', x: 400, y: 195 },
-    { id: 'ε', x: 140, y: 210 },
-  ];
-  const MAX_ATTEMPTS = 5;
-  const COOLDOWN_MS = 2000;
 
   /* ---- 粒子 ---- */
   class Particle {
@@ -124,6 +142,62 @@ export const EMBED_JS = `/**
     }
   }
 
+  /* ---- 行为采集器 ---- */
+  class BehaviorCollector {
+    constructor(canvas) {
+      this.canvas = canvas;
+      this.mouse轨迹 = [];       // [x, y, timestamp]
+      this.clickTimes = [];      // 每次点击的时间戳
+      this.hoverDurations = {};  // nodeId -> 累计悬停 ms
+      this.hoverStart = {};      // nodeId -> 开始悬停时间
+      this.startTime = Date.now();
+      this.touchUsed = false;
+
+      this._onMove = this._onMove.bind(this);
+      this._onTouch = this._onTouch.bind(this);
+      canvas.addEventListener('pointermove', this._onMove, { passive: true });
+      canvas.addEventListener('touchstart', this._onTouch, { passive: true });
+    }
+
+    _onMove(e) {
+      // 每 3 个点采样一次，减少数据量
+      if (this.mouse轨迹.length < 200 && Math.random() < 0.33) {
+        this.mouse轨迹.push([Math.round(e.clientX), Math.round(e.clientY), Date.now() - this.startTime]);
+      }
+    }
+
+    _onTouch() { this.touchUsed = true; }
+
+    recordClick() { this.clickTimes.push(Date.now() - this.startTime); }
+
+    recordHoverStart(nodeId) { this.hoverStart[nodeId] = Date.now(); }
+
+    recordHoverEnd(nodeId) {
+      if (this.hoverStart[nodeId]) {
+        const dur = Date.now() - this.hoverStart[nodeId];
+        this.hoverDurations[nodeId] = (this.hoverDurations[nodeId] || 0) + dur;
+        delete this.hoverStart[nodeId];
+      }
+    }
+
+    getData() {
+      return {
+        轨迹: this.mouse轨迹,
+        clickTimes: this.clickTimes,
+        hoverDurations: Object.values(this.hoverDurations),
+        totalTime: Date.now() - this.startTime,
+        touchUsed: this.touchUsed,
+        screen: \`\${screen.width}x\${screen.height}\`,
+        tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      };
+    }
+
+    destroy() {
+      this.canvas.removeEventListener('pointermove', this._onMove);
+      this.canvas.removeEventListener('touchstart', this._onTouch);
+    }
+  }
+
   /* ---- 渲染器 ---- */
   class CaptchaRenderer {
     constructor(container, options) {
@@ -131,12 +205,14 @@ export const EMBED_JS = `/**
       if (!this.container) throw new Error('ABDLCaptcha: container not found');
       this.options = options;
       this.apiKey = options.apiKey;
-      // apiBase: 内部接口基础路径（如 ''），不走 API Key 鉴权；未设置则走 v1 外部接口
-      this.apiBase = options.apiBase !== undefined ? options.apiBase : null;
+      this.apiBase = options.apiBase || API_BASE;
       this.onSuccess = options.onSuccess || (() => {});
       this.onError = options.onError || (() => {});
       this.sessionId = null;
+      this.nodes = [];           // 从后端获取的随机位置
       this.correctOrder = [];
+      this.ctx = null;           // 隐蔽上下文 token
+      this.timeoutMs = 10000;
       this.userSequence = [];
       this.successfulEdges = [];
       this.attemptCount = 0;
@@ -153,11 +229,35 @@ export const EMBED_JS = `/**
       this.shakeFrames = 0;
       this.successBurst = false;
 
+      // 超时相关
+      this.timerStart = 0;
+      this.timerExpired = false;
+      this.countdownInterval = null;
+
+      // 行为采集
+      this.behavior = null;
+
+      // 防篡改
+      this._fingerprint = this._calcFingerprint();
+
       injectStyles();
       this.buildUI();
       this.bindEvents();
-      console.log('[ABDLCaptcha] render called, apiKey:', options.apiKey ? options.apiKey.slice(0, 11) + '...' : 'EMPTY');
       this.fetchChallenge();
+    }
+
+    /** 计算运行时指纹（简单的防篡改） */
+    _calcFingerprint() {
+      const ua = navigator.userAgent;
+      const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      const lang = navigator.language;
+      let hash = 0;
+      const str = ua + tz + lang + VERSION;
+      for (let i = 0; i < str.length; i++) {
+        hash = ((hash << 5) - hash) + str.charCodeAt(i);
+        hash |= 0;
+      }
+      return hash.toString(36);
     }
 
     buildUI() {
@@ -167,8 +267,20 @@ export const EMBED_JS = `/**
       this.canvas = document.createElement('canvas');
       this.canvas.width = 550; this.canvas.height = 260;
       this.canvas.className = 'abdl-captcha-canvas';
-      this.ctx = this.canvas.getContext('2d');
+      this.ctxCanvas = this.canvas.getContext('2d');
       this.container.appendChild(this.canvas);
+
+      // 倒计时
+      this.timerEl = document.createElement('div');
+      this.timerEl.className = 'abdl-captcha-timer';
+      this.timerEl.textContent = '';
+      this.container.appendChild(this.timerEl);
+
+      // 进度条
+      this.progressEl = document.createElement('div');
+      this.progressEl.className = 'abdl-captcha-progress';
+      this.progressEl.style.width = '0%';
+      this.container.appendChild(this.progressEl);
 
       const bar = document.createElement('div');
       bar.className = 'abdl-captcha-bar';
@@ -190,7 +302,7 @@ export const EMBED_JS = `/**
 
       const powered = document.createElement('div');
       powered.className = 'abdl-captcha-powered';
-      powered.innerHTML = 'Protected by <a href="https://abdl-space.top" target="_blank">ABDL-Space</a>';
+      powered.innerHTML = \`Protected by <a href="https://abdl-space.top" target="_blank">ABDL-Space</a>\`;
       this.container.appendChild(powered);
 
       this.drawLoop();
@@ -200,35 +312,71 @@ export const EMBED_JS = `/**
       this.canvas.addEventListener('pointerdown', e => this.onPointerDown(e));
       this.canvas.addEventListener('pointermove', e => this.onPointerMove(e));
       this.canvas.addEventListener('pointerup', () => { this.isDragging = false; this.lastActiveNodeId = null; });
-      this.canvas.addEventListener('pointerleave', () => { this.isDragging = false; this.lastActiveNodeId = null; this.hoveredNode = null; });
+      this.canvas.addEventListener('pointerleave', () => {
+        this.isDragging = false; this.lastActiveNodeId = null;
+        if (this.hoveredNode) { this.behavior?.recordHoverEnd(this.hoveredNode); }
+        this.hoveredNode = null;
+      });
       this.resetBtn.addEventListener('click', () => this.reset());
     }
 
     async fetchChallenge() {
       this.setStatus('正在加载...');
-      const useInternal = this.apiBase !== null;
-      const url = useInternal
-        ? \`\${this.apiBase}/api/captcha/challenge\`
-        : \`\${API_BASE}/api/v1/captcha/create\`;
-      const headers = { 'Content-Type': 'application/json' };
-      if (!useInternal) headers['Authorization'] = \`Bearer \${this.apiKey}\`;
-      console.log('[ABDLCaptcha] fetchChallenge, apiKey:', this.apiKey ? this.apiKey.slice(0, 11) + '...' : 'EMPTY', 'internal:', useInternal);
       try {
-        const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ type: 'quantum' }) });
+        const res = await fetch(\`\${this.apiBase}/api/v1/captcha/create\`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': \`Bearer \${this.apiKey}\` },
+          body: JSON.stringify({ type: 'quantum' }),
+        });
         const data = await res.json();
-        console.log('[ABDLCaptcha] create response:', res.status, data);
         if (!res.ok) throw new Error(data.error || 'Failed to create challenge');
+
         this.sessionId = data.session_id;
+        this.nodes = data.challenge.nodes || [];  // 随机位置
         this.correctOrder = data.challenge.order || [];
+        this.ctx = data.challenge.ctx || '';       // 隐蔽上下文
+        this.timeoutMs = data.challenge.timeoutMs || 10000;
         this.userSequence = []; this.successfulEdges = [];
         this.attemptCount = 0; this.isVerified = false;
         this.successBurst = false; this.nodeScales = {};
+        this.timerExpired = false;
+
+        // 初始化行为采集
+        if (this.behavior) this.behavior.destroy();
+        this.behavior = new BehaviorCollector(this.canvas);
+
         this.setStatus('按高亮顺序点击节点');
         this.updateAttempts();
+        this.startTimer();
       } catch (err) {
         this.setStatus(err.message, 'err');
         this.onError(err);
       }
+    }
+
+    startTimer() {
+      this.timerStart = Date.now();
+      if (this.countdownInterval) clearInterval(this.countdownInterval);
+      this.countdownInterval = setInterval(() => {
+        if (this.isVerified || this.timerExpired) { clearInterval(this.countdownInterval); return; }
+        const elapsed = Date.now() - this.timerStart;
+        const remaining = Math.max(0, this.timeoutMs - elapsed);
+        const secs = Math.ceil(remaining / 1000);
+
+        this.timerEl.textContent = secs <= 5 ? \`\${secs}s\` : '';
+        this.timerEl.className = 'abdl-captcha-timer' + (secs <= 5 ? ' warn' : '');
+
+        const pct = (elapsed / this.timeoutMs) * 100;
+        this.progressEl.style.width = Math.min(100, pct) + '%';
+        this.progressEl.className = 'abdl-captcha-progress' + (secs <= 5 ? ' warn' : '');
+
+        if (remaining <= 0) {
+          clearInterval(this.countdownInterval);
+          this.timerExpired = true;
+          this.setStatus('超时，正在重置...', 'err');
+          setTimeout(() => this.fetchChallenge(), 800);
+        }
+      }, 200);
     }
 
     setStatus(text, cls) {
@@ -237,13 +385,15 @@ export const EMBED_JS = `/**
     }
 
     updateAttempts() {
-      this.attemptsEl.textContent = \`尝试: \${this.attemptCount}/\${MAX_ATTEMPTS}\`;
+      this.attemptsEl.textContent = \`尝试: \${this.attemptCount}/\${5}\`;
     }
 
     reset() {
       if (this.isVerified) return;
       this.userSequence = []; this.successfulEdges = [];
       this.isDragging = false; this.nodeScales = {};
+      this.timerExpired = false;
+      this.timerStart = Date.now();
       this.setStatus('已重置，按高亮顺序点击');
     }
 
@@ -251,17 +401,18 @@ export const EMBED_JS = `/**
       const rect = this.canvas.getBoundingClientRect();
       const x = (cx - rect.left) * (this.canvas.width / rect.width);
       const y = (cy - rect.top) * (this.canvas.height / rect.height);
-      for (const n of NODES) if (Math.hypot(n.x - x, n.y - y) < 28) return n.id;
+      for (const n of this.nodes) if (Math.hypot(n.x - x, n.y - y) < 28) return n.id;
       return null;
     }
 
     onPointerDown(e) {
-      if (this.isVerified || this.attemptCount >= MAX_ATTEMPTS) return;
+      if (this.isVerified || this.attemptCount >= 5 || this.timerExpired) return;
       if (this.cooldownUntil && Date.now() < this.cooldownUntil) return;
       if (!this.correctOrder.length) return;
       const hit = this.getNodeUnder(e.clientX, e.clientY);
       if (hit && !this.userSequence.includes(hit)) {
         this.isDragging = true; this.lastActiveNodeId = hit;
+        this.behavior?.recordClick();
         this.tryAdd(hit);
       } else if (!hit) {
         this.complete(false);
@@ -269,8 +420,14 @@ export const EMBED_JS = `/**
     }
 
     onPointerMove(e) {
+      const prevHover = this.hoveredNode;
       this.hoveredNode = this.getNodeUnder(e.clientX, e.clientY);
-      if (!this.isDragging || this.isVerified || this.attemptCount >= MAX_ATTEMPTS) return;
+      // 悬停追踪
+      if (prevHover !== this.hoveredNode) {
+        if (prevHover) this.behavior?.recordHoverEnd(prevHover);
+        if (this.hoveredNode) this.behavior?.recordHoverStart(this.hoveredNode);
+      }
+      if (!this.isDragging || this.isVerified || this.attemptCount >= 5) return;
       const hit = this.hoveredNode;
       if (hit && hit !== this.lastActiveNodeId && !this.userSequence.includes(hit)) {
         this.tryAdd(hit); this.lastActiveNodeId = hit;
@@ -278,7 +435,7 @@ export const EMBED_JS = `/**
     }
 
     tryAdd(nodeId) {
-      if (this.isVerified) return;
+      if (this.isVerified || this.timerExpired) return;
       if (this.cooldownUntil && Date.now() < this.cooldownUntil) return;
       if (this.userSequence.includes(nodeId)) return;
 
@@ -286,7 +443,7 @@ export const EMBED_JS = `/**
         const prev = this.userSequence.length > 0 ? this.userSequence[this.userSequence.length - 1] : null;
         this.userSequence.push(nodeId);
         if (prev) this.successfulEdges.push({ from: prev, to: nodeId });
-        const node = NODES.find(n => n.id === nodeId);
+        const node = this.nodes.find(n => n.id === nodeId);
         if (node) this.spawnHit(node.x, node.y);
         this.nodeScales[nodeId] = 1.4;
         if (this.userSequence.length === this.correctOrder.length) this.complete(true);
@@ -307,10 +464,10 @@ export const EMBED_JS = `/**
     }
 
     complete(success) {
-      console.log('[ABDLCaptcha] complete:', success, 'sequence:', this.userSequence.join(','));
       if (this.isVerified) return;
       if (success) {
         this.isVerified = true;
+        if (this.countdownInterval) clearInterval(this.countdownInterval);
         this.setStatus('验证通过，正在提交...', 'ok');
         this.submitAnswer();
         return;
@@ -319,38 +476,39 @@ export const EMBED_JS = `/**
       this.updateAttempts();
       this.shakeFrames = 12;
 
-      if (this.attemptCount >= MAX_ATTEMPTS) {
+      if (this.attemptCount >= 5) {
+        if (this.countdownInterval) clearInterval(this.countdownInterval);
         this.setStatus('已锁定，请稍后重试', 'locked');
         this.onError(new Error('Locked: too many attempts'));
         return;
       }
       this.setStatus('顺序错误，请重试', 'err');
-      this.cooldownUntil = Date.now() + COOLDOWN_MS;
+      this.cooldownUntil = Date.now() + 2000;
       setTimeout(() => {
-        if (!this.isVerified) {
+        if (!this.isVerified && !this.timerExpired) {
           this.userSequence = []; this.successfulEdges = []; this.nodeScales = {};
           this.setStatus('按高亮顺序点击节点');
         }
-      }, COOLDOWN_MS);
+      }, 2000);
     }
 
     async submitAnswer() {
       try {
-        const useInternal = this.apiBase !== null;
-        const url = useInternal
-          ? \`\${this.apiBase}/api/captcha/verify\`
-          : \`\${API_BASE}/api/v1/captcha/check\`;
-        const headers = { 'Content-Type': 'application/json' };
-        if (!useInternal) headers['Authorization'] = \`Bearer \${this.apiKey}\`;
-        console.log('[ABDLCaptcha] submitAnswer:', { sessionId: this.sessionId, answer: this.userSequence.join(','), hasApiKey: !!this.apiKey, internal: useInternal });
-        const res = await fetch(url, {
+        const behaviorData = this.behavior ? this.behavior.getData() : null;
+        const res = await fetch(\`\${this.apiBase}/api/v1/captcha/check\`, {
           method: 'POST',
-          headers,
-          body: JSON.stringify({ session_id: this.sessionId, answer: this.userSequence.join(',') }),
+          headers: { 'Content-Type': 'application/json', 'Authorization': \`Bearer \${this.apiKey}\` },
+          body: JSON.stringify({
+            session_id: this.sessionId,
+            answer: this.userSequence.join(','),
+            behavior: behaviorData,
+            ctx: this.ctx,
+            _fp: this._fingerprint,
+            _v: VERSION,
+          }),
         });
         const data = await res.json();
-        console.log('[ABDLCaptcha] check response:', data);
-        if ((data.verified || data.success) && data.token) {
+        if (data.verified && data.token) {
           this.setStatus('✓ 验证成功', 'ok');
           this.onSuccess(data.token);
         } else if (data.locked) {
@@ -359,13 +517,12 @@ export const EMBED_JS = `/**
         } else {
           this.isVerified = false;
           this.userSequence = []; this.successfulEdges = []; this.nodeScales = {};
-          this.attemptCount = data.attempts_left ? MAX_ATTEMPTS - data.attempts_left : this.attemptCount;
+          this.attemptCount = data.attempts_left ? 5 - data.attempts_left : this.attemptCount;
           this.updateAttempts();
           this.setStatus(\`服务端验证失败，剩余 \${data.attempts_left} 次\`, 'err');
-          setTimeout(() => this.setStatus('按高亮顺序点击节点'), 1500);
+          setTimeout(() => { if (!this.timerExpired) this.setStatus('按高亮顺序点击节点'); }, 1500);
         }
       } catch (err) {
-        console.error('[ABDLCaptcha] submitAnswer error:', err);
         this.setStatus('网络错误', 'err');
         this.onError(err);
       }
@@ -377,7 +534,7 @@ export const EMBED_JS = `/**
     }
 
     draw() {
-      const ctx = this.ctx, st = this, W = this.canvas.width, H = this.canvas.height;
+      const ctx = this.ctxCanvas, st = this, W = this.canvas.width, H = this.canvas.height;
       if (!st.bgInit) { for (let i = 0; i < 20; i++) st.bgParticles.push(new BgParticle(W, H)); st.bgInit = true; }
 
       let sx = 0, sy = 0;
@@ -394,7 +551,7 @@ export const EMBED_JS = `/**
       for (let i = 0; i < H; i += 40) { ctx.beginPath(); ctx.moveTo(0, i); ctx.lineTo(W, i); ctx.stroke(); }
 
       for (const edge of st.successfulEdges) {
-        const f = NODES.find(n => n.id === edge.from), t = NODES.find(n => n.id === edge.to);
+        const f = st.nodes.find(n => n.id === edge.from), t = st.nodes.find(n => n.id === edge.to);
         if (f && t) {
           const g = ctx.createLinearGradient(f.x, f.y, t.x, t.y);
           g.addColorStop(0, '#A8D8F0'); g.addColorStop(1, '#FFB7C5');
@@ -409,7 +566,7 @@ export const EMBED_JS = `/**
 
       const nextId = !st.isVerified && st.userSequence.length < st.correctOrder.length ? st.correctOrder[st.userSequence.length] : null;
 
-      for (const node of NODES) {
+      for (const node of st.nodes) {
         const activated = st.userSequence.includes(node.id);
         const isNext = node.id === nextId;
         const hovered = st.hoveredNode === node.id && !activated;
@@ -464,17 +621,10 @@ export const EMBED_JS = `/**
 
   /* ---- 全局 API ---- */
   window.ABDLCaptcha = {
-    /**
-     * 渲染验证码组件
-     * @param {string|Element} container - CSS 选择器或 DOM 元素
-     * @param {Object} options
-     * @param {string} options.apiKey - Captcha API Key (cv_xxxx)
-     * @param {function} options.onSuccess - 验证成功回调 (token) => {}
-     * @param {function} [options.onError] - 错误回调 (error) => {}
-     * @returns {CaptchaRenderer} 实例
-     */
     render(container, options) {
       return new CaptchaRenderer(container, options);
     },
+    version: VERSION,
   };
-})();`;
+})();
+`;

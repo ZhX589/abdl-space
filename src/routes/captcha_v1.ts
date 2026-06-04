@@ -77,7 +77,7 @@ captchaV1.post('/create', async (c) => {
 
   const ip = getClientIp(c)
   try {
-    const result = await captchaService.createChallenge(c.env.abdl_space_db, type, ip)
+    const result = await captchaService.createChallenge(c.env.abdl_space_db, type, ip, c.env.JWT_SECRET)
     return c.json({
       session_id: result.sessionId,
       type: result.type,
@@ -108,10 +108,10 @@ captchaV1.post('/check', async (c) => {
 
   c.executionCtx.waitUntil(recordKeyUsage(c.env.abdl_space_db, keyInfo.keyId!))
 
-  let body: { session_id?: string; answer?: string }
+  let body: { session_id?: string; answer?: string; behavior?: any; ctx?: string }
   try { body = await c.req.json() } catch { return c.json({ error: 'Invalid body' }, 400) }
 
-  const { session_id, answer } = body
+  const { session_id, answer, behavior, ctx } = body
   if (!session_id || typeof answer !== 'string') {
     return c.json({ error: 'session_id and answer are required' }, 400)
   }
@@ -121,7 +121,9 @@ captchaV1.post('/check', async (c) => {
       c.env.abdl_space_db,
       session_id,
       answer,
-      c.env.JWT_SECRET
+      c.env.JWT_SECRET,
+      behavior,
+      ctx
     )
     return c.json({
       verified: result.success,
@@ -129,6 +131,7 @@ captchaV1.post('/check', async (c) => {
       attempts_left: result.attemptsLeft,
       locked: result.locked || undefined,
       lock_seconds: result.lockSeconds || undefined,
+      behavior_score: result.behaviorScore,
     })
   } catch (err) {
     console.error('v1 captcha check error:', err)
