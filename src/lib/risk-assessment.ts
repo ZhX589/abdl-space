@@ -65,21 +65,21 @@ export async function assessRisk(
 function calculateRiskLevel(factors: RiskFactors): RiskLevel {
   let score = 0
 
-  // 10 分钟内请求超过 10 次 → +30
-  if (factors.ipRequestCount > 10) score += 30
-  // 10 分钟内请求超过 5 次 → +15
-  else if (factors.ipRequestCount > 5) score += 15
+  // 10 分钟内请求超过 3 次 → +30
+  if (factors.ipRequestCount > 3) score += 30
+  // 10 分钟内请求超过 1 次 → +15
+  else if (factors.ipRequestCount > 1) score += 15
 
-  // 1 小时内失败超过 3 次 → +40
-  if (factors.ipFailureCount > 3) score += 40
-  // 1 小时内失败超过 1 次 → +20
-  else if (factors.ipFailureCount > 1) score += 20
+  // 1 小时内失败超过 1 次 → +40
+  if (factors.ipFailureCount > 1) score += 40
+  // 有失败记录 → +25
+  else if (factors.ipFailureCount > 0) score += 25
 
   // 可疑 User-Agent → +30
   if (factors.suspiciousUA) score += 30
 
-  // 阈值: 40 分以上为高风险
-  return score >= 40 ? 'high' : 'low'
+  // 阈值: 25 分以上为高风险（严格模式）
+  return score >= 25 ? 'high' : 'low'
 }
 
 /**
@@ -95,12 +95,14 @@ function isSuspiciousUA(ua: string | undefined): boolean {
     'curl', 'wget', 'python-requests', 'httpclient', 'java/',
     'go-http-client', 'node-fetch', 'axios', 'phantom', 'selenium',
     'headless', 'puppeteer', 'playwright', 'scrapy',
+    'bot', 'crawler', 'spider', 'http_', 'libwww', 'urllib',
+    'okhttp', 'apache-httpclient', 'winhttp', 'coldfusion',
   ]
 
   if (suspiciousPatterns.some(p => lower.includes(p))) return true
 
-  // UA 太短（< 20 字符）→ 可疑
-  if (ua.length < 20) return true
+  // UA 太短（< 50 字符）→ 可疑
+  if (ua.length < 50) return true
 
   return false
 }
