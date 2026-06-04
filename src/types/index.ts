@@ -280,6 +280,7 @@ export interface Env {
   TENCENT_SECRET_KEY: string
   SES_FROM_EMAIL: string
   SES_TEMPLATE_ID: string
+  SES_REGION?: string
   // NBW OAuth
   NBW_CLIENT_ID?: string
   NBW_CLIENT_SECRET?: string

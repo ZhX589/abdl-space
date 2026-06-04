@@ -10,7 +10,6 @@
 const SES_HOST = 'ses.tencentcloudapi.com'
 const SES_SERVICE = 'ses'
 const SES_VERSION = '2020-10-02'
-const SES_REGION = 'ap-guangzhou'
 const FETCH_TIMEOUT_MS = 10_000
 
 /** HMAC-SHA256 */
@@ -41,7 +40,8 @@ async function signRequest(
   secretKey: string,
   action: string,
   payload: string,
-  timestamp: number
+  timestamp: number,
+  region: string = 'ap-guangzhou'
 ): Promise<Record<string, string>> {
   const dateStr = new Date(timestamp * 1000).toISOString().slice(0, 10) // YYYY-MM-DD (UTC)
 
@@ -72,7 +72,7 @@ async function signRequest(
     'Host': SES_HOST,
     'X-TC-Action': action,
     'X-TC-Version': SES_VERSION,
-    'X-TC-Region': SES_REGION,
+    'X-TC-Region': region,
     'X-TC-Timestamp': String(timestamp),
     'Authorization': `TC3-HMAC-SHA256 Credential=${secretId}/${credentialScope}, SignedHeaders=content-type;host, Signature=${signature}`,
   }
@@ -82,6 +82,7 @@ export interface SESConfig {
   TENCENT_SECRET_ID: string
   TENCENT_SECRET_KEY: string
   SES_FROM_EMAIL: string
+  SES_REGION?: string
 }
 
 /**
@@ -107,6 +108,8 @@ export async function sendTencentEmail(
     throw new Error('SES_TEMPLATE_ID is missing or not a number')
   }
 
+  const region = env.SES_REGION || 'ap-guangzhou'
+
   const timestamp = Math.floor(Date.now() / 1000)
   const payload = JSON.stringify({
     FromEmailAddress: env.SES_FROM_EMAIL,
@@ -124,7 +127,8 @@ export async function sendTencentEmail(
     env.TENCENT_SECRET_KEY,
     'SendEmail',
     payload,
-    timestamp
+    timestamp,
+    region
   )
 
   // P2 #4: fetch 超时 + json 解析保护

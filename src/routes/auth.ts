@@ -165,7 +165,7 @@ auth.post('/send-code', async (c) => {
       subjects[type],
       Number(c.env.SES_TEMPLATE_ID),
       JSON.stringify({ code }),
-      { TENCENT_SECRET_ID: c.env.TENCENT_SECRET_ID, TENCENT_SECRET_KEY: c.env.TENCENT_SECRET_KEY, SES_FROM_EMAIL: c.env.SES_FROM_EMAIL }
+      { TENCENT_SECRET_ID: c.env.TENCENT_SECRET_ID, TENCENT_SECRET_KEY: c.env.TENCENT_SECRET_KEY, SES_FROM_EMAIL: c.env.SES_FROM_EMAIL, SES_REGION: c.env.SES_REGION }
     )
   } catch (err) {
     console.error('SES error:', err)
