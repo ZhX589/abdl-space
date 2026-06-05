@@ -215,6 +215,8 @@ export interface CreatePostRequest {
   images?: string[]
   content: string
   diaper_id?: number
+  repost_id?: number
+  is_announcement?: boolean
 }
 
 /** 创建帖子评论请求体 */

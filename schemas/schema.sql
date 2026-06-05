@@ -97,10 +97,15 @@ CREATE TABLE IF NOT EXISTS posts (
   content TEXT NOT NULL,                 -- 最长 5000
   diaper_id INTEGER,
   pinned INTEGER DEFAULT 0,
+  is_announcement INTEGER DEFAULT 0,     -- 公告帖子标记（仅管理员可发）
+  repost_id INTEGER,                     -- 转发的原帖ID
+  has_nsfw INTEGER DEFAULT 0,            -- 是否包含敏感图片
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (user_id) REFERENCES users(id),
-  FOREIGN KEY (diaper_id) REFERENCES diapers(id)
+  FOREIGN KEY (diaper_id) REFERENCES diapers(id),
+  FOREIGN KEY (repost_id) REFERENCES posts(id)
 );
+CREATE INDEX IF NOT EXISTS idx_posts_announcement ON posts(is_announcement, created_at DESC);
 
 -- 帖子评论表（支持一层嵌套回复）
 CREATE TABLE IF NOT EXISTS post_comments (

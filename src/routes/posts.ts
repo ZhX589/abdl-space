@@ -63,6 +63,7 @@ posts.get('/', async (c) => {
   const page = Math.max(1, parseInt(c.req.query('page') || '1'))
   const limit = Math.min(100, Math.max(1, parseInt(c.req.query('limit') || '20')))
   const search = c.req.query('search') || ''
+  const filter = c.req.query('filter') || '' // 'following' | 'announcements' | ''
 
   let userId: number | null = null
   const authHeader = c.req.header('Authorization')
@@ -77,9 +78,20 @@ posts.get('/', async (c) => {
   const conditions: string[] = []
   const params: unknown[] = []
 
+  // filter=following: 只看关注的人的帖子
+  if (filter === 'following') {
+    if (!userId) return c.json({ error: '请先登录' }, 401)
+    conditions.push('p.user_id IN (SELECT following_id FROM follows WHERE follower_id = ?)')
+    params.push(userId)
+  }
+
+  // filter=announcements: 只看公告
+  if (filter === 'announcements') {
+    conditions.push('p.is_announcement = 1')
+  }
+
   if (search) {
     conditions.push("p.content LIKE ? ESCAPE '\\'")
-    // BUG-550: Escape LIKE wildcards
     const escapedSearch = search.replace(/%/g, '\%').replace(/_/g, '\_')
     params.push(`%${escapedSearch}%`)
   }
@@ -95,14 +107,14 @@ posts.get('/', async (c) => {
   const offset = (page - 1) * limit
   const rows = await query<Record<string, unknown>>(
     c.env.abdl_space_db,
-    `SELECT p.id, p.user_id, p.content, p.diaper_id, p.pinned, p.repost_id, p.created_at,
+    `SELECT p.id, p.user_id, p.content, p.diaper_id, p.pinned, p.is_announcement, p.repost_id, p.created_at,
             u.username, u.avatar, u.role,
             (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
             (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count
      FROM posts p
      JOIN users u ON p.user_id = u.id
      ${whereClause}
-     ORDER BY p.pinned DESC, p.created_at DESC
+     ORDER BY p.is_announcement DESC, p.pinned DESC, p.created_at DESC
      LIMIT ? OFFSET ?`,
     [...params, limit, offset]
   )
@@ -173,6 +185,7 @@ posts.get('/', async (c) => {
     content: r.content,
     diaper_id: r.diaper_id ?? null,
     pinned: !!r.pinned,
+    is_announcement: !!r.is_announcement,
     repost_id: r.repost_id ?? null,
     repost: r.repost_id ? repostMap.get(r.repost_id as number) ?? null : null,
     like_count: r.like_count,
@@ -188,6 +201,34 @@ posts.get('/', async (c) => {
       page, limit,
       total: countResult[0].total,
       totalPages: Math.ceil(countResult[0].total / limit)
+    }
+  })
+})
+
+/**
+ * GET /api/posts/announcements/latest — 最新公告
+ */
+posts.get('/announcements/latest', async (c) => {
+  const post = await queryOne<Record<string, unknown>>(
+    c.env.abdl_space_db,
+    `SELECT p.id, p.user_id, p.content, p.created_at,
+            u.username, u.avatar, u.role
+     FROM posts p
+     JOIN users u ON p.user_id = u.id
+     WHERE p.is_announcement = 1
+     ORDER BY p.created_at DESC
+     LIMIT 1`
+  )
+  if (!post) return c.json({ announcement: null })
+
+  const images = await safeGetImages(c.env, post.id as number)
+  return c.json({
+    announcement: {
+      id: post.id,
+      user: { id: post.user_id, username: post.username, avatar: post.avatar ?? null, role: post.role },
+      content: post.content,
+      images: images.map(img => ({ image_url: img.image_url, is_nsfw: !!img.is_nsfw })),
+      created_at: post.created_at
     }
   })
 })
@@ -306,6 +347,10 @@ posts.get('/:id', async (c) => {
         images: origImages.map(img => ({ image_url: img.image_url, is_nsfw: !!img.is_nsfw })),
         created_at: origPost.created_at
       }
+    } else {
+      // 原帖已删除，清除 repost_id
+      await run(c.env.abdl_space_db, 'UPDATE posts SET repost_id = NULL WHERE id = ?', [postId])
+      post.repost_id = null
     }
   }
 
@@ -316,6 +361,7 @@ posts.get('/:id', async (c) => {
       content: post.content,
       diaper_id: post.diaper_id ?? null,
       pinned: !!post.pinned,
+      is_announcement: !!post.is_announcement,
       repost_id: post.repost_id ?? null,
       repost,
       like_count: post.like_count,
@@ -334,11 +380,14 @@ posts.get('/:id', async (c) => {
 posts.post('/', authMiddleware, async (c) => {
   const user = c.get('user')
   const body = await c.req.json<CreatePostRequest>()
-  const { content, diaper_id, images, repost_id } = body
+  const { content, diaper_id, images, repost_id, is_announcement } = body
 
   if (!content || !content.trim() || content.length > 5000) {
     return c.json({ error: 'Content must be 1-5000 characters' }, 400)
   }
+
+  // 公告仅管理员可发
+  const announceFlag = is_announcement && user.role === 'admin' ? 1 : 0
 
   // 验证 repost_id 存在
   if (repost_id) {
@@ -352,8 +401,8 @@ posts.post('/', authMiddleware, async (c) => {
 
   const result = await run(
     c.env.abdl_space_db,
-    'INSERT INTO posts (user_id, content, diaper_id, repost_id) VALUES (?, ?, ?, ?)',
-    [user.sub, content.trim(), diaper_id ?? null, repost_id ?? null]
+    'INSERT INTO posts (user_id, content, diaper_id, repost_id, is_announcement) VALUES (?, ?, ?, ?, ?)',
+    [user.sub, content.trim(), diaper_id ?? null, repost_id ?? null, announceFlag]
   )
 
   const postId = result.meta.last_row_id
@@ -442,6 +491,8 @@ posts.delete('/:id', authMiddleware, async (c) => {
     }
   }
 
+  // 清除转发引用，避免 FK 约束失败
+  await run(c.env.abdl_space_db, 'UPDATE posts SET repost_id = NULL WHERE repost_id = ?', [id])
   await run(c.env.abdl_space_db, 'DELETE FROM posts WHERE id = ?', [id])
   return c.json({ message: '已删除' })
 })
