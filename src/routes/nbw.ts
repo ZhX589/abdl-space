@@ -277,4 +277,31 @@ nbw.post('/bind', authMiddleware, async (c) => {
   return c.json({ message: '绑定成功', nbw_uid: nbwUser.uid, nbw_username: nbwUser.username || null })
 })
 
+/**
+ * POST /api/auth/nbw/unbind — 解除 NewBabyWorld 账户绑定（需登录）
+ * 删除用户的 nbw_uid 和 nbw_username
+ * 若用户未设置密码且未验证邮箱，提示先设置密码（避免账号无法登录）
+ */
+nbw.post('/unbind', authMiddleware, async (c) => {
+  const user = c.get('user')
+  const db = c.env.abdl_space_db
+
+  const row = await queryOne<{ nbw_uid: string | null; password_hash: string | null; email_verified: number | null; email: string | null }>(
+    db, 'SELECT nbw_uid, password_hash, email_verified, email FROM users WHERE id = ?', [user.sub]
+  )
+  if (!row) return c.json({ error: '用户不存在' }, 404)
+  if (!row.nbw_uid) return c.json({ error: '未绑定宝宝新天地账户' }, 400)
+
+  // 防护：未设置密码 且 邮箱未验证 则不允许解绑（避免账号锁死）
+  const hasPassword = !!row.password_hash
+  const hasVerifiedEmail = !!(row.email_verified && row.email)
+  if (!hasPassword && !hasVerifiedEmail) {
+    return c.json({ error: '请先设置密码或绑定并验证邮箱后再解绑' }, 400)
+  }
+
+  await run(db, 'UPDATE users SET nbw_uid = NULL, nbw_username = NULL WHERE id = ?', [user.sub])
+
+  return c.json({ message: '已解绑宝宝新天地账户' })
+})
+
 export default nbw

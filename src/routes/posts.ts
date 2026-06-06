@@ -66,13 +66,28 @@ posts.get('/', async (c) => {
   const filter = c.req.query('filter') || '' // 'following' | 'announcements' | ''
 
   let userId: number | null = null
+  // 支持 Bearer token（OAuth/外部 API 调用）
   const authHeader = c.req.header('Authorization')
   if (authHeader && authHeader.startsWith('Bearer ')) {
     try {
       const { verifyJWT } = await import('../lib/auth.ts')
       const payload = await verifyJWT(authHeader.slice(7), c.env.JWT_SECRET)
       if (payload) userId = payload.sub
-    } catch { /* invalid token, continue as unauthenticated */ }
+    } catch { /* invalid token, continue */ }
+  }
+  // 支持 Cookie（前端 SPA 使用 credentials: 'include'）
+  if (!userId) {
+    const cookieHeader = c.req.header('Cookie')
+    if (cookieHeader) {
+      const m = cookieHeader.match(/(?:^|;\s*)token=([^;]+)/)
+      if (m) {
+        try {
+          const { verifyJWT } = await import('../lib/auth.ts')
+          const payload = await verifyJWT(m[1], c.env.JWT_SECRET)
+          if (payload) userId = payload.sub
+        } catch { /* invalid token, continue */ }
+      }
+    }
   }
 
   const conditions: string[] = []
@@ -246,7 +261,20 @@ posts.get('/:id', async (c) => {
       const { verifyJWT } = await import('../lib/auth.ts')
       const payload = await verifyJWT(authHeader.slice(7), c.env.JWT_SECRET)
       if (payload) userId = payload.sub
-    } catch { /* invalid token, continue as unauthenticated */ }
+    } catch { /* invalid token, continue */ }
+  }
+  if (!userId) {
+    const cookieHeader = c.req.header('Cookie')
+    if (cookieHeader) {
+      const m = cookieHeader.match(/(?:^|;\s*)token=([^;]+)/)
+      if (m) {
+        try {
+          const { verifyJWT } = await import('../lib/auth.ts')
+          const payload = await verifyJWT(m[1], c.env.JWT_SECRET)
+          if (payload) userId = payload.sub
+        } catch { /* invalid token, continue */ }
+      }
+    }
   }
 
   const post = await queryOne<Record<string, unknown>>(
