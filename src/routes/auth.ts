@@ -477,6 +477,11 @@ auth.get('/me', authMiddleware, async (c) => {
   if (!user) {
     return c.json({ error: 'User not found' }, 404)
   }
+  // 如果是通过 Authorization header 认证的（切换账户），同时设置 cookie
+  const authHeader = c.req.header('Authorization')
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    c.header('Set-Cookie', `token=${authHeader.slice(7)}; ${tokenCookieOptions}`)
+  }
   return c.json({
     id: user.id,
     email: user.email,
