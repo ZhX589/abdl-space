@@ -35,6 +35,11 @@ import contentV1 from './routes/content_v1.ts'
 import nbw from './routes/nbw.ts'
 import keySplit from './routes/key_split.ts'
 import keySplitProxy from './routes/key_split_proxy.ts'
+import checkin from './routes/checkin.ts'
+import points from './routes/points.ts'
+import invite from './routes/invite.ts'
+import badges from './routes/badges.ts'
+import sync from './routes/sync.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
@@ -126,6 +131,11 @@ app.route('/api/auth/nbw', nbw)
 // Key Split — API Key 代理与统计
 app.route('/api/key-split', keySplit)
 app.route('/v1', keySplitProxy)
+app.route('/api/checkin', checkin)
+app.route('/api/users', points)
+app.route('/api/invite', invite)
+app.route('/api/badges', badges)
+app.route('/api/sync', sync)
 
 /**
  * POST /api/admin/reset/password — admin 只能改自己的密码（需鉴权）

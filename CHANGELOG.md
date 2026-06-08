@@ -1,5 +1,39 @@
 # Changelog
 
+## v0.3.0 (2026-06-08)
+
+### ✨ 新功能
+
+- **账号体系升级** — 完整的等级、积分、签到、邀请码、徽章系统
+- **等级系统** — Lv.1~Lv.7，经验值驱动，支持降级
+- **签到系统** — 每日签到 + 连续奖励（7天+20, 30天+100） + 补签卡（50积分）
+- **积分系统** — 等级倍率加成，多种用途（头像框、称号、补签卡）
+- **邀请码** — ABDL-XXXX-XXXX 格式，90天有效，邀请奖励（邀请人+50经验+20积分，被邀请人+10经验）
+- **徽章系统** — 数据库预留，后期用户自行添加
+- **移动端同步** — /api/sync/bootstrap 增量同步接口
+
+### 🗄️ 数据库
+
+- 新增 7 张表：points, point_logs, exp_logs, invite_codes, daily_checkins, badges, user_badges
+- 已有表变更：users(invite_first_rating_bonus_at), experience(newbie_rating_bonus_count, current_streak, last_checkin_date), ratings(rewarded)
+- 完整索引：含 idempotency_key 唯一索引、invite_codes 部分索引
+
+### 🔌 API
+
+- POST /api/checkin — 每日签到
+- GET /api/checkin/status — 签到状态
+- POST /api/checkin/makeup — 补签
+- GET /api/users/:id/points — 积分余额
+- GET /api/users/:id/points/logs — 积分流水
+- GET /api/users/:id/exp/logs — 经验流水
+- GET /api/users/:id/level — 等级详情
+- GET /api/users/:id/badges — 用户徽章
+- POST /api/users/:id/badges/display — 设置展示
+- POST /api/invite/generate — 生成邀请码
+- GET /api/invite/my-codes — 我的邀请码
+- GET /api/sync/bootstrap — 移动端增量同步
+- POST /api/auth/register — 增加 invite_code 参数
+
 ## v0.2.0 (2026-05-17)
 
 ### ✨ 新功能

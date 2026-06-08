@@ -1349,7 +1349,83 @@ npx wrangler d1 execute abdl-space-db --local --file schemas/seeds/diapers.sql
 
 ---
 
-## 八、与原始 Spec 的差异
+## 八、账号体系 API（v0.3.0 新增）
+
+### 签到系统
+
+| 方法 | 路径 | 说明 | 鉴权 |
+|------|------|------|------|
+| POST | `/api/checkin` | 每日签到 | 需鉴权 |
+| GET | `/api/checkin/status` | 签到状态（streak 动态计算） | 需鉴权 |
+| POST | `/api/checkin/makeup` | 补签（消耗 50 积分，仅限昨天） | 需鉴权 |
+
+### 积分/经验
+
+| 方法 | 路径 | 说明 | 鉴权 |
+|------|------|------|------|
+| GET | `/api/users/:id/points` | 积分余额 | 需鉴权 |
+| GET | `/api/users/:id/points/logs` | 积分流水（?page=1&limit=20） | 需鉴权 |
+| GET | `/api/users/:id/exp/logs` | 经验流水（?page=1&limit=20） | 需鉴权 |
+| GET | `/api/users/:id/level` | 等级详情（含进度、倍率） | 需鉴权 |
+
+### 邀请码
+
+| 方法 | 路径 | 说明 | 鉴权 |
+|------|------|------|------|
+| POST | `/api/invite/generate` | 生成邀请码（上限 10 个） | 需鉴权 |
+| GET | `/api/invite/my-codes` | 我的邀请码列表 | 需鉴权 |
+
+### 徽章
+
+| 方法 | 路径 | 说明 | 鉴权 |
+|------|------|------|------|
+| GET | `/api/users/:id/badges` | 用户徽章列表 | 需鉴权 |
+| POST | `/api/users/:id/badges/display` | 设置展示（≤3） | 需鉴权 |
+| GET | `/api/badges` | 所有徽章定义 | 无需鉴权 |
+
+### 移动端同步
+
+| 方法 | 路径 | 说明 | 鉴权 |
+|------|------|------|------|
+| GET | `/api/sync/bootstrap?since=` | 增量同步 | 需鉴权 |
+
+### 注册邀请码
+
+POST `/api/auth/register` 新增可选参数 `invite_code`：
+
+```json
+{
+  "email": "user@example.com",
+  "password": "Password123",
+  "username": "testuser",
+  "code": "123456",
+  "invite_code": "ABDL-XXXX-XXXX"
+}
+```
+
+### 返回值规范
+
+涉及经验/积分变动的接口返回 `rewards` 字段：
+
+```json
+{
+  "success": true,
+  "data": { ... },
+  "rewards": {
+    "total_exp": 35,
+    "total_points": 10,
+    "level_change": { "from": 3, "to": 4 },
+    "details": [
+      { "type": "rating", "amount": 30, "currency": "exp" },
+      { "type": "rating", "amount": 10, "currency": "points" }
+    ]
+  }
+}
+```
+
+---
+
+## 九、与原始 Spec 的差异
 
 以下是我们实现与 [原始 API Spec](https://github.com/ZYongX09/abdl/blob/master/API-SPEC.md) 的差异，A 站点对接时需注意：
 

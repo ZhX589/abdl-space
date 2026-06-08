@@ -155,6 +155,73 @@ export interface Experience {
   current_exp: number
   total_exp: number
   current_level: number
+  newbie_rating_bonus_count: number
+  current_streak: number
+  last_checkin_date: string | null
+}
+
+/** 积分 */
+export interface Point {
+  id: number
+  user_id: number
+  balance: number
+  total_earned: number
+  total_spent: number
+}
+
+/** 积分/经验流水 */
+export interface PointLog {
+  id: number
+  user_id: number
+  amount: number
+  type: string
+  related_id: number | null
+  source_type: string | null
+  source_id: number | null
+  description: string | null
+  metadata: string | null
+  idempotency_key: string | null
+  created_at: string
+}
+
+/** 邀请码 */
+export interface InviteCode {
+  id: number
+  code: string
+  creator_id: number | null
+  used_by: number | null
+  used_at: string | null
+  expires_at: string
+  created_at: string
+}
+
+/** 签到记录 */
+export interface DailyCheckin {
+  id: number
+  user_id: number
+  checkin_date: string
+  type: string
+  created_at: string
+}
+
+/** 徽章定义 */
+export interface Badge {
+  id: number
+  key: string
+  name: string
+  icon: string
+  description: string
+  condition_type: string
+  condition_value: number
+}
+
+/** 用户徽章 */
+export interface UserBadge {
+  id: number
+  user_id: number
+  badge_key: string
+  unlocked_at: string
+  displayed: number
 }
 
 /** 通知 */
@@ -174,6 +241,9 @@ export interface RegisterRequest {
   password: string
   username: string
   code: string
+  invite_code?: string
+  nbw_code?: string
+  nbw_token?: string
 }
 
 /** 登录请求体（login 接受 email 或 username） */

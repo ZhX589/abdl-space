@@ -480,11 +480,30 @@ posts.post('/', authMiddleware, async (c) => {
     }
   }
 
-  return c.json({ id: postId, message: '发布成功' }, 201)
+  // 发帖奖励：经验 +10，积分 +3
+  const POST_EXP = 10
+  const POST_POINTS = 3
+
+  await c.env.abdl_space_db.batch([
+    c.env.abdl_space_db.prepare(
+      'UPDATE experience SET current_exp = current_exp + ?, total_exp = total_exp + ? WHERE user_id = ?'
+    ).bind(POST_EXP, POST_EXP, user.sub),
+    c.env.abdl_space_db.prepare(
+      'INSERT INTO exp_logs (user_id, amount, type, source_type, source_id, description) VALUES (?, ?, ?, ?, ?, ?)'
+    ).bind(user.sub, POST_EXP, 'post', 'post', postId, '发帖'),
+    c.env.abdl_space_db.prepare(
+      'UPDATE points SET balance = balance + ?, total_earned = total_earned + ? WHERE user_id = ?'
+    ).bind(POST_POINTS, POST_POINTS, user.sub),
+    c.env.abdl_space_db.prepare(
+      'INSERT INTO point_logs (user_id, amount, type, source_type, source_id, description) VALUES (?, ?, ?, ?, ?, ?)'
+    ).bind(user.sub, POST_POINTS, 'post', 'post', postId, '发帖'),
+  ])
+
+  return c.json({ id: postId, message: '发布成功', rewards: { total_exp: POST_EXP, total_points: POST_POINTS } }, 201)
 })
 
 /**
- * DELETE /api/posts/:id — 删除帖子
+ * DELETE /api/posts/:id — 删除帖子（含扣回）
  */
 posts.delete('/:id', authMiddleware, async (c) => {
   const user = c.get('user')
@@ -497,6 +516,21 @@ posts.delete('/:id', authMiddleware, async (c) => {
   if (user.role !== 'admin' && post.user_id !== user.sub) {
     return c.json({ error: 'Not authorized' }, 403)
   }
+
+  // 查询该帖子获得的经验/积分（含收到的点赞奖励）
+  const expLogs = await query<{ amount: number }>(
+    c.env.abdl_space_db,
+    "SELECT amount FROM exp_logs WHERE user_id = ? AND source_type = 'post' AND source_id = ?",
+    [post.user_id, id]
+  )
+  const pointLogs = await query<{ amount: number }>(
+    c.env.abdl_space_db,
+    "SELECT amount FROM point_logs WHERE user_id = ? AND source_type = 'post' AND source_id = ?",
+    [post.user_id, id]
+  )
+
+  const totalExpDeduct = expLogs.reduce((sum, log) => sum + Math.abs(log.amount), 0)
+  const totalPointDeduct = pointLogs.reduce((sum, log) => sum + Math.abs(log.amount), 0)
 
   // 删除帖子图片
   const postImages = await query<{ image_url: string }>(
@@ -521,8 +555,104 @@ posts.delete('/:id', authMiddleware, async (c) => {
 
   // 清除转发引用，避免 FK 约束失败
   await run(c.env.abdl_space_db, 'UPDATE posts SET repost_id = NULL WHERE repost_id = ?', [id])
-  await run(c.env.abdl_space_db, 'DELETE FROM posts WHERE id = ?', [id])
+
+  // 扣回经验/积分
+  const batchOps = [
+    c.env.abdl_space_db.prepare('DELETE FROM posts WHERE id = ?', [id]),
+  ]
+
+  if (totalExpDeduct > 0) {
+    batchOps.push(
+      c.env.abdl_space_db.prepare(
+        'UPDATE experience SET current_exp = MAX(0, current_exp - ?), total_exp = MAX(0, total_exp - ?) WHERE user_id = ?'
+      ).bind(totalExpDeduct, totalExpDeduct, post.user_id),
+      c.env.abdl_space_db.prepare(
+        "INSERT INTO exp_logs (user_id, amount, type, source_type, source_id, description) VALUES (?, ?, 'post_delete', 'post', ?, '删帖扣回')"
+      ).bind(post.user_id, -totalExpDeduct, id)
+    )
+  }
+  if (totalPointDeduct > 0) {
+    batchOps.push(
+      c.env.abdl_space_db.prepare(
+        'UPDATE points SET balance = MAX(0, balance - ?), total_spent = total_spent + ? WHERE user_id = ?'
+      ).bind(totalPointDeduct, totalPointDeduct, post.user_id),
+      c.env.abdl_space_db.prepare(
+        "INSERT INTO point_logs (user_id, amount, type, source_type, source_id, description) VALUES (?, ?, 'post_delete', 'post', ?, '删帖扣回')"
+      ).bind(post.user_id, -totalPointDeduct, id)
+    )
+  }
+
+  await c.env.abdl_space_db.batch(batchOps)
   return c.json({ message: '已删除' })
+})
+
+/**
+ * DELETE /api/posts/:postId/comments/:commentId — 删除评论（含扣回）
+ */
+posts.delete('/:postId/comments/:commentId', authMiddleware, async (c) => {
+  const user = c.get('user')
+  const postId = parseInt(c.req.param('postId') || '')
+  const commentId = parseInt(c.req.param('commentId') || '')
+
+  const comment = await queryOne<{ id: number; user_id: number }>(
+    c.env.abdl_space_db, 'SELECT id, user_id FROM post_comments WHERE id = ? AND post_id = ?', [commentId, postId]
+  )
+  if (!comment) return c.json({ error: 'Comment not found' }, 404)
+  if (user.role !== 'admin' && comment.user_id !== user.sub) {
+    return c.json({ error: 'Not authorized' }, 403)
+  }
+
+  // 查询该评论获得的经验/积分
+  const expLogs = await query<{ amount: number }>(
+    c.env.abdl_space_db,
+    "SELECT amount FROM exp_logs WHERE user_id = ? AND source_type = 'comment' AND source_id = ?",
+    [comment.user_id, commentId]
+  )
+  const pointLogs = await query<{ amount: number }>(
+    c.env.abdl_space_db,
+    "SELECT amount FROM point_logs WHERE user_id = ? AND source_type = 'comment' AND source_id = ?",
+    [comment.user_id, commentId]
+  )
+
+  const totalExpDeduct = expLogs.reduce((sum, log) => sum + Math.abs(log.amount), 0)
+  const totalPointDeduct = pointLogs.reduce((sum, log) => sum + Math.abs(log.amount), 0)
+
+  // 删除评论图片
+  const cmtImages = await query<{ image_url: string }>(
+    c.env.abdl_space_db, 'SELECT image_url FROM comment_images WHERE comment_id = ?', [commentId]
+  )
+  for (const img of cmtImages) {
+    await deleteImageFromImgbed(c.env, img.image_url)
+  }
+
+  // 扣回经验/积分
+  const batchOps = [
+    c.env.abdl_space_db.prepare('DELETE FROM post_comments WHERE id = ?', [commentId]),
+  ]
+
+  if (totalExpDeduct > 0) {
+    batchOps.push(
+      c.env.abdl_space_db.prepare(
+        'UPDATE experience SET current_exp = MAX(0, current_exp - ?), total_exp = MAX(0, total_exp - ?) WHERE user_id = ?'
+      ).bind(totalExpDeduct, totalExpDeduct, comment.user_id),
+      c.env.abdl_space_db.prepare(
+        "INSERT INTO exp_logs (user_id, amount, type, source_type, source_id, description) VALUES (?, ?, 'comment_delete', 'comment', ?, '删评论扣回')"
+      ).bind(comment.user_id, -totalExpDeduct, commentId)
+    )
+  }
+  if (totalPointDeduct > 0) {
+    batchOps.push(
+      c.env.abdl_space_db.prepare(
+        'UPDATE points SET balance = MAX(0, balance - ?), total_spent = total_spent + ? WHERE user_id = ?'
+      ).bind(totalPointDeduct, totalPointDeduct, comment.user_id),
+      c.env.abdl_space_db.prepare(
+        "INSERT INTO point_logs (user_id, amount, type, source_type, source_id, description) VALUES (?, ?, 'comment_delete', 'comment', ?, '删评论扣回')"
+      ).bind(comment.user_id, -totalPointDeduct, commentId)
+    )
+  }
+
+  await c.env.abdl_space_db.batch(batchOps)
+  return c.json({ message: '评论已删除' })
 })
 
 /**
@@ -635,7 +765,26 @@ posts.post('/:id/comments', authMiddleware, async (c) => {
     }
   }
 
-  return c.json({ message: '评论成功', id: commentId }, 201)
+  // 评论奖励：经验 +5，积分 +2
+  const COMMENT_EXP = 5
+  const COMMENT_POINTS = 2
+
+  await c.env.abdl_space_db.batch([
+    c.env.abdl_space_db.prepare(
+      'UPDATE experience SET current_exp = current_exp + ?, total_exp = total_exp + ? WHERE user_id = ?'
+    ).bind(COMMENT_EXP, COMMENT_EXP, user.sub),
+    c.env.abdl_space_db.prepare(
+      'INSERT INTO exp_logs (user_id, amount, type, source_type, source_id, description) VALUES (?, ?, ?, ?, ?, ?)'
+    ).bind(user.sub, COMMENT_EXP, 'comment', 'comment', commentId, '评论'),
+    c.env.abdl_space_db.prepare(
+      'UPDATE points SET balance = balance + ?, total_earned = total_earned + ? WHERE user_id = ?'
+    ).bind(COMMENT_POINTS, COMMENT_POINTS, user.sub),
+    c.env.abdl_space_db.prepare(
+      'INSERT INTO point_logs (user_id, amount, type, source_type, source_id, description) VALUES (?, ?, ?, ?, ?, ?)'
+    ).bind(user.sub, COMMENT_POINTS, 'comment', 'comment', commentId, '评论'),
+  ])
+
+  return c.json({ message: '评论成功', id: commentId, rewards: { total_exp: COMMENT_EXP, total_points: COMMENT_POINTS } }, 201)
 })
 
 export default posts

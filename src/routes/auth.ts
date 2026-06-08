@@ -1,5 +1,5 @@
 import { Hono } from 'hono'
-import type { Env, JWTPayload, RegisterRequest, LoginRequest, LoginResponse, User } from '../types/index.ts'
+import type { Env, JWTPayload, LoginRequest, LoginResponse, User } from '../types/index.ts'
 import { hashPassword, verifyPassword, signJWT } from '../lib/auth.ts'
 import { queryOne, query, run } from '../lib/db.ts'
 import { authMiddleware } from '../middleware/auth.ts'
@@ -17,6 +17,7 @@ const MAX_CODE_REQUESTS = 5
 const MAX_VERIFY_ATTEMPTS = 5  // 验证码最多尝试 5 次
 const RATE_LIMIT_WINDOW = 60   // 秒
 const RATE_LIMIT_MAX = 10      // 每窗口最大请求数
+const CODE_PATTERN = /^ABDL-[A-Z0-9]{4}-[A-Z0-9]{4}$/
 
 const tokenCookieOptions = 'HttpOnly; Secure; SameSite=None; Domain=.abdl-space.top; Path=/; Max-Age=604800'
 
@@ -229,7 +230,7 @@ auth.post('/register', async (c) => {
     return c.json({ error: '操作太频繁，请稍后再试' }, 429)
   }
 
-  const body = await c.req.json<{ username: string; password: string; email: string; code?: string; nbw_code?: string; nbw_token?: string }>()
+  const body = await c.req.json<{ username: string; password: string; email: string; code?: string; nbw_code?: string; nbw_token?: string; invite_code?: string }>()
   const { username, password, email: emailAddress, code, nbw_code, nbw_token } = body
   const isNBW = !!nbw_code || !!nbw_token
 
@@ -295,12 +296,36 @@ auth.post('/register', async (c) => {
       }
     }
   } else {
-    result = await verifyCode(db, emailAddress, code, 'register')
+    const result = await verifyCode(db, emailAddress, code, 'register')
     if (!result.valid) {
       return c.json({ error: result.error }, 400)
     }
     // 标记验证码已使用
     await run(db, 'UPDATE email_verifications SET used = 1 WHERE id = ?', [result.recordId])
+  }
+
+  // 邀请码处理（可选）
+  let inviteCode = body.invite_code
+  let inviterId: number | null = null
+  if (inviteCode && !isNBW) {
+    if (!CODE_PATTERN.test(inviteCode)) {
+      return c.json({ error: '邀请码格式无效' }, 400)
+    }
+    const inviteRecord = await queryOne<{ id: number; creator_id: number; used_by: number | null; expires_at: string }>(
+      db,
+      'SELECT id, creator_id, used_by, expires_at FROM invite_codes WHERE code = ?',
+      [inviteCode]
+    )
+    if (!inviteRecord) {
+      return c.json({ error: '邀请码不存在' }, 400)
+    }
+    if (inviteRecord.used_by) {
+      return c.json({ error: '邀请码已被使用' }, 400)
+    }
+    if (new Date(inviteRecord.expires_at) < new Date()) {
+      return c.json({ error: '邀请码已过期' }, 400)
+    }
+    inviterId = inviteRecord.creator_id
   }
 
   // 检查用户名/邮箱是否已存在（模糊提示防枚举）
@@ -320,13 +345,45 @@ auth.post('/register', async (c) => {
     [emailAddress, passwordHash, username, isNBW ? String(nbw_uid) : null, isNBW ? nbw_username : null]
   )
   const userId = insertResult.meta.last_row_id as number
+
+  // 初始化积分和经验记录
+  await db.batch([
+    db.prepare('INSERT INTO points (user_id, balance, total_earned, total_spent) VALUES (?, 0, 0, 0)').bind(userId),
+    db.prepare('INSERT INTO experience (user_id, current_exp, total_exp, current_level, newbie_rating_bonus_count, current_streak, last_checkin_date) VALUES (?, 0, 0, 1, 0, 0, NULL)').bind(userId),
+  ])
+
+  // 消费邀请码 + 奖励邀请人
+  if (inviterId) {
+    await db.batch([
+      // 标记邀请码已使用
+      db.prepare('UPDATE invite_codes SET used_by = ?, used_at = CURRENT_TIMESTAMP WHERE code = ? AND used_by IS NULL AND expires_at > CURRENT_TIMESTAMP').bind(userId, inviteCode),
+      // 被邀请人注册经验 +10
+      db.prepare('UPDATE experience SET current_exp = current_exp + 10, total_exp = total_exp + 10 WHERE user_id = ?').bind(userId),
+      db.prepare('INSERT INTO exp_logs (user_id, amount, type, description) VALUES (?, 10, ?, ?)').bind(userId, 'invite_register', '被邀请注册'),
+      // 邀请人经验 +50
+      db.prepare('UPDATE experience SET current_exp = current_exp + 50, total_exp = total_exp + 50 WHERE user_id = ?').bind(inviterId),
+      db.prepare('INSERT INTO exp_logs (user_id, amount, type, source_type, source_id, description) VALUES (?, 50, ?, ?, ?, ?)').bind(inviterId, 'invite', 'invite', userId, '邀请注册奖励'),
+      // 邀请人积分 +20
+      db.prepare('UPDATE points SET balance = balance + 20, total_earned = total_earned + 20 WHERE user_id = ?').bind(inviterId),
+      db.prepare('INSERT INTO point_logs (user_id, amount, type, source_type, source_id, description) VALUES (?, 20, ?, ?, ?, ?)').bind(inviterId, 'invite', 'invite', userId, '邀请注册奖励'),
+    ])
+  }
+
   const token = await signJWT({ sub: userId, username, email: emailAddress, role: 'user' }, c.env.JWT_SECRET)
 
   c.header('Set-Cookie', `token=${token}; ${tokenCookieOptions}`)
 
+  // 构造 rewards 响应
+  const rewards = {
+    total_exp: inviterId ? 10 : 0,
+    total_points: 0,
+    details: inviterId ? [{ type: 'invite_register', amount: 10, currency: 'exp' }] : [],
+  }
+
   return c.json({
     token,
     user: { id: userId, email: emailAddress, username, avatar: null, role: 'user' },
+    rewards,
   }, 201)
 })
 
