@@ -86,7 +86,7 @@ ratings.post('/', authMiddleware, async (c) => {
   }
 
   const totalExp = rewarded ? BASE_EXP + newbieBonus : 0
-  const totalPoints = rewarded ? actualPoints : 0
+  let totalPoints = rewarded ? actualPoints : 0
 
   if (rewarded) {
     // 标记评价已奖励
