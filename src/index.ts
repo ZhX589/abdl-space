@@ -7,6 +7,7 @@ import { hashPassword, verifyPassword } from './lib/auth.ts'
 import { authMiddleware, adminMiddleware } from './middleware/auth.ts'
 import { queryOne, run } from './lib/db.ts'
 import auth from './routes/auth.ts'
+import beta from './routes/beta.ts'
 import diapers from './routes/diapers.ts'
 import ratings from './routes/ratings.ts'
 import feelings from './routes/feelings.ts'
@@ -101,6 +102,7 @@ app.get('/api/health/db', async (c) => {
 })
 
 app.route('/api/auth', auth)
+app.route('/api/beta', beta)
 app.route('/api/diapers', diapers)
 app.route('/api/ratings', ratings)
 app.route('/api/feelings', feelings)

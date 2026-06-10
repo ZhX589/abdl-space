@@ -382,7 +382,7 @@ auth.post('/register', async (c) => {
 
   return c.json({
     token,
-    user: { id: userId, email: emailAddress, username, avatar: null, role: 'user' },
+    user: { id: userId, email: emailAddress, username, avatar: null, role: 'user', is_beta_user: 0 },
     rewards,
   }, 201)
 })
@@ -526,9 +526,9 @@ auth.post('/bind-email', authMiddleware, async (c) => {
 // ============================================================
 auth.get('/me', authMiddleware, async (c) => {
   const payload = c.get('user')
-  const user = await queryOne<User>(
+  const user = await queryOne<User & { is_beta_user?: number }>(
     c.env.abdl_space_db,
-    'SELECT id, email, username, avatar, role, age, region, weight, waist, hip, style_preference, bio, email_verified, nbw_uid, nbw_username, created_at FROM users WHERE id = ?',
+    'SELECT id, email, username, avatar, role, age, region, weight, waist, hip, style_preference, bio, email_verified, nbw_uid, nbw_username, is_beta_user, created_at FROM users WHERE id = ?',
     [payload.sub]
   )
   if (!user) {
@@ -555,6 +555,7 @@ auth.get('/me', authMiddleware, async (c) => {
     email_verified: user.email_verified,
     nbw_uid: user.nbw_uid || null,
     nbw_username: user.nbw_username || null,
+    is_beta_user: user.is_beta_user ? 1 : 0,
     created_at: user.created_at
   })
 })
