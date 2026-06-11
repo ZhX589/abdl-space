@@ -19,7 +19,7 @@ const VALID_DIMENSIONS = ['absorption_score', 'comfort_score', 'thickness_score'
 rankings.get('/', async (c) => {
   const type = c.req.query('type') || 'hot'
   const dimension = c.req.query('dimension')
-  const limit = Math.min(50, Math.max(1, parseInt(c.req.query('limit') || '20')))
+  const limit = Math.min(100, Math.max(1, parseInt(c.req.query('limit') || '50')))
 
   if (!VALID_TYPES.includes(type as typeof VALID_TYPES[number])) {
     return c.json({ error: `Invalid type. Valid: ${VALID_TYPES.join(', ')}` }, 400)
