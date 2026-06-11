@@ -123,7 +123,7 @@ posts.get('/', async (c) => {
   const rows = await query<Record<string, unknown>>(
     c.env.abdl_space_db,
     `SELECT p.id, p.user_id, p.content, p.diaper_id, p.pinned, p.is_announcement, p.repost_id, p.created_at,
-            u.username, u.avatar, u.role,
+            u.username, u.avatar, u.role, u.is_beta_user,
             (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
             (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count
      FROM posts p
@@ -186,7 +186,7 @@ posts.get('/', async (c) => {
     for (const orig of repostRows) {
       repostMap.set(orig.id as number, {
         id: orig.id,
-        user: { id: orig.user_id, username: orig.username, avatar: orig.avatar ?? null, role: orig.role },
+        user: { id: orig.user_id, username: orig.username, avatar: orig.avatar ?? null, role: orig.role, is_beta_user: !!orig.is_beta_user },
         content: orig.content,
         images: (repostImagesMap.get(orig.id as number) || []).map(img => ({ image_url: img.image_url, is_nsfw: !!img.is_nsfw })),
         created_at: orig.created_at
@@ -196,7 +196,7 @@ posts.get('/', async (c) => {
 
   const postsList = rows.map(r => ({
     id: r.id,
-    user: { id: r.user_id, username: r.username, avatar: r.avatar ?? null, role: r.role },
+    user: { id: r.user_id, username: r.username, avatar: r.avatar ?? null, role: r.role, is_beta_user: !!r.is_beta_user },
     content: r.content,
     diaper_id: r.diaper_id ?? null,
     pinned: !!r.pinned,
@@ -279,7 +279,7 @@ posts.get('/:id', async (c) => {
 
   const post = await queryOne<Record<string, unknown>>(
     c.env.abdl_space_db,
-    `SELECT p.*, u.username, u.avatar, u.role,
+    `SELECT p.*, u.username, u.avatar, u.role, u.is_beta_user,
             (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
             (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count
      FROM posts p JOIN users u ON p.user_id = u.id
@@ -300,7 +300,7 @@ posts.get('/:id', async (c) => {
 
   const comments = await query<Record<string, unknown>>(
     c.env.abdl_space_db,
-    `SELECT pc.*, u.username, u.avatar, u.role
+    `SELECT pc.*, u.username, u.avatar, u.role, u.is_beta_user
      FROM post_comments pc JOIN users u ON pc.user_id = u.id
      WHERE pc.post_id = ?
      ORDER BY pc.created_at ASC`,
@@ -345,7 +345,7 @@ posts.get('/:id', async (c) => {
   const commentsWithLikes = comments.map(cmt => ({
     id: cmt.id,
     post_id: cmt.post_id,
-    user: { id: cmt.user_id, username: cmt.username, avatar: cmt.avatar ?? null, role: cmt.role },
+    user: { id: cmt.user_id, username: cmt.username, avatar: cmt.avatar ?? null, role: cmt.role, is_beta_user: !!cmt.is_beta_user },
     parent_id: cmt.parent_id ?? null,
     content: cmt.content,
     images: (cmtImagesMap.get(cmt.id as number) || []).map(img => ({ image_url: img.image_url, is_nsfw: !!img.is_nsfw })),
@@ -362,7 +362,7 @@ posts.get('/:id', async (c) => {
   if (post.repost_id) {
     const origPost = await queryOne<Record<string, unknown>>(
       c.env.abdl_space_db,
-      `SELECT p.id, p.user_id, p.content, p.created_at, u.username, u.avatar, u.role
+      `SELECT p.id, p.user_id, p.content, p.created_at, u.username, u.avatar, u.role, u.is_beta_user
        FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`,
       [post.repost_id]
     )
@@ -370,7 +370,7 @@ posts.get('/:id', async (c) => {
       const origImages = await safeGetImages(c.env.abdl_space_db, post.repost_id)
       repost = {
         id: origPost.id,
-        user: { id: origPost.user_id, username: origPost.username, avatar: origPost.avatar ?? null, role: origPost.role },
+        user: { id: origPost.user_id, username: origPost.username, avatar: origPost.avatar ?? null, role: origPost.role, is_beta_user: !!origPost.is_beta_user },
         content: origPost.content,
         images: origImages.map(img => ({ image_url: img.image_url, is_nsfw: !!img.is_nsfw })),
         created_at: origPost.created_at
@@ -385,7 +385,7 @@ posts.get('/:id', async (c) => {
   return c.json({
     post: {
       id: post.id,
-      user: { id: post.user_id, username: post.username, avatar: post.avatar ?? null, role: post.role },
+      user: { id: post.user_id, username: post.username, avatar: post.avatar ?? null, role: post.role, is_beta_user: !!post.is_beta_user },
       content: post.content,
       diaper_id: post.diaper_id ?? null,
       pinned: !!post.pinned,
