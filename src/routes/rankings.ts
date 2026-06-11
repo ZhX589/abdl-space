@@ -19,7 +19,8 @@ const VALID_DIMENSIONS = ['absorption_score', 'comfort_score', 'thickness_score'
 rankings.get('/', async (c) => {
   const type = c.req.query('type') || 'hot'
   const dimension = c.req.query('dimension')
-  const limit = Math.min(100, Math.max(1, parseInt(c.req.query('limit') || '50')))
+  const limit = Math.min(100, Math.max(1, parseInt(c.req.query('limit') || '20')))
+  const offset = Math.max(0, parseInt(c.req.query('offset') || '0'))
 
   if (!VALID_TYPES.includes(type as typeof VALID_TYPES[number])) {
     return c.json({ error: `Invalid type. Valid: ${VALID_TYPES.join(', ')}` }, 400)
@@ -90,9 +91,9 @@ rankings.get('/', async (c) => {
         0 as thickness_score, 0 as appearance_score, 0 as value_score
       FROM diapers d
       ORDER BY ${orderBy}
-      LIMIT ?
+      LIMIT ? OFFSET ?
     `
-    params.push(limit)
+    params.push(limit, offset)
   }
 
   const rows = await query<Record<string, unknown>>(c.env.abdl_space_db, sql, params)
@@ -176,16 +177,21 @@ rankings.get('/', async (c) => {
       if (b.rating_count === 0 && a.rating_count > 0) return -1
       return b.avg_score - a.avg_score
     })
-    ranked = ranked.slice(0, limit)
   }
+
+  // 分页：对排序后的结果取 offset + limit
+  const totalCount = ranked.length
+  const paged = ranked.slice(offset, offset + limit)
 
   const baseAdult = dimensionWeightedScore({}, 0, adultGS.stats, adultGS.m, false)
   const baseBaby = dimensionWeightedScore({}, 0, babyGS.stats, babyGS.m, true)
 
   return c.json({
-    rankings: ranked,
+    rankings: paged,
     type,
-    base_scores: { adult: baseAdult, baby: baseBaby }
+    base_scores: { adult: baseAdult, baby: baseBaby },
+    total: totalCount,
+    hasMore: offset + limit < totalCount,
   })
 })
 
