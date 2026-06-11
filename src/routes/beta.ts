@@ -1,7 +1,7 @@
 /**
  * 创始成员计划 (Beta) 路由
  * - GET  /api/beta/info      — 获取活动信息（名额、截止时间、状态）
- * - POST /api/auth/beta-register — 创始成员预注册
+ * - POST /api/beta/beta-register — 创始成员预注册
  *
  * 与 /api/auth/register 差异：
  * 1. 注册成功后用户 is_beta_user = 1
@@ -81,9 +81,10 @@ beta.get('/info', async (c) => {
 })
 
 // ============================================================
-// POST /api/auth/beta-register — 创始成员预注册
+// POST /api/beta/beta-register — 创始成员预注册
 // ============================================================
 beta.post('/beta-register', async (c) => {
+  try {
   const db = c.env.abdl_space_db
   const body = await c.req.json<{
     username: string
@@ -220,6 +221,10 @@ beta.post('/beta-register', async (c) => {
       registered_at: new Date().toISOString(),
     },
   }, 201)
+  } catch (e) {
+    console.error('POST /api/beta/beta-register error:', e)
+    return c.json({ error: '注册失败: ' + (e instanceof Error ? e.message : String(e)) }, 500)
+  }
 })
 
 /** SHA-256 哈希（用于验证码） */

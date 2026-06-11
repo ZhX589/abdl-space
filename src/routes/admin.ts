@@ -486,4 +486,79 @@ admin.get('/security/stats', adminMiddleware, async (c) => {
   })
 })
 
+// ============================================================
+// 内测模式配置
+// ============================================================
+
+interface BetaModeConfig {
+  enabled: boolean
+  allowedRoutes: string[]
+  message: string
+}
+
+const DEFAULT_BETA_MODE: BetaModeConfig = {
+  enabled: false,
+  allowedRoutes: ['/', '/login', '/register', '/admin', '/beta-register'],
+  message: '产品正在内测中，请登录后访问',
+}
+
+/**
+ * GET /api/admin/beta-mode — 获取内测模式配置（公开接口，供前端路由守卫使用）
+ */
+admin.get('/beta-mode', async (c) => {
+  try {
+    const db = c.env.abdl_space_db
+    const row = await queryOne<{ value: string }>(db, "SELECT value FROM site_settings WHERE key = 'beta_mode'")
+    if (!row) return c.json(DEFAULT_BETA_MODE)
+    return c.json(JSON.parse(row.value) as BetaModeConfig)
+  } catch (e) {
+    console.error('GET /api/admin/beta-mode error:', e)
+    return c.json(DEFAULT_BETA_MODE)
+  }
+})
+
+/**
+ * PUT /api/admin/beta-mode — 更新内测模式配置（仅管理员）
+ */
+admin.put('/beta-mode', adminMiddleware, async (c) => {
+  try {
+    const db = c.env.abdl_space_db
+    const body = await c.req.json<Partial<BetaModeConfig>>()
+    
+    // 获取当前配置
+    const row = await queryOne<{ value: string }>(db, "SELECT value FROM site_settings WHERE key = 'beta_mode'")
+    const current = row ? JSON.parse(row.value) as BetaModeConfig : DEFAULT_BETA_MODE
+    
+    // 合并更新
+    const updated: BetaModeConfig = {
+      enabled: body.enabled ?? current.enabled,
+      allowedRoutes: body.allowedRoutes ?? current.allowedRoutes,
+      message: body.message ?? current.message,
+    }
+    
+    // 验证 allowedRoutes 格式
+    if (!Array.isArray(updated.allowedRoutes)) {
+      return c.json({ error: 'allowedRoutes 必须是数组' }, 400)
+    }
+    for (const route of updated.allowedRoutes) {
+      if (typeof route !== 'string' || !route.startsWith('/')) {
+        return c.json({ error: '路由格式错误，必须以 / 开头' }, 400)
+      }
+    }
+    
+    // 保存到数据库
+    await run(
+      db,
+      `INSERT INTO site_settings (key, value, updated_at) VALUES ('beta_mode', ?, datetime('now'))
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      [JSON.stringify(updated)]
+    )
+    
+    return c.json({ success: true, config: updated })
+  } catch (e) {
+    console.error('PUT /api/admin/beta-mode error:', e)
+    return c.json({ error: '更新失败' }, 500)
+  }
+})
+
 export default admin
