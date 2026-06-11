@@ -31,51 +31,56 @@ function generateInviteCode(): string {
  * POST /api/invite/generate — 生成邀请码
  */
 invite.post('/generate', authMiddleware, async (c) => {
-  const user = c.get('user')
-  const userId = user.sub
+  try {
+    const user = c.get('user')
+    const userId = user.sub
 
-  // 检查用户已有邀请码数量
-  const existingCount = await queryOne<{ cnt: number }>(
-    c.env.abdl_space_db,
-    'SELECT COUNT(*) as cnt FROM invite_codes WHERE creator_id = ? AND expires_at > datetime("now")',
-    [userId]
-  )
-
-  if (existingCount && existingCount.cnt >= MAX_CODES_PER_USER) {
-    return c.json({
-      error: `最多同时拥有 ${MAX_CODES_PER_USER} 个有效邀请码`,
-      current_count: existingCount.cnt,
-    }, 400)
-  }
-
-  // 生成唯一邀请码（最多重试 10 次）
-  let code = ''
-  for (let i = 0; i < 10; i++) {
-    code = generateInviteCode()
-    const existing = await queryOne<{ id: number }>(
+    // 检查用户已有邀请码数量
+    const existingCount = await queryOne<{ cnt: number }>(
       c.env.abdl_space_db,
-      'SELECT id FROM invite_codes WHERE code = ?',
-      [code]
+      'SELECT COUNT(*) as cnt FROM invite_codes WHERE creator_id = ? AND expires_at > datetime("now")',
+      [userId]
     )
-    if (!existing) break
-    if (i === 9) return c.json({ error: '邀请码生成失败，请重试' }, 500)
+
+    if (existingCount && existingCount.cnt >= MAX_CODES_PER_USER) {
+      return c.json({
+        error: `最多同时拥有 ${MAX_CODES_PER_USER} 个有效邀请码`,
+        current_count: existingCount.cnt,
+      }, 400)
+    }
+
+    // 生成唯一邀请码（最多重试 10 次）
+    let code = ''
+    for (let i = 0; i < 10; i++) {
+      code = generateInviteCode()
+      const existing = await queryOne<{ id: number }>(
+        c.env.abdl_space_db,
+        'SELECT id FROM invite_codes WHERE code = ?',
+        [code]
+      )
+      if (!existing) break
+      if (i === 9) return c.json({ error: '邀请码生成失败，请重试' }, 500)
+    }
+
+    const expiresAt = new Date(Date.now() + CODE_EXPIRY_DAYS * 86400000).toISOString()
+
+    await run(
+      c.env.abdl_space_db,
+      'INSERT INTO invite_codes (code, creator_id, expires_at) VALUES (?, ?, ?)',
+      [code, userId, expiresAt]
+    )
+
+    return c.json({
+      success: true,
+      data: {
+        code,
+        expires_at: expiresAt,
+      },
+    })
+  } catch (e) {
+    console.error('POST /api/invite/generate error:', e)
+    return c.json({ error: '生成邀请码失败: ' + (e instanceof Error ? e.message : String(e)) }, 500)
   }
-
-  const expiresAt = new Date(Date.now() + CODE_EXPIRY_DAYS * 86400000).toISOString()
-
-  await run(
-    c.env.abdl_space_db,
-    'INSERT INTO invite_codes (code, creator_id, expires_at) VALUES (?, ?, ?)',
-    [code, userId, expiresAt]
-  )
-
-  return c.json({
-    success: true,
-    data: {
-      code,
-      expires_at: expiresAt,
-    },
-  })
 })
 
 /**
