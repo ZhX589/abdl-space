@@ -87,36 +87,41 @@ invite.post('/generate', authMiddleware, async (c) => {
  * GET /api/invite/my-codes — 我的邀请码
  */
 invite.get('/my-codes', authMiddleware, async (c) => {
-  const user = c.get('user')
-  const userId = user.sub
+  try {
+    const user = c.get('user')
+    const userId = user.sub
 
-  const rows = await query<{
-    id: number; code: string; used_by: number | null; used_at: string | null;
-    expires_at: string; created_at: string;
-    used_by_username?: string;
-  }>(
-    c.env.abdl_space_db,
-    `SELECT ic.id, ic.code, ic.used_by, ic.used_at, ic.expires_at, ic.created_at,
-            u.username as used_by_username
-     FROM invite_codes ic
-     LEFT JOIN users u ON ic.used_by = u.id
-     WHERE ic.creator_id = ?
-     ORDER BY ic.created_at DESC`,
-    [userId]
-  )
+    const rows = await query<{
+      id: number; code: string; used_by: number | null; used_at: string | null;
+      expires_at: string; created_at: string;
+      used_by_username?: string;
+    }>(
+      c.env.abdl_space_db,
+      `SELECT ic.id, ic.code, ic.used_by, ic.used_at, ic.expires_at, ic.created_at,
+              u.username as used_by_username
+       FROM invite_codes ic
+       LEFT JOIN users u ON ic.used_by = u.id
+       WHERE ic.creator_id = ?
+       ORDER BY ic.created_at DESC`,
+      [userId]
+    )
 
-  return c.json({
-    codes: rows.map(r => ({
-      id: r.id,
-      code: r.code,
-      used: !!r.used_by,
-      used_by: r.used_by_username || null,
-      used_at: r.used_at,
-      expires_at: r.expires_at,
-      created_at: r.created_at,
-      expired: new Date(r.expires_at) < new Date(),
-    })),
-  })
+    return c.json({
+      codes: rows.map(r => ({
+        id: r.id,
+        code: r.code,
+        used: !!r.used_by,
+        used_by: r.used_by_username || null,
+        used_at: r.used_at,
+        expires_at: r.expires_at,
+        created_at: r.created_at,
+        expired: new Date(r.expires_at) < new Date(),
+      })),
+    })
+  } catch (e) {
+    console.error('GET /api/invite/my-codes error:', e)
+    return c.json({ error: '获取邀请码失败: ' + (e instanceof Error ? e.message : String(e)) }, 500)
+  }
 })
 
 export default invite
