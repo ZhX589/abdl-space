@@ -101,21 +101,4 @@ badges.post('/:id/badges/display', authMiddleware, async (c) => {
   })
 })
 
-/**
- * GET /api/badges — 所有徽章定义（公开）
- */
-badges.get('/', async (c) => {
-  const rows = await query<{
-    key: string; name: string; icon: string; description: string;
-    condition_type: string; condition_value: number;
-  }>(
-    c.env.abdl_space_db,
-    'SELECT key, name, icon, description, condition_type, condition_value FROM badges ORDER BY condition_value ASC'
-  )
-
-  return c.json({
-    badges: rows,
-  })
-})
-
 export default badges

@@ -183,29 +183,6 @@ users.patch('/me', authMiddleware, async (c) => {
 })
 
 /**
- * GET /api/users/:id/level — 用户等级/经验值
- */
-users.get('/:id/level', async (c) => {
-  const id = parseInt(c.req.param('id'))
-
-  const exp = await queryOne<{ current_exp: number; total_exp: number; current_level: number }>(
-    c.env.abdl_space_db,
-    'SELECT current_exp, total_exp, current_level FROM experience WHERE user_id = ?',
-    [id]
-  )
-
-  if (!exp) {
-    const levelInfo = calcLevel(0)
-    return c.json({ level: { ...levelInfo, exp: 0, total_exp: 0 } })
-  }
-
-  const levelInfo = calcLevel(exp.total_exp)
-  return c.json({
-    level: { ...levelInfo, exp: exp.current_exp, total_exp: exp.total_exp }
-  })
-})
-
-/**
  * GET /api/users/:id/posts — 用户发的帖子
  */
 users.get('/:id/posts', async (c) => {

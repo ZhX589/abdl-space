@@ -136,7 +136,15 @@ app.route('/v1', keySplitProxy)
 app.route('/api/checkin', checkin)
 app.route('/api/users', points)
 app.route('/api/invite', invite)
-app.route('/api/badges', badges)
+// badges: 用户徽章路由挂载到 /api/users（/:id/badges 等）
+app.route('/api/users', badges)
+// 公开端点：所有徽章定义
+app.get('/api/badges', async (c) => {
+  const rows = await c.env.abdl_space_db.prepare(
+    'SELECT key, name, icon, description, condition_type, condition_value FROM badges ORDER BY condition_value ASC'
+  ).all()
+  return c.json({ badges: rows.results || [] })
+})
 app.route('/api/sync', sync)
 
 /**

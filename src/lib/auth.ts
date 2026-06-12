@@ -1,6 +1,6 @@
 import type { JWTPayload } from '../types/index.ts'
 
-const PBKDF2_ITERATIONS = 600000  // OWASP 2023 recommended minimum for PBKDF2-SHA256
+const PBKDF2_ITERATIONS = 100000  // CF Workers max limit
 const SALT_LENGTH = 16
 const KEY_LENGTH = 64
 const JWT_EXPIRES_IN = 7 * 24 * 60 * 60 // 7 days in seconds (RFC 7519)
