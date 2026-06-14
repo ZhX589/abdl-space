@@ -20,6 +20,39 @@ async function sha256(input: string): Promise<string> {
   return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('')
 }
 
+/** Build Mastodon Link header for cursor-based pagination */
+function buildLinkHeader(
+  baseUrl: string,
+  items: { id: string | number }[],
+  limit: number,
+  queryParams: Record<string, string> = {}
+): string | null {
+  if (items.length === 0) return null
+
+  const links: string[] = []
+  const makeUrl = (maxId?: string, minId?: string) => {
+    const params = new URLSearchParams()
+    for (const [k, v] of Object.entries(queryParams)) {
+      if (v) params.set(k, v)
+    }
+    if (maxId) params.set('max_id', maxId)
+    if (minId) params.set('min_id', minId)
+    const qs = params.toString()
+    return qs ? `${baseUrl}?${qs}` : baseUrl
+  }
+
+  // next: use last item's id as max_id
+  if (items.length >= limit) {
+    const lastId = items[items.length - 1].id
+    links.push(`<${makeUrl(String(lastId))}>; rel="next"`)
+  }
+  // prev: use first item's id as min_id
+  const firstId = items[0].id
+  links.push(`<${makeUrl(undefined, String(firstId))}>; rel="prev"`)
+
+  return links.join(', ')
+}
+
 const mastodon = new Hono<AppType>()
 
 // ============================================================
@@ -381,6 +414,8 @@ mastodon.get('/accounts/:id/statuses', async (c) => {
     created_at: r.created_at as string,
   }, account, { favourited: likedSet.has(r.id as number) }))
 
+  const link = buildLinkHeader(`/api/v1/accounts/${id}/statuses`, statuses, limit, { only_media: c.req.query('only_media') || '' })
+  if (link) c.header('Link', link)
   return c.json(statuses)
 })
 
@@ -399,10 +434,13 @@ mastodon.get('/accounts/:id/followers', async (c) => {
     [id, limit]
   )
 
-  return c.json(rows.map(r => toAccount({
+  const accounts = rows.map(r => toAccount({
     id: r.id as number, username: r.username as string, avatar: r.avatar as string | null,
     role: r.role as string, bio: r.bio as string | null, created_at: r.created_at as string,
-  })))
+  }))
+  const link = buildLinkHeader(`/api/v1/accounts/${id}/followers`, accounts, limit)
+  if (link) c.header('Link', link)
+  return c.json(accounts)
 })
 
 // ============================================================
@@ -420,10 +458,13 @@ mastodon.get('/accounts/:id/following', async (c) => {
     [id, limit]
   )
 
-  return c.json(rows.map(r => toAccount({
+  const accounts = rows.map(r => toAccount({
     id: r.id as number, username: r.username as string, avatar: r.avatar as string | null,
     role: r.role as string, bio: r.bio as string | null, created_at: r.created_at as string,
-  })))
+  }))
+  const link = buildLinkHeader(`/api/v1/accounts/${id}/following`, accounts, limit)
+  if (link) c.header('Link', link)
+  return c.json(accounts)
 })
 
 // ============================================================
@@ -818,7 +859,7 @@ mastodon.get('/timelines/home', async (c) => {
     for (const l of liked) likedSet.add(l.target_id)
   }
 
-  return c.json(posts.map(r => {
+  const homeStatuses = posts.map(r => {
     const account = toAccount({
       id: r.user_id as number, username: r.username as string, avatar: r.avatar as string | null,
       role: r.role as string, bio: r.bio as string | null, created_at: r.user_created_at as string,
@@ -828,7 +869,11 @@ mastodon.get('/timelines/home', async (c) => {
       diaper_id: r.diaper_id as number | null, like_count: r.like_count as number,
       comment_count: r.comment_count as number, created_at: r.created_at as string,
     }, account, { favourited: likedSet.has(r.id as number) })
-  }))
+  })
+
+  const link = buildLinkHeader('/api/v1/timelines/home', homeStatuses, limit)
+  if (link) c.header('Link', link)
+  return c.json(homeStatuses)
 })
 
 // ============================================================
@@ -868,7 +913,7 @@ mastodon.get('/timelines/public', async (c) => {
     }
   }
 
-  return c.json(posts.map(r => {
+  const publicStatuses = posts.map(r => {
     const account = toAccount({
       id: r.user_id as number, username: r.username as string, avatar: r.avatar as string | null,
       role: r.role as string, bio: r.bio as string | null, created_at: r.user_created_at as string,
@@ -878,7 +923,11 @@ mastodon.get('/timelines/public', async (c) => {
       diaper_id: r.diaper_id as number | null, like_count: r.like_count as number,
       comment_count: r.comment_count as number, created_at: r.created_at as string,
     }, account, { favourited: likedSet.has(r.id as number) })
-  }))
+  })
+
+  const link = buildLinkHeader('/api/v1/timelines/public', publicStatuses, limit, { local: c.req.query('local') || '' })
+  if (link) c.header('Link', link)
+  return c.json(publicStatuses)
 })
 
 // ============================================================
@@ -898,7 +947,7 @@ mastodon.get('/timelines/tag/:hashtag', async (c) => {
     [`%#${hashtag}%`, limit]
   )
 
-  return c.json(posts.map(r => {
+  const tagStatuses = posts.map(r => {
     const account = toAccount({
       id: r.user_id as number, username: r.username as string, avatar: r.avatar as string | null,
       role: r.role as string, bio: r.bio as string | null, created_at: r.user_created_at as string,
@@ -908,7 +957,11 @@ mastodon.get('/timelines/tag/:hashtag', async (c) => {
       like_count: r.like_count as number, comment_count: r.comment_count as number,
       created_at: r.created_at as string,
     }, account)
-  }))
+  })
+
+  const link = buildLinkHeader(`/api/v1/timelines/tag/${hashtag}`, tagStatuses, limit)
+  if (link) c.header('Link', link)
+  return c.json(tagStatuses)
 })
 
 // ============================================================
@@ -976,6 +1029,8 @@ mastodon.get('/notifications', async (c) => {
     if (notif) notifs.push(notif)
   }
 
+  const link = buildLinkHeader('/api/v1/notifications', notifs, limit)
+  if (link) c.header('Link', link)
   return c.json(notifs)
 })
 
