@@ -56,6 +56,8 @@ function buildLinkHeader(
 
 const mastodon = new Hono<AppType>()
 
+const IMGBED_HOST = 'https://img.abdl-space.top'
+
 // ============================================================
 // GET /api/v1/instance
 // ============================================================
@@ -504,14 +506,13 @@ mastodon.post('/statuses', async (c) => {
 
   // Handle media attachments (images from media_ids)
   if (body.media_ids && body.media_ids.length > 0) {
+    let sortOrder = 0
     for (const mediaId of body.media_ids) {
       if (typeof mediaId !== 'string' || !mediaId) continue
       // Validate: must be a URL from our image host
-      if (!mediaId.startsWith('https://img.abdl-space.top/')) {
-        return c.json({ error: 'Invalid media attachment URL' }, 422)
-      }
+      if (!mediaId.startsWith(IMGBED_HOST + '/')) continue
       try {
-        await run(c.env.abdl_space_db, 'INSERT INTO post_images (post_id, image_url, sort_order) VALUES (?, ?, ?)', [postId, mediaId, 0])
+        await run(c.env.abdl_space_db, 'INSERT INTO post_images (post_id, image_url, sort_order) VALUES (?, ?, ?)', [postId, mediaId, sortOrder++])
       } catch {}
     }
   }
@@ -986,7 +987,7 @@ mastodon.post('/media', async (c) => {
   }
 
   // Forward to img.abdl-space.top
-  const IMGBED_URL = 'https://img.abdl-space.top'
+  const IMGBED_URL = IMGBED_HOST
   const uploadForm = new FormData()
   uploadForm.append('file', file)
 
