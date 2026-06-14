@@ -1,4 +1,5 @@
 import { Hono } from 'hono'
+const DEFAULT_AVATAR = 'https://img.abdl-space.top/file/system/1781439303787_play_store_512.png'
 import type { Env, JWTPayload } from '../types/index.ts'
 import { query, queryOne, run } from '../lib/db.ts'
 import { authMiddleware } from '../middleware/auth.ts'
@@ -262,7 +263,7 @@ wiki.get('/:slug/inline-comments', async (c) => {
     comments: comments.map(c => ({
       id: c.id,
       paragraph_hash: c.paragraph_hash,
-      author: { id: c.user_id, username: c.username, avatar: c.avatar ?? null },
+      author: { id: c.user_id, username: c.username, avatar: c.avatar ?? DEFAULT_AVATAR },
       content: c.content,
       created_at: c.created_at
     }))
@@ -362,7 +363,7 @@ wiki.get('/:slug/versions', async (c) => {
       id: v.id,
       version: v.version,
       content: v.content,
-      author: v.author_id ? { id: v.author_id, username: v.username, avatar: v.avatar ?? null } : null,
+      author: v.author_id ? { id: v.author_id, username: v.username, avatar: v.avatar ?? DEFAULT_AVATAR } : null,
       created_at: v.created_at
     }))
   })
@@ -402,7 +403,7 @@ wiki.get('/:slug/versions/:version', async (c) => {
       id: record.id,
       version: record.version,
       content: record.content,
-      author: record.author_id ? { id: record.author_id, username: record.username, avatar: record.avatar ?? null } : null,
+      author: record.author_id ? { id: record.author_id, username: record.username, avatar: record.avatar ?? DEFAULT_AVATAR } : null,
       created_at: record.created_at
     }
   })

@@ -1,4 +1,5 @@
 import { Hono } from 'hono'
+const DEFAULT_AVATAR = 'https://img.abdl-space.top/file/system/1781439303787_play_store_512.png'
 import type { Env, JWTPayload, CreateRatingRequest } from '../types/index.ts'
 import { queryOne, query, run } from '../lib/db.ts'
 import { authMiddleware } from '../middleware/auth.ts'
@@ -182,7 +183,7 @@ ratings.get('/me/:diaperId', authMiddleware, async (c) => {
   return c.json({
     rating: {
       id: row.id,
-      user: { id: row.user_id, username: row.username, avatar: row.avatar ?? null, role: row.role },
+      user: { id: row.user_id, username: row.username, avatar: row.avatar ?? DEFAULT_AVATAR, role: row.role },
       diaper_id: row.diaper_id,
       absorption_score: row.absorption_score,
       comfort_score: row.comfort_score,

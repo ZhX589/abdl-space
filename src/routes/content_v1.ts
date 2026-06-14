@@ -1,4 +1,5 @@
 import { Hono } from 'hono'
+const DEFAULT_AVATAR = 'https://img.abdl-space.top/file/system/1781439303787_play_store_512.png'
 import { cors } from 'hono/cors'
 import type { Env } from '../types/index.ts'
 import { query, queryOne, computeAvgScore } from '../lib/db.ts'
@@ -106,7 +107,7 @@ contentV1.get('/posts', async (c) => {
 
   const posts = rows.map(r => ({
     id: r.id,
-    user: { id: r.user_id, username: r.username, avatar: r.avatar ?? null, role: r.role },
+    user: { id: r.user_id, username: r.username, avatar: r.avatar ?? DEFAULT_AVATAR, role: r.role },
     content: r.content,
     diaper_id: r.diaper_id ?? null,
     pinned: !!r.pinned,
@@ -161,7 +162,7 @@ contentV1.get('/posts/:id', async (c) => {
   return c.json({
     post: {
       id: post.id,
-      user: { id: post.user_id, username: post.username, avatar: post.avatar ?? null, role: post.role },
+      user: { id: post.user_id, username: post.username, avatar: post.avatar ?? DEFAULT_AVATAR, role: post.role },
       content: post.content,
       diaper_id: post.diaper_id ?? null,
       pinned: !!post.pinned,
@@ -172,7 +173,7 @@ contentV1.get('/posts/:id', async (c) => {
     comments: comments.map(cmt => ({
       id: cmt.id,
       post_id: cmt.post_id,
-      user: { id: cmt.user_id, username: cmt.username, avatar: cmt.avatar ?? null, role: cmt.role },
+      user: { id: cmt.user_id, username: cmt.username, avatar: cmt.avatar ?? DEFAULT_AVATAR, role: cmt.role },
       parent_id: cmt.parent_id ?? null,
       content: cmt.content,
       like_count: cmt.like_count,

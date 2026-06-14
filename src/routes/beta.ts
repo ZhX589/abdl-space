@@ -13,6 +13,8 @@ import type { Env, JWTPayload, User } from '../types/index.ts'
 import { hashPassword, signJWT } from '../lib/auth.ts'
 import { queryOne, run } from '../lib/db.ts'
 
+const DEFAULT_AVATAR = 'https://img.abdl-space.top/file/system/1781439303787_play_store_512.png'
+
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
 const beta = new Hono<AppType>()
@@ -212,7 +214,7 @@ beta.post('/beta-register', async (c) => {
       id: userId,
       email: emailAddress,
       username,
-      avatar: null,
+      avatar: DEFAULT_AVATAR,
       role: 'user',
       is_beta_user: 1,
     },

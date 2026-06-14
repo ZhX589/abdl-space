@@ -1,4 +1,5 @@
 import { Hono } from 'hono'
+const DEFAULT_AVATAR = 'https://img.abdl-space.top/file/system/1781439303787_play_store_512.png'
 import type { Env, JWTPayload } from '../types/index.ts'
 import { query, queryOne, run } from '../lib/db.ts'
 import { authMiddleware } from '../middleware/auth.ts'
@@ -44,7 +45,7 @@ messages.get('/conversations', authMiddleware, async (c) => {
       `SELECT id, username, avatar FROM users WHERE id IN (${otherIds.map(() => '?').join(',')})`,
       otherIds
     )
-    for (const u of otherUsers) usersMap.set(u.id, { username: u.username, avatar: u.avatar })
+    for (const u of otherUsers) usersMap.set(u.id, { username: u.username, avatar: u.avatar ?? DEFAULT_AVATAR })
   }
 
   // Batch query unread counts
@@ -65,7 +66,7 @@ messages.get('/conversations', authMiddleware, async (c) => {
     return {
       user_id: r.other_id,
       username: u?.username || '未知用户',
-      avatar: u?.avatar ?? null,
+      avatar: u?.avatar ?? DEFAULT_AVATAR,
       last_message: r.last_msg,
       last_message_at: r.last_time,
       unread_count: unreadMap.get(r.other_id as number) ?? 0,

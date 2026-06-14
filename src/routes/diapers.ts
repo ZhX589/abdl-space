@@ -1,4 +1,5 @@
 import { Hono } from 'hono'
+const DEFAULT_AVATAR = 'https://img.abdl-space.top/file/system/1781439303787_play_store_512.png'
 import type { Env, JWTPayload, Diaper, DiaperSize } from '../types/index.ts'
 import { query, queryOne, dimensionWeightedScore } from '../lib/db.ts'
 import { rateLimit } from '../lib/rate-limit.ts'
@@ -478,7 +479,7 @@ diapers.get('/:id/ratings', async (c) => {
   return c.json({
     reviews: reviews.map(r => ({
       id: r.id,
-      user: { id: r.user_id, username: r.username, avatar: r.avatar || null, role: r.role },
+      user: { id: r.user_id, username: r.username, avatar: r.avatar ?? DEFAULT_AVATAR, role: r.role },
       diaper_id: r.diaper_id,
       absorption_score: r.absorption_score,
       comfort_score: r.comfort_score,
@@ -531,7 +532,7 @@ diapers.get('/:id/feelings', async (c) => {
   return c.json({
     feelings: feelings.map(f => ({
       id: f.id,
-      user: { id: f.user_id, username: f.username, avatar: f.avatar ?? null },
+      user: { id: f.user_id, username: f.username, avatar: f.avatar ?? DEFAULT_AVATAR },
       diaper_id: f.diaper_id,
       size: f.size,
       looseness: f.looseness,
@@ -691,7 +692,7 @@ diapers.get('/:id', async (c) => {
     },
     reviews: reviews.map(r => ({
       id: r.id,
-      user: { id: r.user_id, username: r.username, avatar: r.avatar || null, role: r.role },
+      user: { id: r.user_id, username: r.username, avatar: r.avatar ?? DEFAULT_AVATAR, role: r.role },
       diaper_id: r.diaper_id,
       absorption_score: r.absorption_score,
       comfort_score: r.comfort_score,

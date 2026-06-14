@@ -1,4 +1,5 @@
 import { Hono } from 'hono'
+const DEFAULT_AVATAR = 'https://img.abdl-space.top/file/system/1781439303787_play_store_512.png'
 import type { Env, JWTPayload, CreatePostRequest } from '../types/index.ts'
 import { query, queryOne, run } from '../lib/db.ts'
 import { authMiddleware } from '../middleware/auth.ts'
@@ -186,7 +187,7 @@ posts.get('/', async (c) => {
     for (const orig of repostRows) {
       repostMap.set(orig.id as number, {
         id: orig.id,
-        user: { id: orig.user_id, username: orig.username, avatar: orig.avatar ?? null, role: orig.role, is_beta_user: !!orig.is_beta_user },
+        user: { id: orig.user_id, username: orig.username, avatar: orig.avatar ?? DEFAULT_AVATAR, role: orig.role, is_beta_user: !!orig.is_beta_user },
         content: orig.content,
         images: (repostImagesMap.get(orig.id as number) || []).map(img => ({ image_url: img.image_url, is_nsfw: !!img.is_nsfw })),
         created_at: orig.created_at
@@ -196,7 +197,7 @@ posts.get('/', async (c) => {
 
   const postsList = rows.map(r => ({
     id: r.id,
-    user: { id: r.user_id, username: r.username, avatar: r.avatar ?? null, role: r.role, is_beta_user: !!r.is_beta_user },
+    user: { id: r.user_id, username: r.username, avatar: r.avatar ?? DEFAULT_AVATAR, role: r.role, is_beta_user: !!r.is_beta_user },
     content: r.content,
     diaper_id: r.diaper_id ?? null,
     pinned: !!r.pinned,
@@ -240,7 +241,7 @@ posts.get('/announcements/latest', async (c) => {
   return c.json({
     announcement: {
       id: post.id,
-      user: { id: post.user_id, username: post.username, avatar: post.avatar ?? null, role: post.role },
+      user: { id: post.user_id, username: post.username, avatar: post.avatar ?? DEFAULT_AVATAR, role: post.role },
       content: post.content,
       images: images.map(img => ({ image_url: img.image_url, is_nsfw: !!img.is_nsfw })),
       created_at: post.created_at
@@ -345,7 +346,7 @@ posts.get('/:id', async (c) => {
   const commentsWithLikes = comments.map(cmt => ({
     id: cmt.id,
     post_id: cmt.post_id,
-    user: { id: cmt.user_id, username: cmt.username, avatar: cmt.avatar ?? null, role: cmt.role, is_beta_user: !!cmt.is_beta_user },
+    user: { id: cmt.user_id, username: cmt.username, avatar: cmt.avatar ?? DEFAULT_AVATAR, role: cmt.role, is_beta_user: !!cmt.is_beta_user },
     parent_id: cmt.parent_id ?? null,
     content: cmt.content,
     images: (cmtImagesMap.get(cmt.id as number) || []).map(img => ({ image_url: img.image_url, is_nsfw: !!img.is_nsfw })),
@@ -370,7 +371,7 @@ posts.get('/:id', async (c) => {
       const origImages = await safeGetImages(c.env.abdl_space_db, post.repost_id)
       repost = {
         id: origPost.id,
-        user: { id: origPost.user_id, username: origPost.username, avatar: origPost.avatar ?? null, role: origPost.role, is_beta_user: !!origPost.is_beta_user },
+        user: { id: origPost.user_id, username: origPost.username, avatar: origPost.avatar ?? DEFAULT_AVATAR, role: origPost.role, is_beta_user: !!origPost.is_beta_user },
         content: origPost.content,
         images: origImages.map(img => ({ image_url: img.image_url, is_nsfw: !!img.is_nsfw })),
         created_at: origPost.created_at
@@ -385,7 +386,7 @@ posts.get('/:id', async (c) => {
   return c.json({
     post: {
       id: post.id,
-      user: { id: post.user_id, username: post.username, avatar: post.avatar ?? null, role: post.role, is_beta_user: !!post.is_beta_user },
+      user: { id: post.user_id, username: post.username, avatar: post.avatar ?? DEFAULT_AVATAR, role: post.role, is_beta_user: !!post.is_beta_user },
       content: post.content,
       diaper_id: post.diaper_id ?? null,
       pinned: !!post.pinned,

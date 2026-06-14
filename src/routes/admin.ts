@@ -1,4 +1,5 @@
 import { Hono } from 'hono'
+const DEFAULT_AVATAR = 'https://img.abdl-space.top/file/system/1781439303787_play_store_512.png'
 import type { Env, JWTPayload } from '../types/index.ts'
 import { query, queryOne, run } from '../lib/db.ts'
 import { adminMiddleware } from '../middleware/auth.ts'
@@ -64,7 +65,7 @@ admin.get('/users', adminMiddleware, async (c) => {
       email: r.email,
       username: r.username,
       role: r.role,
-      avatar: r.avatar ?? null,
+      avatar: r.avatar ?? DEFAULT_AVATAR,
       email_verified: r.email_verified,
       created_at: r.created_at
     }))
@@ -159,7 +160,7 @@ admin.get('/posts', adminMiddleware, async (c) => {
   return c.json({
     posts: rows.map(r => ({
       id: r.id, content: r.content, pinned: !!r.pinned, has_nsfw: !!r.has_nsfw,
-      user: { username: r.username, avatar: r.avatar ?? null, role: r.role },
+      user: { username: r.username, avatar: r.avatar ?? DEFAULT_AVATAR, role: r.role },
       like_count: r.like_count, comment_count: r.comment_count, created_at: r.created_at
     }))
   })

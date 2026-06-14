@@ -1,4 +1,5 @@
 import { Hono } from 'hono'
+const DEFAULT_AVATAR = 'https://img.abdl-space.top/file/system/1781439303787_play_store_512.png'
 import type { Env, JWTPayload } from '../types/index.ts'
 import { queryOne, run } from '../lib/db.ts'
 import { signJWT } from '../lib/auth.ts'
@@ -62,7 +63,7 @@ async function verifyNBWBindToken(token: string, secret: string): Promise<{ uid:
     if (!valid) return null
     const payload = JSON.parse(base64UrlToUtf8(parts[1]))
     if (payload.type !== 'nbw_bind' || !payload.exp || payload.exp < Date.now()) return null
-    return { uid: payload.uid, username: payload.username, avatar: payload.avatar || null }
+    return { uid: payload.uid, username: payload.username, avatar: payload.avatar || DEFAULT_AVATAR }
   } catch { return null }
 }
 
@@ -154,7 +155,7 @@ nbw.post('/callback', async (c) => {
     return c.json({
       action: 'login',
       token,
-      user: { id: existing.id, username: existing.username, email: existing.email, avatar: existing.avatar, role: existing.role },
+      user: { id: existing.id, username: existing.username, email: existing.email, avatar: existing.avatar ?? DEFAULT_AVATAR, role: existing.role },
     })
   }
 
@@ -162,7 +163,7 @@ nbw.post('/callback', async (c) => {
   let bindToken: string
   try {
     bindToken = await signNBWBindToken(
-      { uid: nbwUser.uid, username: nbwUser.username || '', avatar: nbwUser.avatar || null },
+      { uid: nbwUser.uid, username: nbwUser.username || '', avatar: nbwUser.avatar || DEFAULT_AVATAR },
       c.env.JWT_SECRET
     )
   } catch (e) {
@@ -176,7 +177,7 @@ nbw.post('/callback', async (c) => {
     nbw_user: {
       uid: nbwUser.uid,
       username: nbwUser.username || '',
-      avatar: nbwUser.avatar || null,
+      avatar: nbwUser.avatar || DEFAULT_AVATAR,
     },
   })
 })

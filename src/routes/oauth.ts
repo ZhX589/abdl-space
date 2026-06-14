@@ -1,4 +1,5 @@
 import { Hono } from 'hono'
+const DEFAULT_AVATAR = 'https://img.abdl-space.top/file/system/1781439303787_play_store_512.png'
 import type { Env, JWTPayload } from '../types/index.ts'
 import {
   OAUTH_CONFIG, ALL_SCOPES, SCOPE_DESCRIPTIONS,
@@ -69,7 +70,7 @@ oauth.get('/authorize', authMiddleware, async (c) => {
       logo_url: client.logo_url,
       homepage_url: client.homepage_url,
     },
-    user: dbUser ? { id: dbUser.id, username: dbUser.username, avatar: dbUser.avatar } : null,
+    user: dbUser ? { id: dbUser.id, username: dbUser.username, avatar: dbUser.avatar ?? DEFAULT_AVATAR } : null,
     scopes: requestedScopes.map(s => ({
       value: s,
       description: SCOPE_DESCRIPTIONS[s as keyof typeof SCOPE_DESCRIPTIONS] || s,

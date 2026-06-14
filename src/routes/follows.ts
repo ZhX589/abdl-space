@@ -3,6 +3,8 @@ import type { Env, JWTPayload } from '../types/index.ts'
 import { query, queryOne, run } from '../lib/db.ts'
 import { authMiddleware } from '../middleware/auth.ts'
 
+const DEFAULT_AVATAR = 'https://img.abdl-space.top/file/system/1781439303787_play_store_512.png'
+
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
 const follows = new Hono<AppType>()
@@ -129,7 +131,7 @@ follows.get('/:userId/followers', async (c) => {
     [targetId]
   )
 
-  return c.json({ users: rows, total: count?.count ?? 0 })
+  return c.json({ users: rows.map(r => ({ ...r, avatar: r.avatar ?? DEFAULT_AVATAR })), total: count?.count ?? 0 })
 })
 
 /**
@@ -158,7 +160,7 @@ follows.get('/:userId/following', async (c) => {
     [targetId]
   )
 
-  return c.json({ users: rows, total: count?.count ?? 0 })
+  return c.json({ users: rows.map(r => ({ ...r, avatar: r.avatar ?? DEFAULT_AVATAR })), total: count?.count ?? 0 })
 })
 
 export default follows

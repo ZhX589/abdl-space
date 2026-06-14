@@ -20,6 +20,7 @@ const RATE_LIMIT_MAX = 10      // 每窗口最大请求数
 const CODE_PATTERN = /^ABDL-[A-Z0-9]{4}-[A-Z0-9]{4}$/
 
 const tokenCookieOptions = 'HttpOnly; Secure; SameSite=None; Domain=.abdl-space.top; Path=/; Max-Age=604800'
+const DEFAULT_AVATAR = 'https://img.abdl-space.top/file/system/1781439303787_play_store_512.png'
 
 // ============================================================
 // 工具函数
@@ -341,8 +342,8 @@ auth.post('/register', async (c) => {
   const passwordHash = await hashPassword(password)
   const insertResult = await run(
     db,
-    'INSERT INTO users (email, password_hash, username, email_verified, nbw_uid, nbw_username) VALUES (?, ?, ?, 1, ?, ?)',
-    [emailAddress, passwordHash, username, isNBW ? String(nbw_uid) : null, isNBW ? nbw_username : null]
+    'INSERT INTO users (email, password_hash, username, avatar, email_verified, nbw_uid, nbw_username) VALUES (?, ?, ?, ?, 1, ?, ?)',
+    [emailAddress, passwordHash, username, DEFAULT_AVATAR, isNBW ? String(nbw_uid) : null, isNBW ? nbw_username : null]
   )
   const userId = insertResult.meta.last_row_id as number
 
@@ -382,7 +383,7 @@ auth.post('/register', async (c) => {
 
   return c.json({
     token,
-    user: { id: userId, email: emailAddress, username, avatar: null, role: 'user', is_beta_user: 0 },
+    user: { id: userId, email: emailAddress, username, avatar: DEFAULT_AVATAR, role: 'user', is_beta_user: 0 },
     rewards,
   }, 201)
 })
@@ -426,7 +427,7 @@ auth.post('/login', async (c) => {
 
   return c.json({
     token,
-    user: { id: user.id, email: user.email, username: user.username, avatar: user.avatar, role: user.role }
+    user: { id: user.id, email: user.email, username: user.username, avatar: user.avatar ?? DEFAULT_AVATAR, role: user.role }
   } satisfies LoginResponse)
 })
 
@@ -543,7 +544,7 @@ auth.get('/me', authMiddleware, async (c) => {
     id: user.id,
     email: user.email,
     username: user.username,
-    avatar: user.avatar,
+    avatar: user.avatar ?? DEFAULT_AVATAR,
     role: user.role,
     age: user.age,
     region: user.region,

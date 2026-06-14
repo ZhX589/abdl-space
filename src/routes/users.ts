@@ -3,6 +3,8 @@ import type { Env, JWTPayload, UpdateUserRequest } from '../types/index.ts'
 import { query, queryOne, run } from '../lib/db.ts'
 import { authMiddleware } from '../middleware/auth.ts'
 
+const DEFAULT_AVATAR = 'https://img.abdl-space.top/file/system/1781439303787_play_store_512.png'
+
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
 const users = new Hono<AppType>()
@@ -46,7 +48,7 @@ users.get('/search', async (c) => {
   );
 
   return c.json({
-    users: rows.map(r => ({ id: r.id, username: r.username, avatar: r.avatar ?? null, role: r.role }))
+    users: rows.map(r => ({ id: r.id, username: r.username, avatar: r.avatar ?? DEFAULT_AVATAR, role: r.role }))
   });
 });
 
@@ -75,7 +77,7 @@ users.get('/:id', async (c) => {
       id: user.id,
       username: user.username,
       role: user.role,
-      avatar: user.avatar ?? null,
+      avatar: user.avatar ?? DEFAULT_AVATAR,
       age: user.age ?? null,
       region: user.region ?? null,
       style_preference: user.style_preference ?? null,
@@ -203,7 +205,7 @@ users.get('/:id/posts', async (c) => {
 
   const postsList = posts.map(r => ({
     id: r.id,
-    user: { id: r.user_id, username: r.username, avatar: r.avatar ?? null, role: r.role },
+    user: { id: r.user_id, username: r.username, avatar: r.avatar ?? DEFAULT_AVATAR, role: r.role },
     content: r.content,
     diaper_id: r.diaper_id ?? null,
     pinned: !!r.pinned,
@@ -234,7 +236,7 @@ users.get('/:id/ratings', async (c) => {
   return c.json({
     reviews: reviews.map(r => ({
       id: r.id,
-      user: { id: r.user_id, username: r.username, avatar: r.avatar ?? null, role: r.role },
+      user: { id: r.user_id, username: r.username, avatar: r.avatar ?? DEFAULT_AVATAR, role: r.role },
       diaper_id: r.diaper_id,
       absorption_score: r.absorption_score,
       comfort_score: r.comfort_score,
@@ -297,7 +299,7 @@ users.get('/:id/feelings', async (c) => {
   return c.json({
     feelings: feelings.map(f => ({
       id: f.id,
-      user: { id: f.user_id, username: f.username, avatar: f.avatar ?? null },
+      user: { id: f.user_id, username: f.username, avatar: f.avatar ?? DEFAULT_AVATAR },
       diaper_id: f.diaper_id,
       size: f.size,
       looseness: f.looseness,

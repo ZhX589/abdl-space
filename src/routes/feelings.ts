@@ -1,4 +1,5 @@
 import { Hono } from 'hono'
+const DEFAULT_AVATAR = 'https://img.abdl-space.top/file/system/1781439303787_play_store_512.png'
 import type { Env, JWTPayload, CreateFeelingRequest } from '../types/index.ts'
 import { queryOne, query, run } from '../lib/db.ts'
 import { authMiddleware } from '../middleware/auth.ts'
@@ -85,7 +86,7 @@ feelings.get('/me/:diaperId/:size', authMiddleware, async (c) => {
   return c.json({
     feeling: {
       id: row.id,
-      user: { id: row.user_id, username: row.username, avatar: row.avatar ?? null },
+      user: { id: row.user_id, username: row.username, avatar: row.avatar ?? DEFAULT_AVATAR },
       diaper_id: row.diaper_id,
       size: row.size,
       looseness: row.looseness,
