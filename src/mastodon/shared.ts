@@ -105,3 +105,14 @@ export async function resolveStatus(db: D1Database, mastoId: string): Promise<{ 
 export function toMastoId(kind: 'post' | 'comment', realId: number): string {
   return kind === 'comment' ? `c_${realId}` : `p_${realId}`
 }
+
+/** Extract numeric ID from Mastodon status ID (for SQL cursor pagination) */
+export function parseMastoIdForCursor(mastoId: string | undefined): number | undefined {
+  if (!mastoId) return undefined
+  if (mastoId.startsWith('p_') || mastoId.startsWith('c_')) {
+    const id = parseInt(mastoId.slice(2))
+    return isNaN(id) ? undefined : id
+  }
+  const id = parseInt(mastoId)
+  return isNaN(id) ? undefined : id
+}

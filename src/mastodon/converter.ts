@@ -4,6 +4,7 @@
  */
 
 import type { MastodonAccount, MastodonStatus, MastodonMediaAttachment, MastodonNotification } from './types.ts'
+import { toMastoId } from './shared.ts'
 
 const INSTANCE_DOMAIN = 'api.abdl-space.top'
 const DEFAULT_AVATAR = 'https://img.abdl-space.top/file/system/1781439303787_play_store_512.png'
@@ -78,7 +79,7 @@ export function toStatus(post: {
   const images = post.images || []
 
   return {
-    id: String(post.id),
+    id: toMastoId('post', post.id),
     created_at: post.created_at,
     in_reply_to_id: null,
     in_reply_to_account_id: null,
@@ -139,16 +140,16 @@ export function toStatusFromComment(comment: {
   const images = comment.images || []
 
   return {
-    id: String(comment.id + 10000000), // offset to avoid collision with post IDs
+    id: toMastoId('comment', comment.id),
     created_at: comment.created_at,
-    in_reply_to_id: comment.parent_id ? String(comment.parent_id + 10000000) : String(comment.post_id),
+    in_reply_to_id: comment.parent_id ? toMastoId('comment', comment.parent_id) : toMastoId('post', comment.post_id),
     in_reply_to_account_id: null,
     sensitive: false,
     spoiler_text: '',
     visibility: 'public',
     language: 'zh',
-    uri: `https://${INSTANCE_DOMAIN}/users/${account.username}/statuses/${comment.id + 10000000}`,
-    url: `https://${INSTANCE_DOMAIN}/@${account.username}/${comment.id + 10000000}`,
+    uri: `https://${INSTANCE_DOMAIN}/users/${account.username}/statuses/${comment.id}`,
+    url: `https://${INSTANCE_DOMAIN}/@${account.username}/${comment.id}`,
     replies_count: 0,
     reblogs_count: 0,
     favourites_count: comment.like_count ?? 0,

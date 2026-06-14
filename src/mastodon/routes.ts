@@ -11,7 +11,7 @@ import type { Env, JWTPayload } from '../types/index.ts'
 import { query, queryOne, run } from '../lib/db.ts'
 import { toAccount, toStatus, toStatusFromComment, toNotification } from './converter.ts'
 import type { MastodonNotification, MastodonAccount, MastodonStatus } from './types.ts'
-import { mastodonAuth, buildInstance, resolveStatus } from './shared.ts'
+import { mastodonAuth, buildInstance, resolveStatus, parseMastoIdForCursor } from './shared.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
@@ -310,8 +310,8 @@ mastodon.get('/accounts/:id/statuses', async (c) => {
     FROM posts p JOIN users u ON p.user_id = u.id WHERE p.user_id = ?`
   const params: unknown[] = [id]
 
-  if (maxId) { sql += ' AND p.id < ?'; params.push(parseInt(maxId)) }
-  if (sinceId) { sql += ' AND p.id > ?'; params.push(parseInt(sinceId)) }
+  if (maxId) { sql += ' AND p.id < ?'; params.push(parseMastoIdForCursor(maxId) ?? 0) }
+  if (sinceId) { sql += ' AND p.id > ?'; params.push(parseMastoIdForCursor(sinceId) ?? 0) }
 
   sql += ' ORDER BY p.created_at DESC LIMIT ?'
   params.push(limit)
@@ -366,8 +366,8 @@ mastodon.get('/accounts/:id/followers', async (c) => {
      WHERE f.following_id = ?`
   const params: unknown[] = [id]
 
-  if (maxId) { sql += ' AND f.id < ?'; params.push(parseInt(maxId)) }
-  if (sinceId) { sql += ' AND f.id > ?'; params.push(parseInt(sinceId)) }
+  if (maxId) { sql += ' AND f.id < ?'; params.push(parseMastoIdForCursor(maxId) ?? 0) }
+  if (sinceId) { sql += ' AND f.id > ?'; params.push(parseMastoIdForCursor(sinceId) ?? 0) }
 
   sql += ' ORDER BY f.created_at DESC LIMIT ?'
   params.push(limit)
@@ -399,8 +399,8 @@ mastodon.get('/accounts/:id/following', async (c) => {
      WHERE f.follower_id = ?`
   const params: unknown[] = [id]
 
-  if (maxId) { sql += ' AND f.id < ?'; params.push(parseInt(maxId)) }
-  if (sinceId) { sql += ' AND f.id > ?'; params.push(parseInt(sinceId)) }
+  if (maxId) { sql += ' AND f.id < ?'; params.push(parseMastoIdForCursor(maxId) ?? 0) }
+  if (sinceId) { sql += ' AND f.id > ?'; params.push(parseMastoIdForCursor(sinceId) ?? 0) }
 
   sql += ' ORDER BY f.created_at DESC LIMIT ?'
   params.push(limit)
@@ -780,8 +780,8 @@ mastodon.get('/timelines/home', async (c) => {
     WHERE (p.user_id = ? OR p.user_id IN (SELECT following_id FROM follows WHERE follower_id = ?))`
   const params: unknown[] = [user.sub, user.sub]
 
-  if (maxId) { sql += ' AND p.id < ?'; params.push(parseInt(maxId)) }
-  if (sinceId) { sql += ' AND p.id > ?'; params.push(parseInt(sinceId)) }
+  if (maxId) { sql += ' AND p.id < ?'; params.push(parseMastoIdForCursor(maxId) ?? 0) }
+  if (sinceId) { sql += ' AND p.id > ?'; params.push(parseMastoIdForCursor(sinceId) ?? 0) }
 
   sql += ' ORDER BY p.created_at DESC LIMIT ?'
   params.push(limit)
@@ -831,8 +831,8 @@ mastodon.get('/timelines/public', async (c) => {
     FROM posts p JOIN users u ON p.user_id = u.id WHERE 1=1`
   const params: unknown[] = []
 
-  if (maxId) { sql += ' AND p.id < ?'; params.push(parseInt(maxId)) }
-  if (sinceId) { sql += ' AND p.id > ?'; params.push(parseInt(sinceId)) }
+  if (maxId) { sql += ' AND p.id < ?'; params.push(parseMastoIdForCursor(maxId) ?? 0) }
+  if (sinceId) { sql += ' AND p.id > ?'; params.push(parseMastoIdForCursor(sinceId) ?? 0) }
 
   sql += ' ORDER BY p.created_at DESC LIMIT ?'
   params.push(limit)
