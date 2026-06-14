@@ -129,6 +129,7 @@ export interface MastodonInstance {
   languages: string[]
   configuration: {
     urls: { streaming: string | null; status: string | null; about: string | null; privacy_policy: string | null; terms_of_service: string | null }
+    vapid: { public_key: string }
     accounts: { max_featured_tags: number; max_pinned_statuses: number }
     statuses: { max_characters: number; max_media_attachments: number; characters_reserved_per_url: number }
     media_attachments: {

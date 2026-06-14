@@ -368,6 +368,8 @@ export interface Env {
   IMGBED_UPLOAD_KEY?: string
   IMGBED_DELETE_KEY?: string
   IMGBED_LIST_KEY?: string
+  VAPID_PUBLIC_KEY?: string
+  VAPID_PRIVATE_KEY?: string
 }
 
 /** JWT payload 结构 */

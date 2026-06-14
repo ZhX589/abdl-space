@@ -50,6 +50,7 @@ export async function buildInstance(db: D1Database): Promise<MastodonInstance> {
     languages: ['zh', 'en'],
     configuration: {
       urls: { streaming: null, status: null, about: 'https://abdl-space.top', privacy_policy: null, terms_of_service: null },
+      vapid: { public_key: '' },
       accounts: { max_featured_tags: 10, max_pinned_statuses: 5 },
       statuses: { max_characters: 5000, max_media_attachments: 4, characters_reserved_per_url: 23 },
       media_attachments: {
