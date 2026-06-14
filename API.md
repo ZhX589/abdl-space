@@ -2368,8 +2368,153 @@ npx wrangler d1 execute abdl-space-db --local --file schemas/seeds/diapers.sql
 
 ---
 
-## 八、变更记录
+## 八、Mastodon 兼容 API
+
+为支持 Moshidon 等 Mastodon 客户端连接，新增一套 `/api/v1/*` 兼容端点。
+
+### 架构
+
+```
+Moshidon (Mastodon Android Client)
+        │
+        ▼
+/api/v1/*     → Mastodon 兼容层（纯转换，无独立数据库）
+/api/v2/*     → Mastodon v2 端点（search、instance）
+/api/*        → 现有 ABDL 自定义 API（不动）
+```
+
+兼容层读写同一个 D1 数据库，通过转换函数将 ABDL 实体映射为 Mastodon 实体。
+
+### 认证
+
+支持两种 Bearer Token：
+- **OAuth access_token**（通过 `/api/v1/apps` 注册 + OAuth 流程获取）
+- **JWT**（现有 ABDL Space 的 token）
+
+Mastodon scope 映射：`follow`/`push` → `write`，`read`/`write`/`profile`/`email` 保留。
+
+### Status ID 格式
+
+帖子和评论使用前缀格式的字符串 ID：
+- 帖子：`p_<id>`（如 `p_42`）
+- 评论：`c_<id>`（如 `c_100`）
+
+也兼容 legacy 数字格式（`<10000000` 为帖子，`>=10000000` 为评论）。
+
+### 已实现端点
+
+#### Instance & Apps
+
+| 端点 | 说明 |
+|------|------|
+| `GET /api/v1/instance` | 实例信息 |
+| `GET /api/v2/instance` | 实例信息（v2） |
+| `POST /api/v1/apps` | 注册 OAuth 应用 |
+| `GET /api/v1/apps/verify_credentials` | 验证应用 |
+
+#### Accounts
+
+| 端点 | 说明 |
+|------|------|
+| `GET /api/v1/accounts/verify_credentials` | 当前用户（含 source） |
+| `PATCH /api/v1/accounts/update_credentials` | 编辑资料（支持 JSON + multipart） |
+| `GET /api/v1/accounts/:id` | 用户信息 |
+| `GET /api/v1/accounts/:id/statuses` | 用户帖子 |
+| `GET /api/v1/accounts/:id/followers` | 粉丝 |
+| `GET /api/v1/accounts/:id/following` | 关注 |
+| `POST /api/v1/accounts/:id/follow` | 关注 |
+| `POST /api/v1/accounts/:id/unfollow` | 取关 |
+| `GET /api/v1/accounts/relationships` | 关系状态 |
+| `GET /api/v1/accounts/:id/featured_tags` | 空数组 |
+
+#### Statuses
+
+| 端点 | 说明 |
+|------|------|
+| `POST /api/v1/statuses` | 发帖（支持 media_ids） |
+| `GET /api/v1/statuses/:id` | 帖子/评论详情 |
+| `DELETE /api/v1/statuses/:id` | 删帖/删评论 |
+| `POST /api/v1/statuses/:id/favourite` | 点赞 |
+| `POST /api/v1/statuses/:id/unfavourite` | 取消赞 |
+| `POST /api/v1/statuses/:id/reblog` | 转发（no-op） |
+| `POST /api/v1/statuses/:id/unreblog` | 取消转发 |
+| `GET /api/v1/statuses/:id/context` | 评论上下文 |
+| `GET /api/v1/statuses/:id/favourited_by` | 点赞用户列表 |
+| `GET /api/v1/statuses/:id/reblogged_by` | 空数组 |
+
+#### Timelines
+
+| 端点 | 说明 |
+|------|------|
+| `GET /api/v1/timelines/home` | 关注时间线 |
+| `GET /api/v1/timelines/public` | 公共时间线 |
+| `GET /api/v1/timelines/tag/:hashtag` | 标签时间线 |
+
+所有时间线支持 `max_id`/`since_id`/`limit` 分页，返回 `Link` header。
+
+#### Notifications
+
+| 端点 | 说明 |
+|------|------|
+| `GET /api/v1/notifications` | 通知列表 |
+| `GET /api/v1/notifications/:id` | 单条通知 |
+| `POST /api/v1/notifications/clear` | 全部已读 |
+| `GET /api/v1/notifications/unread_count` | 未读数 |
+
+#### Media & Search
+
+| 端点 | 说明 |
+|------|------|
+| `POST /api/v1/media` | 上传图片（代理到图床） |
+| `GET /api/v1/search` | 搜索（用户 + 帖子 + 标签） |
+| `GET /api/v2/search` | 搜索（v2） |
+
+#### Stub 端点
+
+以下端点返回空数组或默认值，确保 Moshidon 启动时不报错：
+
+| 端点 | 返回 |
+|------|------|
+| `GET /api/v1/filters` | `[]` |
+| `GET /api/v2/filters` | `[]` |
+| `GET /api/v1/markers` | 默认标记 |
+| `POST /api/v1/markers` | 默认标记 |
+| `GET /api/v1/custom_emojis` | `[]` |
+| `GET /api/v1/announcements` | `[]` |
+| `GET /api/v1/lists` | `[]` |
+| `GET /api/v1/preferences` | 默认偏好 |
+| `GET /api/v1/instance/peers` | `[]` |
+| `GET /api/v1/conversations` | `[]` |
+| `GET /api/v1/favourites` | `[]` |
+| `GET /api/v1/bookmarks` | `[]` |
+| `GET /api/v1/follow_requests` | `[]` |
+| `GET /api/v1/mutes` | `[]` |
+| `GET /api/v1/blocks` | `[]` |
+
+### 文件结构
+
+```
+src/mastodon/
+├── shared.ts      # 共享逻辑（auth、instance、resolveStatus）
+├── types.ts       # Mastodon 实体类型定义
+├── converter.ts   # ABDL → Mastodon 数据模型转换
+├── routes.ts      # /api/v1/* 端点
+└── v2.ts          # /api/v2/* 端点
+```
+
+### 已知限制
+
+- 无 Streaming API（`configuration.urls.streaming: null`，Moshidon 回退轮询）
+- 无 Push 通知
+- 无 ActivityPub 联邦（纯本地实例）
+- reblog 为 no-op
+- conversations 返回空数组
+
+---
+
+## 九、变更记录
 
 | 日期 | 变更 |
 |------|------|
 | 2026-06-14 | 全面重写：补充所有新增 API（Follows、Messages、Reports、Checkin、Points、Badges、Invite、OAuth、NBW、Beta、Search、Sync、Key Split、Content API、Captcha V1 等）；修正 Ratings 为 5 维度（无 fit_score）；修正评分为贝叶斯加权；补充奖励系统、图片上传、转发、公告等功能 |
+| 2026-06-15 | 新增 Mastodon 兼容 API 层（/api/v1/* + /api/v2/*），支持 Moshidon 等 Mastodon 客户端连接；Status ID 使用 p_/c_ 前缀格式；支持 OAuth + JWT 双模认证；实现 28+ 端点 + 15 个 stub 端点 |
