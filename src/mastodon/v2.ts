@@ -4,12 +4,12 @@
  */
 
 import { Hono } from 'hono'
-import type { Env } from '../types/index.ts'
+import type { Env, JWTPayload } from '../types/index.ts'
 import { query } from '../lib/db.ts'
 import { toAccount, toStatus } from './converter.ts'
 import { mastodonAuth, buildInstance } from './shared.ts'
 
-type AppType = { Bindings: Env }
+type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
 const mastodonV2 = new Hono<AppType>()
 

@@ -505,14 +505,17 @@ mastodon.post('/statuses', async (c) => {
   // Handle media attachments (images from media_ids)
   if (body.media_ids && body.media_ids.length > 0) {
     for (const mediaId of body.media_ids) {
-      // media_ids in our system are just URLs or IDs — try to store them
-      try {
-        await run(
-          c.env.abdl_space_db,
-          'INSERT INTO post_images (post_id, image_url, sort_order) VALUES (?, ?, ?)',
-          [postId, mediaId, 0]
-        )
-      } catch {}
+      // Validate ownership: media_id must be m_<userId>_... or a URL
+      if (typeof mediaId === 'string' && mediaId.startsWith('m_') && !mediaId.startsWith(`m_${user.sub}_`)) {
+        return c.json({ error: 'Media attachment does not belong to you' }, 422)
+      }
+      // If it's a m_ id, extract the URL from the upload response; otherwise treat as URL
+      const imageUrl = typeof mediaId === 'string' && mediaId.startsWith('m_') ? '' : mediaId
+      if (imageUrl) {
+        try {
+          await run(c.env.abdl_space_db, 'INSERT INTO post_images (post_id, image_url, sort_order) VALUES (?, ?, ?)', [postId, imageUrl, 0])
+        } catch {}
+      }
     }
   }
 
@@ -884,8 +887,8 @@ mastodon.get('/timelines/tag/:hashtag', async (c) => {
      (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
      (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count
      FROM posts p JOIN users u ON p.user_id = u.id
-     WHERE p.content LIKE ? ORDER BY p.created_at DESC LIMIT ?`,
-    [`%#${hashtag}%`, limit]
+     WHERE p.content LIKE ? OR p.content LIKE ? OR p.content LIKE ? OR p.content LIKE ? ORDER BY p.created_at DESC LIMIT ?`,
+    [`%#${hashtag} %`, `%#${hashtag}\n%`, `#${hashtag} %`, `#${hashtag}\n%`, limit]
   )
 
   const tagStatuses = posts.map(r => {
@@ -1017,7 +1020,7 @@ mastodon.post('/media', async (c) => {
   if (!url) return c.json({ error: 'Upload failed' }, 500)
 
   return c.json({
-    id: url,
+    id: `m_${user.sub}_${Date.now()}`,
     type: 'image',
     url,
     preview_url: url,
