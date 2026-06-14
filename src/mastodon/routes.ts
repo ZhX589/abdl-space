@@ -505,17 +505,14 @@ mastodon.post('/statuses', async (c) => {
   // Handle media attachments (images from media_ids)
   if (body.media_ids && body.media_ids.length > 0) {
     for (const mediaId of body.media_ids) {
-      // Validate ownership: media_id must be m_<userId>_... or a URL
-      if (typeof mediaId === 'string' && mediaId.startsWith('m_') && !mediaId.startsWith(`m_${user.sub}_`)) {
-        return c.json({ error: 'Media attachment does not belong to you' }, 422)
+      if (typeof mediaId !== 'string' || !mediaId) continue
+      // Validate: must be a URL from our image host
+      if (!mediaId.startsWith('https://img.abdl-space.top/')) {
+        return c.json({ error: 'Invalid media attachment URL' }, 422)
       }
-      // If it's a m_ id, extract the URL from the upload response; otherwise treat as URL
-      const imageUrl = typeof mediaId === 'string' && mediaId.startsWith('m_') ? '' : mediaId
-      if (imageUrl) {
-        try {
-          await run(c.env.abdl_space_db, 'INSERT INTO post_images (post_id, image_url, sort_order) VALUES (?, ?, ?)', [postId, imageUrl, 0])
-        } catch {}
-      }
+      try {
+        await run(c.env.abdl_space_db, 'INSERT INTO post_images (post_id, image_url, sort_order) VALUES (?, ?, ?)', [postId, mediaId, 0])
+      } catch {}
     }
   }
 
@@ -546,21 +543,19 @@ mastodon.post('/statuses', async (c) => {
 // GET /api/v1/statuses/:id
 // ============================================================
 mastodon.get('/statuses/:id', async (c) => {
-  const id = parseInt(c.req.param('id'))
-  if (!id) return c.json({ error: 'Invalid id' }, 400)
+  const rawId = c.req.param('id')
+  const resolved = await resolveStatus(c.env.abdl_space_db, rawId)
+  if (!resolved) return c.json({ error: 'Record not found' }, 404)
 
-  // Handle comment ID offset (comment.id + 10000000)
-  if (id >= 10000000) {
-    const commentId = id - 10000000
+  if (resolved.kind === 'comment') {
     const comment = await queryOne<Record<string, unknown>>(
       c.env.abdl_space_db,
       `SELECT pc.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
        (SELECT COUNT(*) FROM likes WHERE target_type = 'comment' AND target_id = pc.id) as like_count
        FROM post_comments pc JOIN users u ON pc.user_id = u.id WHERE pc.id = ?`,
-      [commentId]
+      [resolved.realId]
     )
     if (!comment) return c.json({ error: 'Record not found' }, 404)
-
     const account = toAccount({
       id: comment.user_id as number, username: comment.username as string, avatar: comment.avatar as string | null,
       role: comment.role as string, bio: comment.bio as string | null, created_at: comment.user_created_at as string,
@@ -578,13 +573,12 @@ mastodon.get('/statuses/:id', async (c) => {
      (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
      (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count
      FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`,
-    [id]
+    [resolved.realId]
   )
   if (!post) return c.json({ error: 'Record not found' }, 404)
 
-  // Get images
   const images = await query<{ image_url: string; is_nsfw: number }>(
-    c.env.abdl_space_db, 'SELECT image_url, is_nsfw FROM post_images WHERE post_id = ? ORDER BY sort_order', [id]
+    c.env.abdl_space_db, 'SELECT image_url, is_nsfw FROM post_images WHERE post_id = ? ORDER BY sort_order', [resolved.realId]
   )
 
   const account = toAccount({
@@ -1020,7 +1014,7 @@ mastodon.post('/media', async (c) => {
   if (!url) return c.json({ error: 'Upload failed' }, 500)
 
   return c.json({
-    id: `m_${user.sub}_${Date.now()}`,
+    id: url,
     type: 'image',
     url,
     preview_url: url,
@@ -1074,7 +1068,7 @@ mastodon.get('/search', async (c) => {
   const hashtagSet = new Set<string>()
   for (const r of posts) {
     const content = r.content as string
-    const regex = /#(\S+)/g
+    const regex = /#([\w\u4e00-\u9fa5]+)/g
     let match
     while ((match = regex.exec(content)) !== null) {
       if (match[1].toLowerCase().includes(q.toLowerCase())) {
