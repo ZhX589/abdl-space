@@ -702,31 +702,31 @@ mastodon.post('/statuses/:id/unfavourite', async (c) => {
 // POST /api/v1/statuses/:id/reblog
 // ============================================================
 mastodon.post('/statuses/:id/reblog', async (c) => {
-  // ABDL Space doesn't have reblog, treat as no-op
   const user = await mastodonAuth(c)
   if (!user) return c.json({ error: 'The access token is invalid' }, 401)
 
-  const id = parseInt(c.req.param('id'))
-  const post = await queryOne<Record<string, unknown>>(
-    c.env.abdl_space_db,
+  const rawId = c.req.param('id')
+  const resolved = await resolveStatus(c.env.abdl_space_db, rawId)
+  if (!resolved) return c.json({ error: 'Record not found' }, 404)
+
+  if (resolved.kind === 'comment') {
+    const comment = await queryOne<Record<string, unknown>>(c.env.abdl_space_db,
+      `SELECT pc.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
+       (SELECT COUNT(*) FROM likes WHERE target_type = 'comment' AND target_id = pc.id) as like_count
+       FROM post_comments pc JOIN users u ON pc.user_id = u.id WHERE pc.id = ?`, [resolved.realId])
+    if (!comment) return c.json({ error: 'Record not found' }, 404)
+    const account = toAccount({ id: comment.user_id as number, username: comment.username as string, avatar: comment.avatar as string | null, role: comment.role as string, bio: comment.bio as string | null, created_at: comment.user_created_at as string })
+    return c.json(toStatusFromComment({ id: comment.id as number, post_id: comment.post_id as number, user_id: comment.user_id as number, parent_id: comment.parent_id as number | null, content: comment.content as string, like_count: comment.like_count as number, created_at: comment.created_at as string }, account))
+  }
+
+  const post = await queryOne<Record<string, unknown>>(c.env.abdl_space_db,
     `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
      (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
      (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count
-     FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`,
-    [id]
-  )
+     FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`, [resolved.realId])
   if (!post) return c.json({ error: 'Record not found' }, 404)
-
-  const account = toAccount({
-    id: post.user_id as number, username: post.username as string, avatar: post.avatar as string | null,
-    role: post.role as string, bio: post.bio as string | null, created_at: post.user_created_at as string,
-  })
-
-  return c.json(toStatus({
-    id: post.id as number, user_id: post.user_id as number, content: post.content as string,
-    like_count: post.like_count as number, comment_count: post.comment_count as number,
-    created_at: post.created_at as string,
-  }, account, { reblogged: true }))
+  const account = toAccount({ id: post.user_id as number, username: post.username as string, avatar: post.avatar as string | null, role: post.role as string, bio: post.bio as string | null, created_at: post.user_created_at as string })
+  return c.json(toStatus({ id: post.id as number, user_id: post.user_id as number, content: post.content as string, like_count: post.like_count as number, comment_count: post.comment_count as number, created_at: post.created_at as string }, account, { reblogged: true }))
 })
 
 // ============================================================
@@ -736,27 +736,28 @@ mastodon.post('/statuses/:id/unreblog', async (c) => {
   const user = await mastodonAuth(c)
   if (!user) return c.json({ error: 'The access token is invalid' }, 401)
 
-  const id = parseInt(c.req.param('id'))
-  const post = await queryOne<Record<string, unknown>>(
-    c.env.abdl_space_db,
+  const rawId = c.req.param('id')
+  const resolved = await resolveStatus(c.env.abdl_space_db, rawId)
+  if (!resolved) return c.json({ error: 'Record not found' }, 404)
+
+  if (resolved.kind === 'comment') {
+    const comment = await queryOne<Record<string, unknown>>(c.env.abdl_space_db,
+      `SELECT pc.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
+       (SELECT COUNT(*) FROM likes WHERE target_type = 'comment' AND target_id = pc.id) as like_count
+       FROM post_comments pc JOIN users u ON pc.user_id = u.id WHERE pc.id = ?`, [resolved.realId])
+    if (!comment) return c.json({ error: 'Record not found' }, 404)
+    const account = toAccount({ id: comment.user_id as number, username: comment.username as string, avatar: comment.avatar as string | null, role: comment.role as string, bio: comment.bio as string | null, created_at: comment.user_created_at as string })
+    return c.json(toStatusFromComment({ id: comment.id as number, post_id: comment.post_id as number, user_id: comment.user_id as number, parent_id: comment.parent_id as number | null, content: comment.content as string, like_count: comment.like_count as number, created_at: comment.created_at as string }, account))
+  }
+
+  const post = await queryOne<Record<string, unknown>>(c.env.abdl_space_db,
     `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
      (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
      (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count
-     FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`,
-    [id]
-  )
+     FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`, [resolved.realId])
   if (!post) return c.json({ error: 'Record not found' }, 404)
-
-  const account = toAccount({
-    id: post.user_id as number, username: post.username as string, avatar: post.avatar as string | null,
-    role: post.role as string, bio: post.bio as string | null, created_at: post.user_created_at as string,
-  })
-
-  return c.json(toStatus({
-    id: post.id as number, user_id: post.user_id as number, content: post.content as string,
-    like_count: post.like_count as number, comment_count: post.comment_count as number,
-    created_at: post.created_at as string,
-  }, account, { reblogged: false }))
+  const account = toAccount({ id: post.user_id as number, username: post.username as string, avatar: post.avatar as string | null, role: post.role as string, bio: post.bio as string | null, created_at: post.user_created_at as string })
+  return c.json(toStatus({ id: post.id as number, user_id: post.user_id as number, content: post.content as string, like_count: post.like_count as number, comment_count: post.comment_count as number, created_at: post.created_at as string }, account, { reblogged: false }))
 })
 
 // ============================================================
@@ -911,11 +912,18 @@ mastodon.get('/notifications', async (c) => {
   if (!user) return c.json({ error: 'The access token is invalid' }, 401)
 
   const limit = Math.min(40, Math.max(1, parseInt(c.req.query('limit') || '20')))
+  const maxId = c.req.query('max_id')
+  const sinceId = c.req.query('since_id')
+
+  let sql = 'SELECT * FROM notifications WHERE user_id = ?'
+  const params: unknown[] = [user.sub]
+  if (maxId) { sql += ' AND id < ?'; params.push(parseInt(maxId)) }
+  if (sinceId) { sql += ' AND id > ?'; params.push(parseInt(sinceId)) }
+  sql += ' ORDER BY created_at DESC LIMIT ?'
+  params.push(limit)
 
   const rows = await query<Record<string, unknown>>(
-    c.env.abdl_space_db,
-    `SELECT * FROM notifications WHERE user_id = ? ORDER BY created_at DESC LIMIT ?`,
-    [user.sub, limit]
+    c.env.abdl_space_db, sql, params
   )
 
   const notifs: MastodonNotification[] = []
@@ -1285,13 +1293,17 @@ mastodon.post('/notifications/clear', async (c) => {
 
 // GET /api/v1/statuses/:id/favourited_by
 mastodon.get('/statuses/:id/favourited_by', async (c) => {
-  const id = parseInt(c.req.param('id'))
+  const rawId = c.req.param('id')
+  const resolved = await resolveStatus(c.env.abdl_space_db, rawId)
+  if (!resolved) return c.json([], 404)
+
+  const targetType = resolved.kind === 'comment' ? 'comment' : 'post'
   const rows = await query<Record<string, unknown>>(
     c.env.abdl_space_db,
     `SELECT u.id, u.username, u.avatar, u.role, u.bio, u.created_at
      FROM likes l JOIN users u ON l.user_id = u.id
-     WHERE l.target_type = 'post' AND l.target_id = ? LIMIT 40`,
-    [id]
+     WHERE l.target_type = ? AND l.target_id = ? LIMIT 40`,
+    [targetType, resolved.realId]
   )
   return c.json(rows.map(r => toAccount({
     id: r.id as number, username: r.username as string, avatar: r.avatar as string | null,
