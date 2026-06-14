@@ -217,7 +217,7 @@ export function toNotification(notif: {
 /** Extract hashtags from content */
 function extractTags(content: string): { name: string; url: string }[] {
   const tags: { name: string; url: string }[] = []
-  const regex = /#(\S+)/g
+  const regex = /#([\w\u4e00-\u9fa5]+)/g
   let match
   while ((match = regex.exec(content)) !== null) {
     tags.push({ name: match[1], url: `https://${INSTANCE_DOMAIN}/tags/${match[1]}` })

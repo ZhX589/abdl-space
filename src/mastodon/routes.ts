@@ -10,7 +10,8 @@ import { Hono } from 'hono'
 import type { Env, JWTPayload } from '../types/index.ts'
 import { query, queryOne, run } from '../lib/db.ts'
 import { toAccount, toStatus, toStatusFromComment, toNotification } from './converter.ts'
-import type { MastodonInstance, MastodonNotification, MastodonAccount, MastodonStatus } from './types.ts'
+import type { MastodonNotification, MastodonAccount, MastodonStatus } from './types.ts'
+import { mastodonAuth, buildInstance, resolveStatus } from './shared.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
@@ -56,78 +57,10 @@ function buildLinkHeader(
 const mastodon = new Hono<AppType>()
 
 // ============================================================
-// Mastodon-compatible auth middleware (Bearer token from OAuth or JWT)
-// Returns user payload if authenticated, null if not
-// ============================================================
-async function mastodonAuth(c: { req: { header: (name: string) => string | undefined }; env: Env }): Promise<JWTPayload | null> {
-  const auth = c.req.header('Authorization')
-  if (!auth) return null
-
-  // Try Bearer token
-  const match = auth.match(/^Bearer\s+(.+)$/i)
-  if (!match) return null
-
-  const token = match[1]
-
-  // First try OAuth access_token
-  try {
-    const { introspectToken } = await import('../lib/oauth.ts')
-    const result = await introspectToken(c.env.abdl_space_db, token)
-    if (result.active && result.sub) {
-      const user = await queryOne<{ id: number; username: string; email: string; role: string }>(
-        c.env.abdl_space_db, 'SELECT id, username, email, role FROM users WHERE id = ?', [result.sub]
-      )
-      if (user) return { sub: user.id, username: user.username, email: user.email, role: user.role, iat: 0, exp: 0 }
-    }
-  } catch {}
-
-  // Fall back to JWT
-  try {
-    const { verifyJWT } = await import('../lib/auth.ts')
-    const payload = await verifyJWT(token, c.env.JWT_SECRET)
-    if (payload) return payload
-  } catch {}
-
-  return null
-}
-
-// ============================================================
 // GET /api/v1/instance
 // ============================================================
 mastodon.get('/instance', async (c) => {
-  const [userCount] = await Promise.all([
-    queryOne<{ cnt: number }>(c.env.abdl_space_db, 'SELECT COUNT(*) as cnt FROM users'),
-    queryOne<{ cnt: number }>(c.env.abdl_space_db, 'SELECT COUNT(*) as cnt FROM posts'),
-  ])
-
-  const instance: MastodonInstance = {
-    domain: 'abdl-space.top',
-    title: 'ABDL Space',
-    version: '4.2.0 (compatible; ABDL Space 1.0)',
-    source_url: 'https://github.com/ZYongX09/abdl-space-v2',
-    description: 'ABDL Space — 纸尿裤评分社区',
-    usage: { users: { active_month: userCount?.cnt ?? 0 } },
-    thumbnail: { url: 'https://img.abdl-space.top/file/system/1781439303787_play_store_512.png', blurhash: null },
-    languages: ['zh', 'en'],
-    configuration: {
-      urls: { streaming: null, status: null, about: 'https://abdl-space.top', privacy_policy: null, terms_of_service: null },
-      accounts: { max_featured_tags: 10, max_pinned_statuses: 5 },
-      statuses: { max_characters: 5000, max_media_attachments: 4, characters_reserved_per_url: 23 },
-      media_attachments: {
-        supported_mime_types: ['image/jpeg', 'image/png', 'image/gif', 'image/webp'],
-        image_size_limit: 5242880,
-        image_matrix_limit: 33177600,
-        video_size_limit: 0,
-        video_frame_rate_limit: 0,
-        video_matrix_limit: 0,
-      },
-      polls: { max_options: 4, max_characters_per_option: 50, min_expiration: 300, max_expiration: 2629746 },
-    },
-    registrations: { enabled: true, approval_required: false, message: null },
-    rules: [],
-  }
-
-  return c.json(instance)
+  return c.json(await buildInstance(c.env.abdl_space_db))
 })
 
 // ============================================================
@@ -425,20 +358,29 @@ mastodon.get('/accounts/:id/statuses', async (c) => {
 mastodon.get('/accounts/:id/followers', async (c) => {
   const id = parseInt(c.req.param('id'))
   const limit = Math.min(80, Math.max(1, parseInt(c.req.query('limit') || '40')))
+  const maxId = c.req.query('max_id')
+  const sinceId = c.req.query('since_id')
 
-  const rows = await query<Record<string, unknown>>(
-    c.env.abdl_space_db,
-    `SELECT u.id, u.username, u.avatar, u.role, u.bio, u.created_at
+  let sql = `SELECT u.id, u.username, u.avatar, u.role, u.bio, u.created_at, f.id as follow_id
      FROM follows f JOIN users u ON f.follower_id = u.id
-     WHERE f.following_id = ? ORDER BY f.created_at DESC LIMIT ?`,
-    [id, limit]
-  )
+     WHERE f.following_id = ?`
+  const params: unknown[] = [id]
+
+  if (maxId) { sql += ' AND f.id < ?'; params.push(parseInt(maxId)) }
+  if (sinceId) { sql += ' AND f.id > ?'; params.push(parseInt(sinceId)) }
+
+  sql += ' ORDER BY f.created_at DESC LIMIT ?'
+  params.push(limit)
+
+  const rows = await query<Record<string, unknown>>(c.env.abdl_space_db, sql, params)
 
   const accounts = rows.map(r => toAccount({
     id: r.id as number, username: r.username as string, avatar: r.avatar as string | null,
     role: r.role as string, bio: r.bio as string | null, created_at: r.created_at as string,
   }))
-  const link = buildLinkHeader(`/api/v1/accounts/${id}/followers`, accounts, limit)
+  // Use follow_id for Link header cursor
+  const linkItems = rows.map(r => ({ id: r.follow_id as number }))
+  const link = buildLinkHeader(`/api/v1/accounts/${id}/followers`, linkItems, limit)
   if (link) c.header('Link', link)
   return c.json(accounts)
 })
@@ -449,20 +391,28 @@ mastodon.get('/accounts/:id/followers', async (c) => {
 mastodon.get('/accounts/:id/following', async (c) => {
   const id = parseInt(c.req.param('id'))
   const limit = Math.min(80, Math.max(1, parseInt(c.req.query('limit') || '40')))
+  const maxId = c.req.query('max_id')
+  const sinceId = c.req.query('since_id')
 
-  const rows = await query<Record<string, unknown>>(
-    c.env.abdl_space_db,
-    `SELECT u.id, u.username, u.avatar, u.role, u.bio, u.created_at
+  let sql = `SELECT u.id, u.username, u.avatar, u.role, u.bio, u.created_at, f.id as follow_id
      FROM follows f JOIN users u ON f.following_id = u.id
-     WHERE f.follower_id = ? ORDER BY f.created_at DESC LIMIT ?`,
-    [id, limit]
-  )
+     WHERE f.follower_id = ?`
+  const params: unknown[] = [id]
+
+  if (maxId) { sql += ' AND f.id < ?'; params.push(parseInt(maxId)) }
+  if (sinceId) { sql += ' AND f.id > ?'; params.push(parseInt(sinceId)) }
+
+  sql += ' ORDER BY f.created_at DESC LIMIT ?'
+  params.push(limit)
+
+  const rows = await query<Record<string, unknown>>(c.env.abdl_space_db, sql, params)
 
   const accounts = rows.map(r => toAccount({
     id: r.id as number, username: r.username as string, avatar: r.avatar as string | null,
     role: r.role as string, bio: r.bio as string | null, created_at: r.created_at as string,
   }))
-  const link = buildLinkHeader(`/api/v1/accounts/${id}/following`, accounts, limit)
+  const linkItems = rows.map(r => ({ id: r.follow_id as number }))
+  const link = buildLinkHeader(`/api/v1/accounts/${id}/following`, linkItems, limit)
   if (link) c.header('Link', link)
   return c.json(accounts)
 })
@@ -660,22 +610,23 @@ mastodon.delete('/statuses/:id', async (c) => {
   const user = await mastodonAuth(c)
   if (!user) return c.json({ error: 'The access token is invalid' }, 401)
 
-  const id = parseInt(c.req.param('id'))
-  const post = await queryOne<{ id: number; user_id: number }>(
-    c.env.abdl_space_db, 'SELECT id, user_id FROM posts WHERE id = ?', [id]
-  )
+  const rawId = c.req.param('id')
+  const resolved = await resolveStatus(c.env.abdl_space_db, rawId)
+  if (!resolved) return c.json({ error: 'Record not found' }, 404)
+
+  if (resolved.kind === 'comment') {
+    const comment = await queryOne<{ id: number; user_id: number }>(c.env.abdl_space_db, 'SELECT id, user_id FROM post_comments WHERE id = ?', [resolved.realId])
+    if (!comment) return c.json({ error: 'Record not found' }, 404)
+    if (comment.user_id !== user.sub && user.role !== 'admin') return c.json({ error: 'Forbidden' }, 403)
+    await run(c.env.abdl_space_db, 'DELETE FROM post_comments WHERE id = ?', [resolved.realId])
+    return c.json({ id: rawId, text: '', media_attachments: [], poll: null })
+  }
+
+  const post = await queryOne<{ id: number; user_id: number }>(c.env.abdl_space_db, 'SELECT id, user_id FROM posts WHERE id = ?', [resolved.realId])
   if (!post) return c.json({ error: 'Record not found' }, 404)
   if (post.user_id !== user.sub && user.role !== 'admin') return c.json({ error: 'Forbidden' }, 403)
-
-  await run(c.env.abdl_space_db, 'DELETE FROM posts WHERE id = ?', [id])
-
-  // Return minimal status for delete-and-redraft
-  return c.json({
-    id: String(id),
-    text: '',
-    media_attachments: [],
-    poll: null,
-  })
+  await run(c.env.abdl_space_db, 'DELETE FROM posts WHERE id = ?', [resolved.realId])
+  return c.json({ id: rawId, text: '', media_attachments: [], poll: null })
 })
 
 // ============================================================
@@ -685,46 +636,34 @@ mastodon.post('/statuses/:id/favourite', async (c) => {
   const user = await mastodonAuth(c)
   if (!user) return c.json({ error: 'The access token is invalid' }, 401)
 
-  const id = parseInt(c.req.param('id'))
-  const post = await queryOne<Record<string, unknown>>(
-    c.env.abdl_space_db,
-    `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
-     (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
-     (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count
-     FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`,
-    [id]
-  )
-  if (!post) return c.json({ error: 'Record not found' }, 404)
+  const rawId = c.req.param('id')
+  const resolved = await resolveStatus(c.env.abdl_space_db, rawId)
+  if (!resolved) return c.json({ error: 'Record not found' }, 404)
 
-  const existing = await queryOne<{ user_id: number }>(
-    c.env.abdl_space_db, 'SELECT user_id FROM likes WHERE user_id = ? AND target_type = ? AND target_id = ?',
-    [user.sub, 'post', id]
-  )
-  if (!existing) {
-    await run(c.env.abdl_space_db, 'INSERT INTO likes (user_id, target_type, target_id) VALUES (?, ?, ?)', [user.sub, 'post', id])
+  const targetType = resolved.kind === 'comment' ? 'comment' : 'post'
+  if (!await queryOne(c.env.abdl_space_db, 'SELECT user_id FROM likes WHERE user_id = ? AND target_type = ? AND target_id = ?', [user.sub, targetType, resolved.realId])) {
+    await run(c.env.abdl_space_db, 'INSERT INTO likes (user_id, target_type, target_id) VALUES (?, ?, ?)', [user.sub, targetType, resolved.realId])
   }
 
-  // Re-fetch to get accurate count (avoid race condition)
-  const updatedPost = await queryOne<Record<string, unknown>>(
-    c.env.abdl_space_db,
+  // Return the status
+  if (resolved.kind === 'comment') {
+    const comment = await queryOne<Record<string, unknown>>(c.env.abdl_space_db,
+      `SELECT pc.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
+       (SELECT COUNT(*) FROM likes WHERE target_type = 'comment' AND target_id = pc.id) as like_count
+       FROM post_comments pc JOIN users u ON pc.user_id = u.id WHERE pc.id = ?`, [resolved.realId])
+    if (!comment) return c.json({ error: 'Record not found' }, 404)
+    const account = toAccount({ id: comment.user_id as number, username: comment.username as string, avatar: comment.avatar as string | null, role: comment.role as string, bio: comment.bio as string | null, created_at: comment.user_created_at as string })
+    return c.json(toStatusFromComment({ id: comment.id as number, post_id: comment.post_id as number, user_id: comment.user_id as number, parent_id: comment.parent_id as number | null, content: comment.content as string, like_count: comment.like_count as number, created_at: comment.created_at as string }, account))
+  }
+
+  const post = await queryOne<Record<string, unknown>>(c.env.abdl_space_db,
     `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
      (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
      (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count
-     FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`,
-    [id]
-  )
-  if (!updatedPost) return c.json({ error: 'Record not found' }, 404)
-
-  const account = toAccount({
-    id: updatedPost.user_id as number, username: updatedPost.username as string, avatar: updatedPost.avatar as string | null,
-    role: updatedPost.role as string, bio: updatedPost.bio as string | null, created_at: updatedPost.user_created_at as string,
-  })
-
-  return c.json(toStatus({
-    id: updatedPost.id as number, user_id: updatedPost.user_id as number, content: updatedPost.content as string,
-    diaper_id: updatedPost.diaper_id as number | null, like_count: updatedPost.like_count as number,
-    comment_count: updatedPost.comment_count as number, created_at: updatedPost.created_at as string,
-  }, account, { favourited: true }))
+     FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`, [resolved.realId])
+  if (!post) return c.json({ error: 'Record not found' }, 404)
+  const account = toAccount({ id: post.user_id as number, username: post.username as string, avatar: post.avatar as string | null, role: post.role as string, bio: post.bio as string | null, created_at: post.user_created_at as string })
+  return c.json(toStatus({ id: post.id as number, user_id: post.user_id as number, content: post.content as string, like_count: post.like_count as number, comment_count: post.comment_count as number, created_at: post.created_at as string }, account, { favourited: true }))
 })
 
 // ============================================================
@@ -734,29 +673,31 @@ mastodon.post('/statuses/:id/unfavourite', async (c) => {
   const user = await mastodonAuth(c)
   if (!user) return c.json({ error: 'The access token is invalid' }, 401)
 
-  const id = parseInt(c.req.param('id'))
-  await run(c.env.abdl_space_db, 'DELETE FROM likes WHERE user_id = ? AND target_type = ? AND target_id = ?', [user.sub, 'post', id])
+  const rawId = c.req.param('id')
+  const resolved = await resolveStatus(c.env.abdl_space_db, rawId)
+  if (!resolved) return c.json({ error: 'Record not found' }, 404)
 
-  const post = await queryOne<Record<string, unknown>>(
-    c.env.abdl_space_db,
+  const targetType = resolved.kind === 'comment' ? 'comment' : 'post'
+  await run(c.env.abdl_space_db, 'DELETE FROM likes WHERE user_id = ? AND target_type = ? AND target_id = ?', [user.sub, targetType, resolved.realId])
+
+  if (resolved.kind === 'comment') {
+    const comment = await queryOne<Record<string, unknown>>(c.env.abdl_space_db,
+      `SELECT pc.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
+       (SELECT COUNT(*) FROM likes WHERE target_type = 'comment' AND target_id = pc.id) as like_count
+       FROM post_comments pc JOIN users u ON pc.user_id = u.id WHERE pc.id = ?`, [resolved.realId])
+    if (!comment) return c.json({ error: 'Record not found' }, 404)
+    const account = toAccount({ id: comment.user_id as number, username: comment.username as string, avatar: comment.avatar as string | null, role: comment.role as string, bio: comment.bio as string | null, created_at: comment.user_created_at as string })
+    return c.json(toStatusFromComment({ id: comment.id as number, post_id: comment.post_id as number, user_id: comment.user_id as number, parent_id: comment.parent_id as number | null, content: comment.content as string, like_count: comment.like_count as number, created_at: comment.created_at as string }, account))
+  }
+
+  const post = await queryOne<Record<string, unknown>>(c.env.abdl_space_db,
     `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
      (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
      (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count
-     FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`,
-    [id]
-  )
+     FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`, [resolved.realId])
   if (!post) return c.json({ error: 'Record not found' }, 404)
-
-  const account = toAccount({
-    id: post.user_id as number, username: post.username as string, avatar: post.avatar as string | null,
-    role: post.role as string, bio: post.bio as string | null, created_at: post.user_created_at as string,
-  })
-
-  return c.json(toStatus({
-    id: post.id as number, user_id: post.user_id as number, content: post.content as string,
-    diaper_id: post.diaper_id as number | null, like_count: post.like_count as number,
-    comment_count: post.comment_count as number, created_at: post.created_at as string,
-  }, account, { favourited: false }))
+  const account = toAccount({ id: post.user_id as number, username: post.username as string, avatar: post.avatar as string | null, role: post.role as string, bio: post.bio as string | null, created_at: post.user_created_at as string })
+  return c.json(toStatus({ id: post.id as number, user_id: post.user_id as number, content: post.content as string, like_count: post.like_count as number, comment_count: post.comment_count as number, created_at: post.created_at as string }, account, { favourited: false }))
 })
 
 // ============================================================
@@ -1149,73 +1090,8 @@ mastodon.get('/search', async (c) => {
 mastodon.get('/conversations', async (c) => {
   const user = await mastodonAuth(c)
   if (!user) return c.json({ error: 'The access token is invalid' }, 401)
-  // ABDL messages ≠ Mastodon conversations (which are based on direct statuses)
-  // Return proper structure with message data
-  const rows = await query<Record<string, unknown>>(
-    c.env.abdl_space_db,
-    `SELECT other_id, content as last_msg, created_at as last_time, msg_id
-     FROM (
-       SELECT
-         CASE WHEN sender_id = ? THEN receiver_id ELSE sender_id END as other_id,
-         content, created_at, id as msg_id,
-         ROW_NUMBER() OVER (
-           PARTITION BY CASE WHEN sender_id = ? THEN receiver_id ELSE sender_id END
-           ORDER BY created_at DESC
-         ) as rn
-       FROM messages
-       WHERE sender_id = ? OR receiver_id = ?
-     ) WHERE rn = 1 ORDER BY last_time DESC LIMIT 20`,
-    [user.sub, user.sub, user.sub, user.sub]
-  )
-
-  const conversations = []
-  for (const r of rows) {
-    const otherUser = await queryOne<{ id: number; username: string; avatar: string | null; role: string; bio: string | null; created_at: string }>(
-      c.env.abdl_space_db, 'SELECT id, username, avatar, role, bio, created_at FROM users WHERE id = ?', [r.other_id]
-    )
-    if (!otherUser) continue
-
-    // Create a pseudo-status from the message content
-    const msgAccount = toAccount(otherUser)
-    const lastStatus = {
-      id: String(r.msg_id),
-      created_at: r.last_time as string,
-      in_reply_to_id: null,
-      in_reply_to_account_id: null,
-      sensitive: false,
-      spoiler_text: '',
-      visibility: 'direct' as const,
-      language: 'zh',
-      uri: `https://api.abdl-space.top/users/${otherUser.username}/statuses/${r.msg_id}`,
-      url: `https://api.abdl-space.top/@${otherUser.username}/${r.msg_id}`,
-      replies_count: 0,
-      reblogs_count: 0,
-      favourites_count: 0,
-      favourited: false,
-      reblogged: false,
-      muted: false,
-      bookmarked: false,
-      content: `<p>${(r.last_msg as string || '').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</p>`,
-      reblog: null,
-      application: null,
-      account: msgAccount,
-      media_attachments: [],
-      mentions: [],
-      tags: [],
-      emojis: [],
-      card: null,
-      poll: null,
-    }
-
-    conversations.push({
-      id: String(r.msg_id),
-      accounts: [msgAccount],
-      last_status: lastStatus,
-      unread: false,
-    })
-  }
-
-  return c.json(conversations)
+  // ABDL messages ≠ Mastodon conversations (based on direct statuses)
+  return c.json([])
 })
 
 // ============================================================
@@ -1236,22 +1112,21 @@ mastodon.get('/bookmarks', async (c) => {
 // POST /api/v1/statuses/:id/context
 // ============================================================
 mastodon.get('/statuses/:id/context', async (c) => {
-  const id = parseInt(c.req.param('id'))
+  const rawId = c.req.param('id')
+  const resolved = await resolveStatus(c.env.abdl_space_db, rawId)
+  if (!resolved) return c.json({ error: 'Record not found' }, 404)
 
-  // Get the post to find its post_id
-  const post = await queryOne<{ id: number; user_id: number }>(
-    c.env.abdl_space_db, 'SELECT id, user_id FROM posts WHERE id = ?', [id]
-  )
-  if (!post) return c.json({ error: 'Record not found' }, 404)
+  // For posts, get comments as descendants; for comments, get siblings
+  const postId = resolved.kind === 'post' ? resolved.realId : (await queryOne<{ post_id: number }>(c.env.abdl_space_db, 'SELECT post_id FROM post_comments WHERE id = ?', [resolved.realId]))?.post_id
+  if (!postId) return c.json({ ancestors: [], descendants: [] })
 
-  // Get comments as descendants
   const comments = await query<Record<string, unknown>>(
     c.env.abdl_space_db,
     `SELECT pc.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
      (SELECT COUNT(*) FROM likes WHERE target_type = 'comment' AND target_id = pc.id) as like_count
      FROM post_comments pc JOIN users u ON pc.user_id = u.id
      WHERE pc.post_id = ? ORDER BY pc.created_at ASC`,
-    [id]
+    [postId]
   )
 
   const ancestors: MastodonStatus[] = []
@@ -1370,18 +1245,36 @@ mastodon.get('/notifications/:id', async (c) => {
   const user = await mastodonAuth(c)
   if (!user) return c.json({ error: 'The access token is invalid' }, 401)
   const id = parseInt(c.req.param('id'))
-  const notif = await queryOne<Record<string, unknown>>(
+  const r = await queryOne<Record<string, unknown>>(
     c.env.abdl_space_db, 'SELECT * FROM notifications WHERE id = ? AND user_id = ?', [id, user.sub]
   )
-  if (!notif) return c.json({ error: 'Record not found' }, 404)
+  if (!r) return c.json({ error: 'Record not found' }, 404)
 
-  const sourceAccount = toAccount({ id: 0, username: 'system', avatar: null, role: 'user', created_at: new Date().toISOString() })
-  return c.json({
-    id: String(notif.id),
-    type: notif.type === 'like' ? 'favourite' : notif.type === 'follow' ? 'follow' : 'mention',
-    created_at: notif.created_at,
-    account: sourceAccount,
-  })
+  let sourceAccount = toAccount({ id: 0, username: 'system', avatar: null, role: 'user', created_at: new Date().toISOString() })
+  let status: MastodonStatus | undefined
+
+  if (r.type === 'follow') {
+    const src = await queryOne<{ id: number; username: string; avatar: string | null; role: string; created_at: string }>(
+      c.env.abdl_space_db, 'SELECT id, username, avatar, role, created_at FROM users WHERE id = ?', [r.related_id]
+    )
+    if (src) sourceAccount = toAccount(src)
+  } else {
+    const post = await queryOne<Record<string, unknown>>(
+      c.env.abdl_space_db,
+      `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
+       (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
+       (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count
+       FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`,
+      [r.related_id]
+    )
+    if (post) {
+      sourceAccount = toAccount({ id: post.user_id as number, username: post.username as string, avatar: post.avatar as string | null, role: post.role as string, bio: post.bio as string | null, created_at: post.user_created_at as string })
+      status = toStatus({ id: post.id as number, user_id: post.user_id as number, content: post.content as string, like_count: post.like_count as number, comment_count: post.comment_count as number, created_at: post.created_at as string }, sourceAccount)
+    }
+  }
+
+  const notif = toNotification({ id: r.id as number, type: r.type as string, message: r.message as string, related_id: r.related_id as number | null, read: r.read as number, created_at: r.created_at as string }, sourceAccount, status)
+  return c.json(notif)
 })
 
 // POST /api/v1/notifications/clear
@@ -1410,5 +1303,27 @@ mastodon.get('/statuses/:id/favourited_by', async (c) => {
 
 // GET /api/v1/statuses/:id/reblogged_by
 mastodon.get('/statuses/:id/reblogged_by', async (c) => c.json([]))
+
+// GET /api/v1/accounts/:id/featured_tags
+mastodon.get('/accounts/:id/featured_tags', async (c) => c.json([]))
+
+// GET /api/v1/follow_requests
+mastodon.get('/follow_requests', async (c) => c.json([]))
+
+// GET /api/v1/mutes
+mastodon.get('/mutes', async (c) => c.json([]))
+
+// GET /api/v1/blocks
+mastodon.get('/blocks', async (c) => c.json([]))
+
+// GET /api/v1/notifications/unread_count
+mastodon.get('/notifications/unread_count', async (c) => {
+  const user = await mastodonAuth(c)
+  if (!user) return c.json({ error: 'The access token is invalid' }, 401)
+  const row = await queryOne<{ cnt: number }>(
+    c.env.abdl_space_db, 'SELECT COUNT(*) as cnt FROM notifications WHERE user_id = ? AND read = 0', [user.sub]
+  )
+  return c.json({ count: row?.cnt ?? 0 })
+})
 
 export default mastodon

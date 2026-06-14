@@ -1,42 +1,24 @@
 /**
- * Mastodon v2 API + Stub endpoints
- * - GET /api/v2/search (real implementation)
- * - GET /api/v2/instance (redirect to v1)
- * - Various stub endpoints Moshidon calls on startup
+ * Mastodon v2 API endpoints
+ * Mounted at /api/v2/*
  */
 
 import { Hono } from 'hono'
-import type { Env, JWTPayload } from '../types/index.ts'
-import { query, queryOne } from '../lib/db.ts'
+import type { Env } from '../types/index.ts'
+import { query } from '../lib/db.ts'
 import { toAccount, toStatus } from './converter.ts'
+import { mastodonAuth, buildInstance } from './shared.ts'
 
-type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
-
-async function mastodonAuth(c: { req: { header: (name: string) => string | undefined }; env: Env }): Promise<JWTPayload | null> {
-  const auth = c.req.header('Authorization')
-  if (!auth) return null
-  const match = auth.match(/^Bearer\s+(.+)$/i)
-  if (!match) return null
-  const token = match[1]
-  try {
-    const { introspectToken } = await import('../lib/oauth.ts')
-    const result = await introspectToken(c.env.abdl_space_db, token)
-    if (result.active && result.sub) {
-      const user = await queryOne<{ id: number; username: string; email: string; role: string }>(
-        c.env.abdl_space_db, 'SELECT id, username, email, role FROM users WHERE id = ?', [result.sub]
-      )
-      if (user) return { sub: user.id, username: user.username, email: user.email, role: user.role, iat: 0, exp: 0 }
-    }
-  } catch {}
-  try {
-    const { verifyJWT } = await import('../lib/auth.ts')
-    const payload = await verifyJWT(token, c.env.JWT_SECRET)
-    if (payload) return payload
-  } catch {}
-  return null
-}
+type AppType = { Bindings: Env }
 
 const mastodonV2 = new Hono<AppType>()
+
+// ============================================================
+// GET /api/v2/instance
+// ============================================================
+mastodonV2.get('/instance', async (c) => {
+  return c.json(await buildInstance(c.env.abdl_space_db))
+})
 
 // ============================================================
 // GET /api/v2/search — Mastodon v2 search (Moshidon uses this)
@@ -89,10 +71,11 @@ mastodonV2.get('/search', async (c) => {
     }, account, { favourited: likedSet.has(r.id as number) })
   })
 
+  // Extract hashtags (consistent regex with converter.ts)
   const hashtagSet = new Set<string>()
   for (const r of posts) {
     const content = r.content as string
-    const regex = /#(\S+)/g
+    const regex = /#([\w\u4e00-\u9fa5]+)/g
     let match
     while ((match = regex.exec(content)) !== null) {
       if (match[1].toLowerCase().includes(q.toLowerCase())) hashtagSet.add(match[1])
@@ -101,14 +84,6 @@ mastodonV2.get('/search', async (c) => {
   const hashtags = [...hashtagSet].map(name => ({ name, url: `https://abdl-space.top/tags/${name}`, history: [] }))
 
   return c.json({ accounts, statuses, hashtags })
-})
-
-// ============================================================
-// GET /api/v2/instance — redirect to v1 instance
-// ============================================================
-mastodonV2.get('/instance', async (c) => {
-  const res = await mastodonV2.fetch(new Request(c.req.url.replace('/api/v2/instance', '/api/v1/instance'), c.req.raw), c.env)
-  return res
 })
 
 export default mastodonV2
