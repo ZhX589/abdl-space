@@ -365,6 +365,9 @@ export interface Env {
   TURNSTILE_SECRET_KEY?: string
   DEEPSEEK_API_KEY?: string
   ENCRYPT_KEY?: string
+  IMGBED_UPLOAD_KEY?: string
+  IMGBED_DELETE_KEY?: string
+  IMGBED_LIST_KEY?: string
 }
 
 /** JWT payload 结构 */
