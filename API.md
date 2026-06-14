@@ -2465,50 +2465,148 @@ Mastodon scope 映射：`follow`/`push` → `write`，`read`/`write`/`profile`/`
 
 | 端点 | 说明 |
 |------|------|
-| `POST /api/v1/media` | 上传图片（代理到图床） |
+| `POST /api/v1/media` | 上传图片（代理到图床，返回 URL 作为 id） |
 | `GET /api/v1/search` | 搜索（用户 + 帖子 + 标签） |
 | `GET /api/v2/search` | 搜索（v2） |
 
-#### Stub 端点
+#### Push 推送
 
-以下端点返回空数组或默认值，确保 Moshidon 启动时不报错：
-
-| 端点 | 返回 |
+| 端点 | 说明 |
 |------|------|
-| `GET /api/v1/filters` | `[]` |
-| `GET /api/v2/filters` | `[]` |
-| `GET /api/v1/markers` | 默认标记 |
-| `POST /api/v1/markers` | 默认标记 |
-| `GET /api/v1/custom_emojis` | `[]` |
-| `GET /api/v1/announcements` | `[]` |
-| `GET /api/v1/lists` | `[]` |
-| `GET /api/v1/preferences` | 默认偏好 |
-| `GET /api/v1/instance/peers` | `[]` |
-| `GET /api/v1/conversations` | `[]` |
-| `GET /api/v1/favourites` | `[]` |
-| `GET /api/v1/bookmarks` | `[]` |
-| `GET /api/v1/follow_requests` | `[]` |
-| `GET /api/v1/mutes` | `[]` |
-| `GET /api/v1/blocks` | `[]` |
+| `POST /api/v1/push/subscription` | 创建推送订阅 |
+| `GET /api/v1/push/subscription` | 查询当前订阅 |
+| `PUT /api/v1/push/subscription` | 更新订阅 alert 设置 |
+| `DELETE /api/v1/push/subscription` | 删除订阅 |
+
+**POST 请求体**：
+```json
+{
+  "subscription": {
+    "endpoint": "https://fcm.googleapis.com/...",
+    "keys": { "p256dh": "...", "auth": "..." }
+  },
+  "data": {
+    "alerts": {
+      "follow": true,
+      "favourite": true,
+      "reblog": true,
+      "mention": true,
+      "poll": false,
+      "status": false
+    }
+  }
+}
+```
+
+**返回**：
+```json
+{
+  "id": "1",
+  "endpoint": "https://fcm.googleapis.com/...",
+  "server_key": "VAPID 公钥",
+  "alerts": { "follow": true, "favourite": true, ... }
+}
+```
+
+> 推送通知的实际发送需要配置 `VAPID_PUBLIC_KEY` 和 `VAPID_PRIVATE_KEY` 环境变量。`push_subscriptions` 表自动创建。
+
+#### ABDL 自定义端点
+
+以下端点以 Mastodon API 风格暴露 ABDL 专属功能，挂载在 `/api/v1/abdl/*`。原有 ABDL API 不受影响。
+
+**纸尿裤**：
+
+| 端点 | 说明 | 参数 |
+|------|------|------|
+| `GET /api/v1/abdl/diapers` | 纸尿裤列表 | `search`、`brand`、`sort`(id/avg_score/rating_count/thickness)、`order`(ASC/DESC)、`page`、`limit` |
+| `GET /api/v1/abdl/diapers/:id` | 纸尿裤详情 | — |
+| `GET /api/v1/abdl/diapers/:id/ratings` | 评分列表 + 分维度统计 | — |
+| `GET /api/v1/abdl/diapers/:id/feelings` | 感受列表 + 统计 | — |
+| `GET /api/v1/abdl/diapers/brands` | 品牌列表（去重） | — |
+| `GET /api/v1/abdl/diapers/sizes` | 尺码标签列表（去重） | — |
+| `GET /api/v1/abdl/diapers/compare` | 纸尿裤对比（最多 5 款） | `ids=1,2,3` |
+
+**纸尿裤列表响应**：
+```json
+{
+  "diapers": [
+    {
+      "id": 1, "brand": "ABU", "model": "Little Kings",
+      "product_type": "纸尿裤", "thickness": 4,
+      "absorbency_mfr": "7500ml", "absorbency_adult": "7500ml",
+      "is_baby_diaper": 0, "comfort": 4.5, "popularity": 8,
+      "material": "...", "features": "...", "avg_price": "25-30元/片",
+      "avg_score": "8.5", "base_score": "8.5",
+      "rating_count": 23, "feeling_count": 5,
+      "images": ["https://img.abdl-space.top/file/..."],
+      "sizes": [{ "label": "M", "waist_min": 79, "waist_max": 92 }]
+    }
+  ],
+  "pagination": { "page": 1, "limit": 20, "total": 11, "totalPages": 1 }
+}
+```
+
+**评分统计响应**（`/diapers/:id/ratings`）：
+```json
+{
+  "reviews": [ { "id": 1, "user": { "id": 1, "username": "ZhX", "avatar": "..." }, "absorption_score": 9, ... } ],
+  "stats": {
+    "composite": 8.5, "count": 23,
+    "dimensions": {
+      "absorption_score": { "avg": 8.2, "count": 23 },
+      "comfort_score": { "avg": 8.5, "count": 23 },
+      ...
+    }
+  }
+}
+```
+
+**排行榜与术语**：
+
+| 端点 | 说明 | 参数 |
+|------|------|------|
+| `GET /api/v1/abdl/rankings` | 排行榜 | `type`(hot/popular/absorbency)、`limit` |
+| `GET /api/v1/abdl/terms` | 术语百科 | `search`、`category` |
+| `GET /api/v1/abdl/terms/categories` | 术语分类列表 | — |
+
+**用户档案**：
+
+| 端点 | 说明 |
+|------|------|
+| `GET /api/v1/abdl/me` | 当前用户 ABDL 档案（含经验、积分、徽章） |
+| `GET /api/v1/abdl/users/:id` | 用户公开 ABDL 档案 |
+| `GET /api/v1/abdl/users/:id/worn` | 穿过的纸尿裤（评过分的） |
+
+`/abdl/me` 响应：
+```json
+{
+  "user": { "id": 1, "username": "ZhX", "email": "...", "avatar": "...", "role": "admin", "age": 25, "region": "北京", ... },
+  "experience": { "level": 2, "total_exp": 150, "current_exp": 150, "current_streak": 5 },
+  "points": { "balance": 100, "total_earned": 200, "total_spent": 100 },
+  "badges": [ { "badge_key": "first_rating", "unlocked_at": "...", "displayed": 1 } ]
+}
+```
 
 ### 文件结构
 
 ```
 src/mastodon/
-├── shared.ts      # 共享逻辑（auth、instance、resolveStatus）
+├── shared.ts      # 共享逻辑（auth、instance、resolveStatus、toMastoId、parseMastoIdForCursor）
 ├── types.ts       # Mastodon 实体类型定义
-├── converter.ts   # ABDL → Mastodon 数据模型转换
-├── routes.ts      # /api/v1/* 端点
-└── v2.ts          # /api/v2/* 端点
+├── converter.ts   # ABDL → Mastodon 数据模型转换（toAccount、toStatus、toStatusFromComment、toNotification）
+├── routes.ts      # /api/v1/* 标准 Mastodon 端点
+├── v2.ts          # /api/v2/* 端点（instance、search）
+├── push.ts        # /api/v1/push/* WebPush 订阅管理
+└── abdl.ts        # /api/v1/abdl/* ABDL 自定义端点
 ```
 
 ### 已知限制
 
 - 无 Streaming API（`configuration.urls.streaming: null`，Moshidon 回退轮询）
-- 无 Push 通知
 - 无 ActivityPub 联邦（纯本地实例）
 - reblog 为 no-op
 - conversations 返回空数组
+- WebPush 实际推送需要配置 VAPID 密钥对
 
 ---
 
@@ -2518,3 +2616,4 @@ src/mastodon/
 |------|------|
 | 2026-06-14 | 全面重写：补充所有新增 API（Follows、Messages、Reports、Checkin、Points、Badges、Invite、OAuth、NBW、Beta、Search、Sync、Key Split、Content API、Captcha V1 等）；修正 Ratings 为 5 维度（无 fit_score）；修正评分为贝叶斯加权；补充奖励系统、图片上传、转发、公告等功能 |
 | 2026-06-15 | 新增 Mastodon 兼容 API 层（/api/v1/* + /api/v2/*），支持 Moshidon 等 Mastodon 客户端连接；Status ID 使用 p_/c_ 前缀格式；支持 OAuth + JWT 双模认证；实现 28+ 端点 + 15 个 stub 端点 |
+| 2026-06-15 | 新增 WebPush 推送订阅（/api/v1/push/subscription）；新增 ABDL 自定义端点（/api/v1/abdl/*），包含纸尿裤、评分、感受、排行榜、术语、用户档案等 13 个端点 |
