@@ -10,7 +10,7 @@ import { Hono } from 'hono'
 import type { Env, JWTPayload } from '../types/index.ts'
 import { query, queryOne, run } from '../lib/db.ts'
 import { toAccount, toStatus, toStatusFromComment, toNotification } from './converter.ts'
-import type { MastodonInstance } from './types.ts'
+import type { MastodonInstance, MastodonNotification, MastodonAccount, MastodonStatus } from './types.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
@@ -26,7 +26,7 @@ const mastodon = new Hono<AppType>()
 // Mastodon-compatible auth middleware (Bearer token from OAuth or JWT)
 // Returns user payload if authenticated, null if not
 // ============================================================
-async function mastodonAuth(c: any): Promise<JWTPayload | null> {
+async function mastodonAuth(c: { req: { header: (name: string) => string | undefined }; env: Env }): Promise<JWTPayload | null> {
   const auth = c.req.header('Authorization')
   if (!auth) return null
 
@@ -39,7 +39,7 @@ async function mastodonAuth(c: any): Promise<JWTPayload | null> {
   // First try OAuth access_token
   try {
     const { introspectToken } = await import('../lib/oauth.ts')
-    const result = await introspectToken(c.env.abdl_space_db, token, c.env.abdl_space_db)
+    const result = await introspectToken(c.env.abdl_space_db, token)
     if (result.active && result.sub) {
       const user = await queryOne<{ id: number; username: string; email: string; role: string }>(
         c.env.abdl_space_db, 'SELECT id, username, email, role FROM users WHERE id = ?', [result.sub]
@@ -110,11 +110,24 @@ mastodon.post('/apps', async (c) => {
   }
 
   const uris = Array.isArray(redirect_uris) ? redirect_uris : [redirect_uris]
-  const scope = scopes || 'read write follow push'
+  // Map Mastodon scopes to our OAuth scopes
+  // Mastodon: read, write, follow, push
+  // Ours: profile, email, read, write, admin
+  const rawScope = scopes || 'read write'
+  const mappedScopes = rawScope.split(' ')
+    .map(s => s.trim().toLowerCase())
+    .map(s => {
+      if (s === 'follow' || s === 'push') return 'write'
+      if (s === 'read' || s === 'write' || s === 'profile' || s === 'email' || s === 'admin') return s
+      return null
+    })
+    .filter(Boolean)
+  const uniqueScopes = [...new Set(mappedScopes)]
+  const scope = uniqueScopes.join(' ')
 
-  // Generate client credentials
-  const clientId = crypto.randomUUID().replace(/-/g, '')
-  const clientSecret = crypto.randomUUID().replace(/-/g, '')
+  // Generate client credentials (must match oauth.ts format: oc_ + 32 hex)
+  const clientId = 'oc_' + Array.from(crypto.getRandomValues(new Uint8Array(16))).map(b => b.toString(16).padStart(2, '0')).join('')
+  const clientSecret = Array.from(crypto.getRandomValues(new Uint8Array(32))).map(b => b.toString(16).padStart(2, '0')).join('')
   const secretHash = await sha256(clientSecret)
 
   await run(
@@ -129,7 +142,7 @@ mastodon.post('/apps', async (c) => {
     id: clientId,
     name: client_name,
     website: website || null,
-    scopes: scope.split(' '),
+    scopes: uniqueScopes,
     redirect_uri: uris.join('\n'),
     redirect_uris: uris,
     client_id: clientId,
@@ -215,23 +228,36 @@ mastodon.patch('/accounts/update_credentials', async (c) => {
   const user = await mastodonAuth(c)
   if (!user) return c.json({ error: 'The access token is invalid' }, 401)
 
-  let body: Record<string, unknown>
-  try { body = await c.req.json() } catch { return c.json({ error: 'invalid body' }, 400) }
+  let body: Record<string, unknown> = {}
+  const contentType = c.req.header('Content-Type') || ''
+
+  // P1#10: Support both JSON and multipart/form-data
+  if (contentType.includes('multipart/form-data') || contentType.includes('application/x-www-form-urlencoded')) {
+    try {
+      const formData = await c.req.formData()
+      for (const [key, value] of formData.entries()) {
+        // Handle nested keys like fields_attributes[0][name]
+        if (key.startsWith('fields_attributes')) continue
+        body[key] = value
+      }
+    } catch {}
+  } else {
+    try { body = await c.req.json() } catch { return c.json({ error: 'invalid body' }, 400) }
+  }
 
   const updates: string[] = []
   const params: unknown[] = []
 
   if (body.display_name !== undefined) {
-    // We don't have display_name separate from username, skip or store in bio
+    // Store display_name as part of bio header or ignore gracefully
   }
   if (body.note !== undefined) {
     updates.push('bio = ?')
     params.push(String(body.note).replace(/<[^>]*>/g, '').substring(0, 500))
   }
   if (body.avatar !== undefined) {
-    // Handle multipart form data — for now accept URL
     updates.push('avatar = ?')
-    params.push(body.avatar)
+    params.push(String(body.avatar))
   }
 
   if (updates.length > 0) {
@@ -529,6 +555,29 @@ mastodon.get('/statuses/:id', async (c) => {
   const id = parseInt(c.req.param('id'))
   if (!id) return c.json({ error: 'Invalid id' }, 400)
 
+  // Handle comment ID offset (comment.id + 10000000)
+  if (id >= 10000000) {
+    const commentId = id - 10000000
+    const comment = await queryOne<Record<string, unknown>>(
+      c.env.abdl_space_db,
+      `SELECT pc.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
+       (SELECT COUNT(*) FROM likes WHERE target_type = 'comment' AND target_id = pc.id) as like_count
+       FROM post_comments pc JOIN users u ON pc.user_id = u.id WHERE pc.id = ?`,
+      [commentId]
+    )
+    if (!comment) return c.json({ error: 'Record not found' }, 404)
+
+    const account = toAccount({
+      id: comment.user_id as number, username: comment.username as string, avatar: comment.avatar as string | null,
+      role: comment.role as string, bio: comment.bio as string | null, created_at: comment.user_created_at as string,
+    })
+    return c.json(toStatusFromComment({
+      id: comment.id as number, post_id: comment.post_id as number, user_id: comment.user_id as number,
+      parent_id: comment.parent_id as number | null, content: comment.content as string,
+      like_count: comment.like_count as number, created_at: comment.created_at as string,
+    }, account))
+  }
+
   const post = await queryOne<Record<string, unknown>>(
     c.env.abdl_space_db,
     `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
@@ -614,15 +663,26 @@ mastodon.post('/statuses/:id/favourite', async (c) => {
     await run(c.env.abdl_space_db, 'INSERT INTO likes (user_id, target_type, target_id) VALUES (?, ?, ?)', [user.sub, 'post', id])
   }
 
+  // Re-fetch to get accurate count (avoid race condition)
+  const updatedPost = await queryOne<Record<string, unknown>>(
+    c.env.abdl_space_db,
+    `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
+     (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
+     (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count
+     FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`,
+    [id]
+  )
+  if (!updatedPost) return c.json({ error: 'Record not found' }, 404)
+
   const account = toAccount({
-    id: post.user_id as number, username: post.username as string, avatar: post.avatar as string | null,
-    role: post.role as string, bio: post.bio as string | null, created_at: post.user_created_at as string,
+    id: updatedPost.user_id as number, username: updatedPost.username as string, avatar: updatedPost.avatar as string | null,
+    role: updatedPost.role as string, bio: updatedPost.bio as string | null, created_at: updatedPost.user_created_at as string,
   })
 
   return c.json(toStatus({
-    id: post.id as number, user_id: post.user_id as number, content: post.content as string,
-    diaper_id: post.diaper_id as number | null, like_count: (post.like_count as number) + (existing ? 0 : 1),
-    comment_count: post.comment_count as number, created_at: post.created_at as string,
+    id: updatedPost.id as number, user_id: updatedPost.user_id as number, content: updatedPost.content as string,
+    diaper_id: updatedPost.diaper_id as number | null, like_count: updatedPost.like_count as number,
+    comment_count: updatedPost.comment_count as number, created_at: updatedPost.created_at as string,
   }, account, { favourited: true }))
 })
 
@@ -866,12 +926,12 @@ mastodon.get('/notifications', async (c) => {
     [user.sub, limit]
   )
 
-  const notifs: any[] = []
+  const notifs: MastodonNotification[] = []
   for (const r of rows) {
     // Build a minimal account for the notification source
     // We need to figure out who triggered the notification
-    let sourceAccount: any = null
-    let status: any = null
+    let sourceAccount: MastodonAccount | null = null
+    let status: MastodonStatus | null = null
 
     if (r.type === 'follow') {
       // related_id = follower user id
@@ -911,7 +971,7 @@ mastodon.get('/notifications', async (c) => {
       id: r.id as number, type: r.type as string, message: r.message as string,
       related_id: r.related_id as number | null, read: r.read as number,
       created_at: r.created_at as string,
-    }, sourceAccount, status)
+    }, sourceAccount, status ?? undefined)
 
     if (notif) notifs.push(notif)
   }
@@ -1034,7 +1094,8 @@ mastodon.get('/search', async (c) => {
 mastodon.get('/conversations', async (c) => {
   const user = await mastodonAuth(c)
   if (!user) return c.json({ error: 'The access token is invalid' }, 401)
-
+  // ABDL messages ≠ Mastodon conversations (which are based on direct statuses)
+  // Return proper structure with message data
   const rows = await query<Record<string, unknown>>(
     c.env.abdl_space_db,
     `SELECT other_id, content as last_msg, created_at as last_time, msg_id
@@ -1059,26 +1120,43 @@ mastodon.get('/conversations', async (c) => {
     )
     if (!otherUser) continue
 
-    const lastStatus = await queryOne<Record<string, unknown>>(
-      c.env.abdl_space_db,
-      `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
-       (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
-       (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count
-       FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`,
-      [r.msg_id]
-    )
+    // Create a pseudo-status from the message content
+    const msgAccount = toAccount(otherUser)
+    const lastStatus = {
+      id: String(r.msg_id),
+      created_at: r.last_time as string,
+      in_reply_to_id: null,
+      in_reply_to_account_id: null,
+      sensitive: false,
+      spoiler_text: '',
+      visibility: 'direct' as const,
+      language: 'zh',
+      uri: `https://api.abdl-space.top/users/${otherUser.username}/statuses/${r.msg_id}`,
+      url: `https://api.abdl-space.top/@${otherUser.username}/${r.msg_id}`,
+      replies_count: 0,
+      reblogs_count: 0,
+      favourites_count: 0,
+      favourited: false,
+      reblogged: false,
+      muted: false,
+      bookmarked: false,
+      content: `<p>${(r.last_msg as string || '').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</p>`,
+      reblog: null,
+      application: null,
+      account: msgAccount,
+      media_attachments: [],
+      mentions: [],
+      tags: [],
+      emojis: [],
+      card: null,
+      poll: null,
+    }
 
     conversations.push({
       id: String(r.msg_id),
-      accounts: [toAccount(otherUser)],
-      last_status: lastStatus ? toStatus({
-        id: lastStatus.id as number, user_id: lastStatus.user_id as number,
-        content: lastStatus.content as string,
-        like_count: lastStatus.like_count as number,
-        comment_count: lastStatus.comment_count as number,
-        created_at: lastStatus.created_at as string,
-      }, toAccount(otherUser)) : null,
-      unread: true,
+      accounts: [msgAccount],
+      last_status: lastStatus,
+      unread: false,
     })
   }
 
@@ -1121,7 +1199,7 @@ mastodon.get('/statuses/:id/context', async (c) => {
     [id]
   )
 
-  const ancestors: any[] = []
+  const ancestors: MastodonStatus[] = []
   const descendants = comments.map(r => {
     const account = toAccount({
       id: r.user_id as number, username: r.username as string, avatar: r.avatar as string | null,
@@ -1178,11 +1256,104 @@ mastodon.get('/accounts/relationships', async (c) => {
 })
 
 // ============================================================
-// GET /api/v2/search
+// STUB ENDPOINTS — Moshidon calls these on startup
 // ============================================================
-mastodon.get('/v2/search', async (c) => {
-  // Redirect to v1 search (same behavior)
-  return mastodon.fetch(new Request(c.req.url.replace('/v2/search', '/v1/search'), c.req.raw), c.env)
+
+// GET /api/v1/filters
+mastodon.get('/filters', async (c) => c.json([]))
+
+// GET /api/v2/filters
+mastodon.get('/v2/filters', async (c) => c.json([]))
+
+// GET /api/v1/markers
+mastodon.get('/markers', async (c) => {
+  const user = await mastodonAuth(c)
+  if (!user) return c.json({ error: 'The access token is invalid' }, 401)
+  return c.json({
+    home: { last_read_id: '0', version: 0, updated_at: new Date().toISOString(), unread_count: 0 },
+    notifications: { last_read_id: '0', version: 0, updated_at: new Date().toISOString(), unread_count: 0 },
+  })
 })
+
+// POST /api/v1/markers
+mastodon.post('/markers', async (c) => {
+  const user = await mastodonAuth(c)
+  if (!user) return c.json({ error: 'The access token is invalid' }, 401)
+  return c.json({
+    home: { last_read_id: '0', version: 0, updated_at: new Date().toISOString(), unread_count: 0 },
+    notifications: { last_read_id: '0', version: 0, updated_at: new Date().toISOString(), unread_count: 0 },
+  })
+})
+
+// GET /api/v1/custom_emojis
+mastodon.get('/custom_emojis', async (c) => c.json([]))
+
+// GET /api/v1/announcements
+mastodon.get('/announcements', async (c) => c.json([]))
+
+// GET /api/v1/lists
+mastodon.get('/lists', async (c) => c.json([]))
+
+// GET /api/v1/preferences
+mastodon.get('/preferences', async (c) => {
+  const user = await mastodonAuth(c)
+  if (!user) return c.json({ error: 'The access token is invalid' }, 401)
+  return c.json({
+    'posting:default:visibility': 'public',
+    'posting:default:sensitive': false,
+    'posting:default:language': 'zh',
+    'reading:expand:media': 'default',
+    'reading:expand:spoilers': false,
+  })
+})
+
+// GET /api/v1/instance/peers
+mastodon.get('/instance/peers', async (c) => c.json([]))
+
+// GET /api/v1/notifications/:id
+mastodon.get('/notifications/:id', async (c) => {
+  const user = await mastodonAuth(c)
+  if (!user) return c.json({ error: 'The access token is invalid' }, 401)
+  const id = parseInt(c.req.param('id'))
+  const notif = await queryOne<Record<string, unknown>>(
+    c.env.abdl_space_db, 'SELECT * FROM notifications WHERE id = ? AND user_id = ?', [id, user.sub]
+  )
+  if (!notif) return c.json({ error: 'Record not found' }, 404)
+
+  const sourceAccount = toAccount({ id: 0, username: 'system', avatar: null, role: 'user', created_at: new Date().toISOString() })
+  return c.json({
+    id: String(notif.id),
+    type: notif.type === 'like' ? 'favourite' : notif.type === 'follow' ? 'follow' : 'mention',
+    created_at: notif.created_at,
+    account: sourceAccount,
+  })
+})
+
+// POST /api/v1/notifications/clear
+mastodon.post('/notifications/clear', async (c) => {
+  const user = await mastodonAuth(c)
+  if (!user) return c.json({ error: 'The access token is invalid' }, 401)
+  await run(c.env.abdl_space_db, 'UPDATE notifications SET read = 1 WHERE user_id = ?', [user.sub])
+  return c.json({})
+})
+
+// GET /api/v1/statuses/:id/favourited_by
+mastodon.get('/statuses/:id/favourited_by', async (c) => {
+  const id = parseInt(c.req.param('id'))
+  const rows = await query<Record<string, unknown>>(
+    c.env.abdl_space_db,
+    `SELECT u.id, u.username, u.avatar, u.role, u.bio, u.created_at
+     FROM likes l JOIN users u ON l.user_id = u.id
+     WHERE l.target_type = 'post' AND l.target_id = ? LIMIT 40`,
+    [id]
+  )
+  return c.json(rows.map(r => toAccount({
+    id: r.id as number, username: r.username as string, avatar: r.avatar as string | null,
+    role: r.role as string, bio: r.bio as string | null, created_at: r.created_at as string,
+  })))
+})
+
+// GET /api/v1/statuses/:id/reblogged_by
+mastodon.get('/statuses/:id/reblogged_by', async (c) => c.json([]))
 
 export default mastodon

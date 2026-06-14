@@ -227,13 +227,14 @@ function extractTags(content: string): { name: string; url: string }[] {
 
 /** Format plain text content to HTML */
 function formatContent(text: string): string {
+  // First escape HTML, then apply transformations
   let html = escapeHtml(text)
-  // Convert URLs to links
+  // Convert URLs to links (must come before hashtag/mention to avoid double-processing)
   html = html.replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" rel="nofollow noopener noreferrer" target="_blank">$1</a>')
-  // Convert #hashtags
-  html = html.replace(/#(\S+)/g, `<a href="https://${INSTANCE_DOMAIN}/tags/$1" class="mention hashtag" rel="tag">#<span>$1</span></a>`)
-  // Convert @mentions
-  html = html.replace(/@(\S+)/g, `<span class="h-card"><a href="https://${INSTANCE_DOMAIN}/@$1" class="u-url mention" rel="nofollow noopener noreferrer" target="_blank">@<span>$1</span></a></span>`)
+  // Convert #hashtags (only word chars + CJK, not HTML entities)
+  html = html.replace(/(^|[^\/\w])#([\w\u4e00-\u9fa5]+)/g, `$1<a href="https://${INSTANCE_DOMAIN}/tags/$2" class="mention hashtag" rel="tag">#<span>$2</span></a>`)
+  // Convert @mentions (only word chars + CJK)
+  html = html.replace(/@([\w\u4e00-\u9fa5]+)/g, `<span class="h-card"><a href="https://${INSTANCE_DOMAIN}/@$1" class="u-url mention" rel="nofollow noopener noreferrer" target="_blank">@<span>$1</span></a></span>`)
   // Convert newlines to paragraphs
   const paragraphs = html.split(/\n\n+/)
   if (paragraphs.length > 1) {

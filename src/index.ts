@@ -42,6 +42,7 @@ import invite from './routes/invite.ts'
 import badges from './routes/badges.ts'
 import sync from './routes/sync.ts'
 import mastodon from './mastodon/routes.ts'
+import mastodonV2 from './mastodon/v2.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
@@ -126,6 +127,7 @@ app.route('/api/captcha', captcha)
 app.route('/api/captcha/keys', captchaKeys)
 app.route('/api/v1/captcha', captchaV1)
 app.route('/api/v1', mastodon)
+app.route('/api/v2', mastodonV2)
 app.route('/api/oauth', oauth)
 app.route('/api/oauth/clients', oauthClients)
 app.route('/api/content/keys', contentKeys)
