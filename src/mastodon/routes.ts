@@ -950,6 +950,7 @@ mastodon.get('/timelines/home', async (c) => {
         id: r.id as number, user_id: r.user_id as number, content: r.content as string,
         diaper_id: r.diaper_id as number | null, like_count: r.like_count as number,
         comment_count: r.comment_count as number, reblogs_count: r.reblogs_count as number,
+        has_nsfw: !!r.has_nsfw,
         created_at: r.created_at as string,
         images: imagesMap.get(r.id as number),
       }, account, { favourited: likedSet.has(r.id as number), reblog: r.repost_id ? reblogMap.get(r.repost_id as number) : undefined })
@@ -1013,6 +1014,7 @@ mastodon.get('/timelines/public', async (c) => {
         id: r.id as number, user_id: r.user_id as number, content: r.content as string,
         diaper_id: r.diaper_id as number | null, like_count: r.like_count as number,
         comment_count: r.comment_count as number, reblogs_count: r.reblogs_count as number,
+        has_nsfw: !!r.has_nsfw,
         created_at: r.created_at as string,
         images: imagesMap.get(r.id as number),
       }, account, { favourited: likedSet.has(r.id as number), reblog: r.repost_id ? reblogMap.get(r.repost_id as number) : undefined })
@@ -1056,6 +1058,7 @@ mastodon.get('/timelines/tag/:hashtag', async (c) => {
         id: r.id as number, user_id: r.user_id as number, content: r.content as string,
         like_count: r.like_count as number, comment_count: r.comment_count as number,
         reblogs_count: r.reblogs_count as number,
+        has_nsfw: !!r.has_nsfw,
         created_at: r.created_at as string,
         images: imagesMap.get(r.id as number),
       }, account, { reblog: r.repost_id ? reblogMap.get(r.repost_id as number) : undefined })
@@ -1239,6 +1242,7 @@ mastodon.get('/search', async (c) => {
         id: r.id as number, user_id: r.user_id as number, content: r.content as string,
         like_count: r.like_count as number, comment_count: r.comment_count as number,
         reblogs_count: r.reblogs_count as number,
+        has_nsfw: !!r.has_nsfw,
         created_at: r.created_at as string,
         images: imagesMap.get(r.id as number),
       }, account, { reblog: r.repost_id ? reblogMap.get(r.repost_id as number) : undefined })
@@ -1623,7 +1627,9 @@ mastodon.get('/trends/statuses', async (c) => {
     return toStatus({
       id: r.id as number, user_id: r.user_id as number, content: r.content as string,
       like_count: r.like_count as number, comment_count: r.comment_count as number,
-      reblogs_count: r.reblogs_count as number, created_at: r.created_at as string,
+      reblogs_count: r.reblogs_count as number,
+      has_nsfw: !!r.has_nsfw,
+      created_at: r.created_at as string,
       images: imagesMap.get(r.id as number),
     }, account, { favourited: likedSet.has(r.id as number) })
   })
