@@ -1592,18 +1592,21 @@ mastodon.get('/trends', async (c) => c.json([]))
 // GET /api/v1/trends/statuses
 mastodon.get('/trends/statuses', async (c) => {
   const limit = Math.min(40, Math.max(1, parseInt(c.req.query('limit') || '20')))
+  const maxId = c.req.query('max_id')
 
-  const posts = await query<Record<string, unknown>>(
-    c.env.abdl_space_db,
-    `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
+  let sql = `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
      (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
      (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
      (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count
      FROM posts p JOIN users u ON p.user_id = u.id
-     WHERE p.repost_id IS NULL
-     ORDER BY p.created_at DESC LIMIT ?`,
-    [limit]
-  )
+     WHERE p.repost_id IS NULL`
+  const params: unknown[] = []
+
+  if (maxId) { sql += ' AND p.id < ?'; params.push(parseMastoIdForCursor(maxId) ?? 0) }
+  sql += ' ORDER BY p.created_at DESC LIMIT ?'
+  params.push(limit)
+
+  const posts = await query<Record<string, unknown>>(c.env.abdl_space_db, sql, params)
 
   const user = await mastodonAuth(c)
   const postIds = posts.map(r => r.id as number)
@@ -1634,6 +1637,8 @@ mastodon.get('/trends/statuses', async (c) => {
     }, account, { favourited: likedSet.has(r.id as number) })
   })
 
+  const link = buildLinkHeader('/api/v1/trends/statuses', statuses, limit)
+  if (link) c.header('Link', link)
   return c.json(statuses)
 })
 
