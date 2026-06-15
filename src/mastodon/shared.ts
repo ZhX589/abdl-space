@@ -66,6 +66,7 @@ export async function buildInstance(db: D1Database): Promise<MastodonInstance> {
     registrations: { enabled: true, approval_required: false, message: null },
     contact: { email: null, account: null },
     rules: [],
+    api_versions: { mastodon: 1 },
   }
 }
 

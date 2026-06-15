@@ -138,6 +138,14 @@ app.route('/api/content/keys', contentKeys)
 app.route('/api/v1/content', contentV1)
 app.route('/api/auth/nbw', nbw)
 
+// Mastodon OAuth compatibility: redirect /oauth/* to /api/oauth/*
+app.all('/oauth/*', async (c) => {
+  const path = c.req.path.replace('/oauth/', '/api/oauth/')
+  const url = new URL(c.req.url)
+  url.pathname = path
+  return Response.redirect(url.toString(), 302)
+})
+
 // Key Split — API Key 代理与统计
 app.route('/api/key-split', keySplit)
 app.route('/v1', keySplitProxy)
@@ -223,5 +231,10 @@ app.post('/api/admin/add', adminMiddleware, async (c) => {
     return c.json({ error: '操作失败' }, 500)
   }
 })
+
+// Fallback: return JSON 404 for any unmatched /api/v1/* or /api/v2/* routes
+// Prevents Moshidon from crashing on plain-text 404 responses
+app.all('/api/v1/*', (c) => c.json({ error: 'Not found' }, 404))
+app.all('/api/v2/*', (c) => c.json({ error: 'Not found' }, 404))
 
 export default app

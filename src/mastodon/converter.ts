@@ -6,9 +6,16 @@
 import type { MastodonAccount, MastodonStatus, MastodonMediaAttachment, MastodonNotification } from './types.ts'
 import { toMastoId } from './shared.ts'
 
-const INSTANCE_DOMAIN = 'api.abdl-space.top'
+const INSTANCE_DOMAIN = 'abdl-space.top'
 const DEFAULT_AVATAR = 'https://img.abdl-space.top/file/system/1781439303787_play_store_512.png'
 const DEFAULT_HEADER = 'https://img.abdl-space.top/file/system/1781439303787_play_store_512.png'
+
+/** Convert date string to ISO 8601 format for Moshidon compatibility */
+function toISOString(dateStr: string): string {
+  if (!dateStr) return new Date().toISOString()
+  if (dateStr.includes('T')) return dateStr
+  return dateStr.replace(' ', 'T') + 'Z'
+}
 
 /** ABDL User → Mastodon Account */
 export function toAccount(user: {
@@ -34,7 +41,7 @@ export function toAccount(user: {
     bot: false,
     discoverable: true,
     group: false,
-    created_at: user.created_at,
+    created_at: toISOString(user.created_at),
     note: user.bio ? `<p>${escapeHtml(user.bio)}</p>` : '',
     url: `https://${INSTANCE_DOMAIN}/@${user.username}`,
     uri: `https://${INSTANCE_DOMAIN}/users/${user.username}`,
@@ -67,6 +74,7 @@ export function toStatus(post: {
   is_announcement?: boolean | number
   like_count?: number
   comment_count?: number
+  reblogs_count?: number
   has_liked?: boolean
   created_at: string
   images?: { image_url: string; is_nsfw?: boolean | number }[]
@@ -74,13 +82,14 @@ export function toStatus(post: {
 }, account: MastodonAccount, opts?: {
   favourited?: boolean
   reblogged?: boolean
+  reblog?: MastodonStatus
 }): MastodonStatus {
   const contentHtml = formatContent(post.content)
   const images = post.images || []
 
   return {
     id: toMastoId('post', post.id),
-    created_at: post.created_at,
+    created_at: toISOString(post.created_at),
     in_reply_to_id: null,
     in_reply_to_account_id: null,
     sensitive: !!post.has_nsfw,
@@ -90,7 +99,7 @@ export function toStatus(post: {
     uri: `https://${INSTANCE_DOMAIN}/users/${account.username}/statuses/${post.id}`,
     url: `https://${INSTANCE_DOMAIN}/@${account.username}/${post.id}`,
     replies_count: post.comment_count ?? 0,
-    reblogs_count: 0,
+    reblogs_count: post.reblogs_count ?? 0,
     favourites_count: post.like_count ?? 0,
     favourited: opts?.favourited ?? false,
     reblogged: opts?.reblogged ?? false,
@@ -98,7 +107,7 @@ export function toStatus(post: {
     bookmarked: false,
     pinned: !!post.pinned,
     content: contentHtml,
-    reblog: null,
+    reblog: opts?.reblog ?? null,
     application: { name: 'ABDL Space', website: `https://${INSTANCE_DOMAIN}` },
     account,
     media_attachments: images.map((img, i) => toMediaAttachment(i, img.image_url)),
@@ -138,13 +147,14 @@ export function toStatusFromComment(comment: {
   images?: { image_url: string; is_nsfw?: boolean | number }[]
 }, account: MastodonAccount): MastodonStatus {
   const images = comment.images || []
+  const hasNsfwImage = images.some(img => img.is_nsfw)
 
   return {
     id: toMastoId('comment', comment.id),
-    created_at: comment.created_at,
+    created_at: toISOString(comment.created_at),
     in_reply_to_id: comment.parent_id ? toMastoId('comment', comment.parent_id) : toMastoId('post', comment.post_id),
     in_reply_to_account_id: null,
-    sensitive: false,
+    sensitive: hasNsfwImage,
     spoiler_text: '',
     visibility: 'public',
     language: 'zh',
@@ -209,7 +219,7 @@ export function toNotification(notif: {
   return {
     id: String(notif.id),
     type: mastoType,
-    created_at: notif.created_at,
+    created_at: toISOString(notif.created_at),
     account,
     status,
   }

@@ -145,4 +145,5 @@ export interface MastodonInstance {
   registrations: { enabled: boolean; approval_required: boolean; message: string | null }
   contact: { email: string | null; account: MastodonAccount | null }
   rules: { id: string; text: string; hint: string }[]
+  api_versions?: { [key: string]: number }
 }

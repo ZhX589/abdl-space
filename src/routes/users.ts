@@ -56,13 +56,25 @@ users.get('/search', async (c) => {
  * GET /api/users/:id — 用户公开信息
  */
 users.get('/:id', async (c) => {
-  const id = parseInt(c.req.param('id'))
+  const param = c.req.param('id')
+  const id = parseInt(param)
 
-  const user = await queryOne<Record<string, unknown>>(
-    c.env.abdl_space_db,
-    'SELECT id, username, role, avatar, age, region, style_preference, bio, created_at FROM users WHERE id = ?',
-    [id]
-  )
+  // Support both numeric ID and username lookup
+  let user: Record<string, unknown> | null
+  if (isNaN(id)) {
+    // Lookup by username
+    user = await queryOne<Record<string, unknown>>(
+      c.env.abdl_space_db,
+      'SELECT id, username, role, avatar, age, region, style_preference, bio, created_at FROM users WHERE username = ?',
+      [param]
+    )
+  } else {
+    user = await queryOne<Record<string, unknown>>(
+      c.env.abdl_space_db,
+      'SELECT id, username, role, avatar, age, region, style_preference, bio, created_at FROM users WHERE id = ?',
+      [id]
+    )
+  }
   if (!user) return c.json({ error: 'User not found' }, 404)
 
   // 穿过数量 = 该用户评分过的不同纸尿裤数

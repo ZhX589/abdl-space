@@ -58,6 +58,64 @@ const mastodon = new Hono<AppType>()
 
 const IMGBED_HOST = 'https://img.abdl-space.top'
 
+async function loadPostImages(db: D1Database, postIds: number[]): Promise<Map<number, { image_url: string; is_nsfw: number }[]>> {
+  if (postIds.length === 0) return new Map()
+  const allImages = await query<{ post_id: number; image_url: string; is_nsfw: number }>(
+    db, `SELECT post_id, image_url, is_nsfw FROM post_images WHERE post_id IN (${postIds.map(() => '?').join(',')}) ORDER BY sort_order`, postIds
+  )
+  const map = new Map<number, { image_url: string; is_nsfw: number }[]>()
+  for (const img of allImages) {
+    if (!map.has(img.post_id)) map.set(img.post_id, [])
+    map.get(img.post_id)!.push(img)
+  }
+  return map
+}
+
+async function loadReblogTargets(db: D1Database, repostIds: number[]): Promise<Map<number, MastodonStatus>> {
+  if (repostIds.length === 0) return new Map()
+  const originals = await query<Record<string, unknown>>(
+    db, `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
+    (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
+    (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
+    (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count
+    FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id IN (${repostIds.map(() => '?').join(',')})`, repostIds)
+  const imagesMap = await loadPostImages(db, repostIds)
+  const map = new Map<number, MastodonStatus>()
+  for (const o of originals) {
+    const account = toAccount({ id: o.user_id as number, username: o.username as string, avatar: o.avatar as string | null, role: o.role as string, bio: o.bio as string | null, created_at: o.user_created_at as string })
+    map.set(o.id as number, toStatus({
+      id: o.id as number, user_id: o.user_id as number, content: o.content as string,
+      like_count: o.like_count as number, comment_count: o.comment_count as number, reblogs_count: o.reblogs_count as number,
+      created_at: o.created_at as string, images: imagesMap.get(o.id as number),
+    }, account))
+  }
+  return map
+}
+
+async function loadCommentImages(db: D1Database, commentIds: number[]): Promise<Map<number, { image_url: string; is_nsfw: number }[]>> {
+  if (commentIds.length === 0) return new Map()
+
+  // Ensure comment_images table exists
+  await run(db, `CREATE TABLE IF NOT EXISTS comment_images (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    comment_id INTEGER NOT NULL,
+    image_url TEXT NOT NULL,
+    is_nsfw INTEGER DEFAULT 0,
+    sort_order INTEGER DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`)
+
+  const allImages = await query<{ comment_id: number; image_url: string; is_nsfw: number }>(
+    db, `SELECT comment_id, image_url, is_nsfw FROM comment_images WHERE comment_id IN (${commentIds.map(() => '?').join(',')}) ORDER BY sort_order`, commentIds
+  )
+  const map = new Map<number, { image_url: string; is_nsfw: number }[]>()
+  for (const img of allImages) {
+    if (!map.has(img.comment_id)) map.set(img.comment_id, [])
+    map.get(img.comment_id)!.push(img)
+  }
+  return map
+}
+
 // ============================================================
 // GET /api/v1/instance
 // ============================================================
@@ -224,8 +282,31 @@ mastodon.patch('/accounts/update_credentials', async (c) => {
     params.push(String(body.note).replace(/<[^>]*>/g, '').substring(0, 500))
   }
   if (body.avatar !== undefined) {
-    updates.push('avatar = ?')
-    params.push(String(body.avatar))
+    if (body.avatar instanceof File) {
+      const uploadForm = new FormData()
+      uploadForm.append('file', body.avatar)
+      let res = await fetch(`${IMGBED_HOST}/upload?returnFormat=full`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${c.env.IMGBED_UPLOAD_KEY}` },
+        body: uploadForm,
+      })
+      if (!res.ok && c.env.IMGBED_UPLOAD_KEY) {
+        const uploadForm2 = new FormData()
+        uploadForm2.append('file', body.avatar)
+        res = await fetch(`${IMGBED_HOST}/upload?returnFormat=full&authCode=${c.env.IMGBED_UPLOAD_KEY}`, {
+          method: 'POST',
+          body: uploadForm2,
+        })
+      }
+      if (res.ok) {
+        const data = await res.json() as { src: string }[]
+        const url = data[0]?.src
+        if (url) { updates.push('avatar = ?'); params.push(url) }
+      }
+    } else {
+      updates.push('avatar = ?')
+      params.push(String(body.avatar))
+    }
   }
 
   if (updates.length > 0) {
@@ -308,7 +389,8 @@ mastodon.get('/accounts/:id/statuses', async (c) => {
 
   let sql = `SELECT p.*, u.username, u.avatar, u.role,
     (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
-    (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count
+    (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
+    (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count
     FROM posts p JOIN users u ON p.user_id = u.id WHERE p.user_id = ?`
   const params: unknown[] = [id]
 
@@ -336,18 +418,26 @@ mastodon.get('/accounts/:id/statuses', async (c) => {
   }
 
   const account = toAccount(dbUser)
-  const statuses = posts.map(r => toStatus({
-    id: r.id as number,
-    user_id: r.user_id as number,
-    content: r.content as string,
-    diaper_id: r.diaper_id as number | null,
-    pinned: !!r.pinned,
-    has_nsfw: !!r.has_nsfw,
-    is_announcement: !!r.is_announcement,
-    like_count: r.like_count as number,
-    comment_count: r.comment_count as number,
-    created_at: r.created_at as string,
-  }, account, { favourited: likedSet.has(r.id as number) }))
+  const statuses = await (async () => {
+    const postIds = posts.map(r => r.id as number)
+    const imagesMap = await loadPostImages(c.env.abdl_space_db, postIds)
+    const repostIds = posts.filter(r => r.repost_id).map(r => r.repost_id as number)
+    const reblogMap = await loadReblogTargets(c.env.abdl_space_db, repostIds)
+    return posts.map(r => toStatus({
+      id: r.id as number,
+      user_id: r.user_id as number,
+      content: r.content as string,
+      diaper_id: r.diaper_id as number | null,
+      pinned: !!r.pinned,
+      has_nsfw: !!r.has_nsfw,
+      is_announcement: !!r.is_announcement,
+      like_count: r.like_count as number,
+      comment_count: r.comment_count as number,
+      reblogs_count: r.reblogs_count as number,
+      created_at: r.created_at as string,
+      images: imagesMap.get(r.id as number),
+    }, account, { favourited: likedSet.has(r.id as number), reblog: r.repost_id ? reblogMap.get(r.repost_id as number) : undefined }))
+  })()
 
   const link = buildLinkHeader(`/api/v1/accounts/${id}/statuses`, statuses, limit, { only_media: c.req.query('only_media') || '' })
   if (link) c.header('Link', link)
@@ -572,7 +662,8 @@ mastodon.get('/statuses/:id', async (c) => {
     c.env.abdl_space_db,
     `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
      (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
-     (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count
+     (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
+     (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count
      FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`,
     [resolved.realId]
   )
@@ -587,6 +678,12 @@ mastodon.get('/statuses/:id', async (c) => {
     role: post.role as string, bio: post.bio as string | null, created_at: post.user_created_at as string,
   })
 
+  let reblog: MastodonStatus | undefined
+  if (post.repost_id) {
+    const reblogMap = await loadReblogTargets(c.env.abdl_space_db, [post.repost_id as number])
+    reblog = reblogMap.get(post.repost_id as number)
+  }
+
   return c.json(toStatus({
     id: post.id as number,
     user_id: post.user_id as number,
@@ -596,9 +693,10 @@ mastodon.get('/statuses/:id', async (c) => {
     has_nsfw: !!post.has_nsfw,
     like_count: post.like_count as number,
     comment_count: post.comment_count as number,
+    reblogs_count: post.reblogs_count as number,
     created_at: post.created_at as string,
     images,
-  }, account))
+  }, account, { reblog }))
 })
 
 // ============================================================
@@ -617,14 +715,14 @@ mastodon.delete('/statuses/:id', async (c) => {
     if (!comment) return c.json({ error: 'Record not found' }, 404)
     if (comment.user_id !== user.sub && user.role !== 'admin') return c.json({ error: 'Forbidden' }, 403)
     await run(c.env.abdl_space_db, 'DELETE FROM post_comments WHERE id = ?', [resolved.realId])
-    return c.json({ id: rawId, text: '', media_attachments: [], poll: null })
+    return c.json({ id: rawId, text: '', account: toAccount({ id: user.sub, username: 'user', avatar: null, role: 'user', bio: null, created_at: new Date().toISOString() }), media_attachments: [], poll: null })
   }
 
   const post = await queryOne<{ id: number; user_id: number }>(c.env.abdl_space_db, 'SELECT id, user_id FROM posts WHERE id = ?', [resolved.realId])
   if (!post) return c.json({ error: 'Record not found' }, 404)
   if (post.user_id !== user.sub && user.role !== 'admin') return c.json({ error: 'Forbidden' }, 403)
   await run(c.env.abdl_space_db, 'DELETE FROM posts WHERE id = ?', [resolved.realId])
-  return c.json({ id: rawId, text: '', media_attachments: [], poll: null })
+  return c.json({ id: rawId, text: '', account: toAccount({ id: user.sub, username: 'user', avatar: null, role: 'user', bio: null, created_at: new Date().toISOString() }), media_attachments: [], poll: null })
 })
 
 // ============================================================
@@ -710,23 +808,55 @@ mastodon.post('/statuses/:id/reblog', async (c) => {
   if (!resolved) return c.json({ error: 'Record not found' }, 404)
 
   if (resolved.kind === 'comment') {
-    const comment = await queryOne<Record<string, unknown>>(c.env.abdl_space_db,
-      `SELECT pc.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
-       (SELECT COUNT(*) FROM likes WHERE target_type = 'comment' AND target_id = pc.id) as like_count
-       FROM post_comments pc JOIN users u ON pc.user_id = u.id WHERE pc.id = ?`, [resolved.realId])
-    if (!comment) return c.json({ error: 'Record not found' }, 404)
-    const account = toAccount({ id: comment.user_id as number, username: comment.username as string, avatar: comment.avatar as string | null, role: comment.role as string, bio: comment.bio as string | null, created_at: comment.user_created_at as string })
-    return c.json(toStatusFromComment({ id: comment.id as number, post_id: comment.post_id as number, user_id: comment.user_id as number, parent_id: comment.parent_id as number | null, content: comment.content as string, like_count: comment.like_count as number, created_at: comment.created_at as string }, account))
+    return c.json({ error: 'Cannot reblog a comment' }, 400)
   }
 
+  const realId = resolved.realId
+
+  // Check if already reblogged
+  const existing = await queryOne<{ id: number }>(
+    c.env.abdl_space_db, 'SELECT id FROM posts WHERE user_id = ? AND repost_id = ? AND content = ?', [user.sub, realId, '']
+  )
+  if (existing) {
+    // Already reblogged, just return status with reblogged: true
+    const post = await queryOne<Record<string, unknown>>(c.env.abdl_space_db,
+      `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
+       (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
+       (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
+       (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count
+       FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`, [realId])
+    if (!post) return c.json({ error: 'Record not found' }, 404)
+    const account = toAccount({ id: post.user_id as number, username: post.username as string, avatar: post.avatar as string | null, role: post.role as string, bio: post.bio as string | null, created_at: post.user_created_at as string })
+    const images = await query<{ image_url: string; is_nsfw: number }>(c.env.abdl_space_db, 'SELECT image_url, is_nsfw FROM post_images WHERE post_id = ? ORDER BY sort_order', [realId])
+    return c.json(toStatus({ id: post.id as number, user_id: post.user_id as number, content: post.content as string, like_count: post.like_count as number, comment_count: post.comment_count as number, reblogs_count: post.reblogs_count as number, created_at: post.created_at as string, images }, account, { reblogged: true }))
+  }
+
+  // Create repost (reblog = new post with repost_id pointing to original)
+  await run(c.env.abdl_space_db,
+    'INSERT INTO posts (user_id, content, repost_id) VALUES (?, ?, ?)',
+    [user.sub, '', realId]
+  )
+
+  // Notify original post author
+  const origPost = await queryOne<{ user_id: number }>(c.env.abdl_space_db, 'SELECT user_id FROM posts WHERE id = ?', [realId])
+  if (origPost && origPost.user_id !== user.sub) {
+    await run(c.env.abdl_space_db,
+      'INSERT INTO notifications (user_id, type, message, related_id) VALUES (?, ?, ?, ?)',
+      [origPost.user_id, 'repost', `${user.sub} 转发了你的帖子`, realId]
+    )
+  }
+
+  // Return original post with reblogged: true
   const post = await queryOne<Record<string, unknown>>(c.env.abdl_space_db,
     `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
      (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
-     (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count
-     FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`, [resolved.realId])
+     (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
+     (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count
+     FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`, [realId])
   if (!post) return c.json({ error: 'Record not found' }, 404)
   const account = toAccount({ id: post.user_id as number, username: post.username as string, avatar: post.avatar as string | null, role: post.role as string, bio: post.bio as string | null, created_at: post.user_created_at as string })
-  return c.json(toStatus({ id: post.id as number, user_id: post.user_id as number, content: post.content as string, like_count: post.like_count as number, comment_count: post.comment_count as number, created_at: post.created_at as string }, account, { reblogged: true }))
+  const images = await query<{ image_url: string; is_nsfw: number }>(c.env.abdl_space_db, 'SELECT image_url, is_nsfw FROM post_images WHERE post_id = ? ORDER BY sort_order', [realId])
+  return c.json(toStatus({ id: post.id as number, user_id: post.user_id as number, content: post.content as string, like_count: post.like_count as number, comment_count: post.comment_count as number, reblogs_count: post.reblogs_count as number, created_at: post.created_at as string, images }, account, { reblogged: true }))
 })
 
 // ============================================================
@@ -741,23 +871,30 @@ mastodon.post('/statuses/:id/unreblog', async (c) => {
   if (!resolved) return c.json({ error: 'Record not found' }, 404)
 
   if (resolved.kind === 'comment') {
-    const comment = await queryOne<Record<string, unknown>>(c.env.abdl_space_db,
-      `SELECT pc.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
-       (SELECT COUNT(*) FROM likes WHERE target_type = 'comment' AND target_id = pc.id) as like_count
-       FROM post_comments pc JOIN users u ON pc.user_id = u.id WHERE pc.id = ?`, [resolved.realId])
-    if (!comment) return c.json({ error: 'Record not found' }, 404)
-    const account = toAccount({ id: comment.user_id as number, username: comment.username as string, avatar: comment.avatar as string | null, role: comment.role as string, bio: comment.bio as string | null, created_at: comment.user_created_at as string })
-    return c.json(toStatusFromComment({ id: comment.id as number, post_id: comment.post_id as number, user_id: comment.user_id as number, parent_id: comment.parent_id as number | null, content: comment.content as string, like_count: comment.like_count as number, created_at: comment.created_at as string }, account))
+    return c.json({ error: 'Cannot unreblog a comment' }, 400)
   }
 
+  const realId = resolved.realId
+
+  // Delete the user's repost of this post
+  const repost = await queryOne<{ id: number }>(
+    c.env.abdl_space_db, 'SELECT id FROM posts WHERE user_id = ? AND repost_id = ? AND content = ?', [user.sub, realId, '']
+  )
+  if (repost) {
+    await run(c.env.abdl_space_db, 'DELETE FROM posts WHERE id = ?', [repost.id])
+  }
+
+  // Return original post with reblogged: false
   const post = await queryOne<Record<string, unknown>>(c.env.abdl_space_db,
     `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
      (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
-     (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count
-     FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`, [resolved.realId])
+     (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
+     (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count
+     FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`, [realId])
   if (!post) return c.json({ error: 'Record not found' }, 404)
   const account = toAccount({ id: post.user_id as number, username: post.username as string, avatar: post.avatar as string | null, role: post.role as string, bio: post.bio as string | null, created_at: post.user_created_at as string })
-  return c.json(toStatus({ id: post.id as number, user_id: post.user_id as number, content: post.content as string, like_count: post.like_count as number, comment_count: post.comment_count as number, created_at: post.created_at as string }, account, { reblogged: false }))
+  const images = await query<{ image_url: string; is_nsfw: number }>(c.env.abdl_space_db, 'SELECT image_url, is_nsfw FROM post_images WHERE post_id = ? ORDER BY sort_order', [realId])
+  return c.json(toStatus({ id: post.id as number, user_id: post.user_id as number, content: post.content as string, like_count: post.like_count as number, comment_count: post.comment_count as number, reblogs_count: post.reblogs_count as number, created_at: post.created_at as string, images }, account, { reblogged: false }))
 })
 
 // ============================================================
@@ -774,7 +911,8 @@ mastodon.get('/timelines/home', async (c) => {
   // Home timeline = posts from followed users + own posts
   let sql = `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
     (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
-    (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count
+    (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
+    (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count
     FROM posts p JOIN users u ON p.user_id = u.id
     WHERE (p.user_id = ? OR p.user_id IN (SELECT following_id FROM follows WHERE follower_id = ?))`
   const params: unknown[] = [user.sub, user.sub]
@@ -799,17 +937,24 @@ mastodon.get('/timelines/home', async (c) => {
     for (const l of liked) likedSet.add(l.target_id)
   }
 
-  const homeStatuses = posts.map(r => {
-    const account = toAccount({
-      id: r.user_id as number, username: r.username as string, avatar: r.avatar as string | null,
-      role: r.role as string, bio: r.bio as string | null, created_at: r.user_created_at as string,
+  const homeStatuses = await (async () => {
+    const imagesMap = await loadPostImages(c.env.abdl_space_db, postIds)
+    const repostIds = posts.filter(r => r.repost_id).map(r => r.repost_id as number)
+    const reblogMap = await loadReblogTargets(c.env.abdl_space_db, repostIds)
+    return posts.map(r => {
+      const account = toAccount({
+        id: r.user_id as number, username: r.username as string, avatar: r.avatar as string | null,
+        role: r.role as string, bio: r.bio as string | null, created_at: r.user_created_at as string,
+      })
+      return toStatus({
+        id: r.id as number, user_id: r.user_id as number, content: r.content as string,
+        diaper_id: r.diaper_id as number | null, like_count: r.like_count as number,
+        comment_count: r.comment_count as number, reblogs_count: r.reblogs_count as number,
+        created_at: r.created_at as string,
+        images: imagesMap.get(r.id as number),
+      }, account, { favourited: likedSet.has(r.id as number), reblog: r.repost_id ? reblogMap.get(r.repost_id as number) : undefined })
     })
-    return toStatus({
-      id: r.id as number, user_id: r.user_id as number, content: r.content as string,
-      diaper_id: r.diaper_id as number | null, like_count: r.like_count as number,
-      comment_count: r.comment_count as number, created_at: r.created_at as string,
-    }, account, { favourited: likedSet.has(r.id as number) })
-  })
+  })()
 
   const link = buildLinkHeader('/api/v1/timelines/home', homeStatuses, limit)
   if (link) c.header('Link', link)
@@ -824,9 +969,10 @@ mastodon.get('/timelines/public', async (c) => {
   const maxId = c.req.query('max_id')
   const sinceId = c.req.query('since_id')
 
-  let sql = `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
+  let sql = `    SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
     (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
-    (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count
+    (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
+    (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count
     FROM posts p JOIN users u ON p.user_id = u.id WHERE 1=1`
   const params: unknown[] = []
 
@@ -853,17 +999,25 @@ mastodon.get('/timelines/public', async (c) => {
     }
   }
 
-  const publicStatuses = posts.map(r => {
-    const account = toAccount({
-      id: r.user_id as number, username: r.username as string, avatar: r.avatar as string | null,
-      role: r.role as string, bio: r.bio as string | null, created_at: r.user_created_at as string,
+  const publicStatuses = await (async () => {
+    const postIds = posts.map(r => r.id as number)
+    const imagesMap = await loadPostImages(c.env.abdl_space_db, postIds)
+    const repostIds = posts.filter(r => r.repost_id).map(r => r.repost_id as number)
+    const reblogMap = await loadReblogTargets(c.env.abdl_space_db, repostIds)
+    return posts.map(r => {
+      const account = toAccount({
+        id: r.user_id as number, username: r.username as string, avatar: r.avatar as string | null,
+        role: r.role as string, bio: r.bio as string | null, created_at: r.user_created_at as string,
+      })
+      return toStatus({
+        id: r.id as number, user_id: r.user_id as number, content: r.content as string,
+        diaper_id: r.diaper_id as number | null, like_count: r.like_count as number,
+        comment_count: r.comment_count as number, reblogs_count: r.reblogs_count as number,
+        created_at: r.created_at as string,
+        images: imagesMap.get(r.id as number),
+      }, account, { favourited: likedSet.has(r.id as number), reblog: r.repost_id ? reblogMap.get(r.repost_id as number) : undefined })
     })
-    return toStatus({
-      id: r.id as number, user_id: r.user_id as number, content: r.content as string,
-      diaper_id: r.diaper_id as number | null, like_count: r.like_count as number,
-      comment_count: r.comment_count as number, created_at: r.created_at as string,
-    }, account, { favourited: likedSet.has(r.id as number) })
-  })
+  })()
 
   const link = buildLinkHeader('/api/v1/timelines/public', publicStatuses, limit, { local: c.req.query('local') || '' })
   if (link) c.header('Link', link)
@@ -881,23 +1035,32 @@ mastodon.get('/timelines/tag/:hashtag', async (c) => {
     c.env.abdl_space_db,
     `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
      (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
-     (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count
+     (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
+     (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count
      FROM posts p JOIN users u ON p.user_id = u.id
      WHERE p.content LIKE ? OR p.content LIKE ? OR p.content LIKE ? OR p.content LIKE ? ORDER BY p.created_at DESC LIMIT ?`,
     [`%#${hashtag} %`, `%#${hashtag}\n%`, `#${hashtag} %`, `#${hashtag}\n%`, limit]
   )
 
-  const tagStatuses = posts.map(r => {
-    const account = toAccount({
-      id: r.user_id as number, username: r.username as string, avatar: r.avatar as string | null,
-      role: r.role as string, bio: r.bio as string | null, created_at: r.user_created_at as string,
+  const tagStatuses = await (async () => {
+    const postIds = posts.map(r => r.id as number)
+    const imagesMap = await loadPostImages(c.env.abdl_space_db, postIds)
+    const repostIds = posts.filter(r => r.repost_id).map(r => r.repost_id as number)
+    const reblogMap = await loadReblogTargets(c.env.abdl_space_db, repostIds)
+    return posts.map(r => {
+      const account = toAccount({
+        id: r.user_id as number, username: r.username as string, avatar: r.avatar as string | null,
+        role: r.role as string, bio: r.bio as string | null, created_at: r.user_created_at as string,
+      })
+      return toStatus({
+        id: r.id as number, user_id: r.user_id as number, content: r.content as string,
+        like_count: r.like_count as number, comment_count: r.comment_count as number,
+        reblogs_count: r.reblogs_count as number,
+        created_at: r.created_at as string,
+        images: imagesMap.get(r.id as number),
+      }, account, { reblog: r.repost_id ? reblogMap.get(r.repost_id as number) : undefined })
     })
-    return toStatus({
-      id: r.id as number, user_id: r.user_id as number, content: r.content as string,
-      like_count: r.like_count as number, comment_count: r.comment_count as number,
-      created_at: r.created_at as string,
-    }, account)
-  })
+  })()
 
   const link = buildLinkHeader(`/api/v1/timelines/tag/${hashtag}`, tagStatuses, limit)
   if (link) c.header('Link', link)
@@ -1051,9 +1214,10 @@ mastodon.get('/search', async (c) => {
     ),
     query<Record<string, unknown>>(
       c.env.abdl_space_db,
-      `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
+       `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
        (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
-       (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count
+       (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
+       (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count
        FROM posts p JOIN users u ON p.user_id = u.id
        WHERE p.content LIKE ? ORDER BY p.created_at DESC LIMIT 10`,
       [likePattern]
@@ -1061,17 +1225,25 @@ mastodon.get('/search', async (c) => {
   ])
 
   const accounts = users.map(u => toAccount(u))
-  const statuses = posts.map(r => {
-    const account = toAccount({
-      id: r.user_id as number, username: r.username as string, avatar: r.avatar as string | null,
-      role: r.role as string, bio: r.bio as string | null, created_at: r.user_created_at as string,
+  const statuses = await (async () => {
+    const postIds = posts.map(r => r.id as number)
+    const imagesMap = await loadPostImages(c.env.abdl_space_db, postIds)
+    const repostIds = posts.filter(r => r.repost_id).map(r => r.repost_id as number)
+    const reblogMap = await loadReblogTargets(c.env.abdl_space_db, repostIds)
+    return posts.map(r => {
+      const account = toAccount({
+        id: r.user_id as number, username: r.username as string, avatar: r.avatar as string | null,
+        role: r.role as string, bio: r.bio as string | null, created_at: r.user_created_at as string,
+      })
+      return toStatus({
+        id: r.id as number, user_id: r.user_id as number, content: r.content as string,
+        like_count: r.like_count as number, comment_count: r.comment_count as number,
+        reblogs_count: r.reblogs_count as number,
+        created_at: r.created_at as string,
+        images: imagesMap.get(r.id as number),
+      }, account, { reblog: r.repost_id ? reblogMap.get(r.repost_id as number) : undefined })
     })
-    return toStatus({
-      id: r.id as number, user_id: r.user_id as number, content: r.content as string,
-      like_count: r.like_count as number, comment_count: r.comment_count as number,
-      created_at: r.created_at as string,
-    }, account)
-  })
+  })()
 
   // Extract hashtags from search results
   const hashtagSet = new Set<string>()
@@ -1135,6 +1307,12 @@ mastodon.get('/statuses/:id/context', async (c) => {
     [postId]
   )
 
+  const commentIds = comments.map(r => r.id as number)
+  let commentImagesMap = new Map<number, { image_url: string; is_nsfw: number }[]>()
+  try {
+    commentImagesMap = await loadCommentImages(c.env.abdl_space_db, commentIds)
+  } catch {}
+
   const ancestors: MastodonStatus[] = []
   const descendants = comments.map(r => {
     const account = toAccount({
@@ -1145,6 +1323,7 @@ mastodon.get('/statuses/:id/context', async (c) => {
       id: r.id as number, post_id: r.post_id as number, user_id: r.user_id as number,
       parent_id: r.parent_id as number | null, content: r.content as string,
       like_count: r.like_count as number, created_at: r.created_at as string,
+      images: commentImagesMap.get(r.id as number),
     }, account)
   })
 
@@ -1205,9 +1384,27 @@ mastodon.get('/v2/filters', async (c) => c.json([]))
 mastodon.get('/markers', async (c) => {
   const user = await mastodonAuth(c)
   if (!user) return c.json({ error: 'The access token is invalid' }, 401)
+
+  // Ensure markers table exists
+  await run(c.env.abdl_space_db, `CREATE TABLE IF NOT EXISTS markers (
+    user_id TEXT NOT NULL,
+    timeline TEXT NOT NULL,
+    last_read_id TEXT NOT NULL DEFAULT '0',
+    version INTEGER NOT NULL DEFAULT 0,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_id, timeline)
+  )`)
+
+  const homeMarker = await queryOne<{ last_read_id: string }>(
+    c.env.abdl_space_db, 'SELECT last_read_id FROM markers WHERE user_id = ? AND timeline = ?', [user.sub, 'home']
+  )
+  const notifMarker = await queryOne<{ last_read_id: string }>(
+    c.env.abdl_space_db, 'SELECT last_read_id FROM markers WHERE user_id = ? AND timeline = ?', [user.sub, 'notifications']
+  )
+
   return c.json({
-    home: { last_read_id: '0', version: 0, updated_at: new Date().toISOString(), unread_count: 0 },
-    notifications: { last_read_id: '0', version: 0, updated_at: new Date().toISOString(), unread_count: 0 },
+    home: { last_read_id: homeMarker?.last_read_id ?? '0', version: 0, updated_at: new Date().toISOString(), unread_count: 0 },
+    notifications: { last_read_id: notifMarker?.last_read_id ?? '0', version: 0, updated_at: new Date().toISOString(), unread_count: 0 },
   })
 })
 
@@ -1215,9 +1412,54 @@ mastodon.get('/markers', async (c) => {
 mastodon.post('/markers', async (c) => {
   const user = await mastodonAuth(c)
   if (!user) return c.json({ error: 'The access token is invalid' }, 401)
+
+  // Ensure markers table exists
+  await run(c.env.abdl_space_db, `CREATE TABLE IF NOT EXISTS markers (
+    user_id TEXT NOT NULL,
+    timeline TEXT NOT NULL,
+    last_read_id TEXT NOT NULL DEFAULT '0',
+    version INTEGER NOT NULL DEFAULT 0,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_id, timeline)
+  )`)
+
+  let body: Record<string, unknown> = {}
+  try { body = await c.req.json() } catch {}
+
+  const now = new Date().toISOString()
+
+  if (body.notifications && typeof body.notifications === 'object') {
+    const n = body.notifications as Record<string, unknown>
+    if (n.last_read_id) {
+      await run(c.env.abdl_space_db,
+        `INSERT INTO markers (user_id, timeline, last_read_id, version, updated_at) VALUES (?, 'notifications', ?, 0, ?)
+         ON CONFLICT(user_id, timeline) DO UPDATE SET last_read_id = excluded.last_read_id, updated_at = excluded.updated_at`,
+        [user.sub, String(n.last_read_id), now]
+      )
+    }
+  }
+
+  if (body.home && typeof body.home === 'object') {
+    const h = body.home as Record<string, unknown>
+    if (h.last_read_id) {
+      await run(c.env.abdl_space_db,
+        `INSERT INTO markers (user_id, timeline, last_read_id, version, updated_at) VALUES (?, 'home', ?, 0, ?)
+         ON CONFLICT(user_id, timeline) DO UPDATE SET last_read_id = excluded.last_read_id, updated_at = excluded.updated_at`,
+        [user.sub, String(h.last_read_id), now]
+      )
+    }
+  }
+
+  const homeMarker = await queryOne<{ last_read_id: string }>(
+    c.env.abdl_space_db, 'SELECT last_read_id FROM markers WHERE user_id = ? AND timeline = ?', [user.sub, 'home']
+  )
+  const notifMarker = await queryOne<{ last_read_id: string }>(
+    c.env.abdl_space_db, 'SELECT last_read_id FROM markers WHERE user_id = ? AND timeline = ?', [user.sub, 'notifications']
+  )
+
   return c.json({
-    home: { last_read_id: '0', version: 0, updated_at: new Date().toISOString(), unread_count: 0 },
-    notifications: { last_read_id: '0', version: 0, updated_at: new Date().toISOString(), unread_count: 0 },
+    home: { last_read_id: homeMarker?.last_read_id ?? '0', version: 0, updated_at: now, unread_count: 0 },
+    notifications: { last_read_id: notifMarker?.last_read_id ?? '0', version: 0, updated_at: now, unread_count: 0 },
   })
 })
 
@@ -1335,5 +1577,95 @@ mastodon.get('/notifications/unread_count', async (c) => {
   )
   return c.json({ count: row?.cnt ?? 0 })
 })
+
+// ============================================================
+// Missing endpoints — return empty to prevent JsonSyntaxException
+// ============================================================
+
+// GET /api/v1/trends
+mastodon.get('/trends', async (c) => c.json([]))
+
+// GET /api/v1/trends/statuses
+mastodon.get('/trends/statuses', async (c) => {
+  const limit = Math.min(40, Math.max(1, parseInt(c.req.query('limit') || '20')))
+
+  const posts = await query<Record<string, unknown>>(
+    c.env.abdl_space_db,
+    `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
+     (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
+     (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
+     (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count
+     FROM posts p JOIN users u ON p.user_id = u.id
+     WHERE p.repost_id IS NULL
+     ORDER BY p.created_at DESC LIMIT ?`,
+    [limit]
+  )
+
+  const user = await mastodonAuth(c)
+  const postIds = posts.map(r => r.id as number)
+  const likedSet = new Set<number>()
+  if (user && postIds.length > 0) {
+    const liked = await query<{ target_id: number }>(
+      c.env.abdl_space_db,
+      `SELECT target_id FROM likes WHERE user_id = ? AND target_type = 'post' AND target_id IN (${postIds.map(() => '?').join(',')})`,
+      [user.sub, ...postIds]
+    )
+    for (const l of liked) likedSet.add(l.target_id)
+  }
+
+  const imagesMap = await loadPostImages(c.env.abdl_space_db, postIds)
+
+  const statuses = posts.map(r => {
+    const account = toAccount({
+      id: r.user_id as number, username: r.username as string, avatar: r.avatar as string | null,
+      role: r.role as string, bio: r.bio as string | null, created_at: r.user_created_at as string,
+    })
+    return toStatus({
+      id: r.id as number, user_id: r.user_id as number, content: r.content as string,
+      like_count: r.like_count as number, comment_count: r.comment_count as number,
+      reblogs_count: r.reblogs_count as number, created_at: r.created_at as string,
+      images: imagesMap.get(r.id as number),
+    }, account, { favourited: likedSet.has(r.id as number) })
+  })
+
+  return c.json(statuses)
+})
+
+// GET /api/v1/trends/links
+mastodon.get('/trends/links', async (c) => c.json([]))
+
+// GET /api/v1/trends/tags
+mastodon.get('/trends/tags', async (c) => c.json([]))
+
+// GET /api/v1/instance/extended_description
+mastodon.get('/instance/extended_description', async (c) => c.json({ content: '' }))
+
+// GET /api/v1/preferences
+mastodon.get('/preferences', async (c) => {
+  const user = await mastodonAuth(c)
+  if (!user) return c.json({ error: 'The access token is invalid' }, 401)
+  return c.json({
+    'posting:default:visibility': 'public',
+    'posting:default:sensitive': false,
+    'posting:default:language': 'zh',
+    'reading:expand:media': 'default',
+    'reading:expand:spoilers': false,
+  })
+})
+
+// GET /api/v1/followed_tags
+mastodon.get('/followed_tags', async (c) => c.json([]))
+
+// GET /api/v1/featured_tags
+mastodon.get('/featured_tags', async (c) => c.json([]))
+
+// GET /api/v1/scheduled_statuses
+mastodon.get('/scheduled_statuses', async (c) => c.json([]))
+
+// GET /api/v1/endorsements
+mastodon.get('/endorsements', async (c) => c.json([]))
+
+// GET /api/v1/domain_blocks
+mastodon.get('/domain_blocks', async (c) => c.json([]))
 
 export default mastodon

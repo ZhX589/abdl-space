@@ -87,3 +87,23 @@ mastodonV2.get('/search', async (c) => {
 })
 
 export default mastodonV2
+
+// GET /api/v2/notifications — Moshidon uses v2 notifications
+mastodonV2.get('/notifications', async (c) => {
+  const user = await mastodonAuth(c)
+  if (!user) return c.json({ error: 'The access token is invalid' }, 401)
+  return c.json({ accounts: [], statuses: [], notificationGroups: [] })
+})
+
+// GET /api/v2/notifications/policy
+mastodonV2.get('/notifications/policy', async (c) => {
+  const user = await mastodonAuth(c)
+  if (!user) return c.json({ error: 'The access token is invalid' }, 401)
+  return c.json({
+    summary: { pendingRequestsCount: 0 },
+    filterNotFollowing: false,
+    filterNotFollowers: false,
+    filterNewAccounts: false,
+    filterPrivateMentions: false,
+  })
+})
