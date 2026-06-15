@@ -138,13 +138,8 @@ app.route('/api/content/keys', contentKeys)
 app.route('/api/v1/content', contentV1)
 app.route('/api/auth/nbw', nbw)
 
-// Mastodon OAuth compatibility: redirect /oauth/* to /api/oauth/*
-app.all('/oauth/*', async (c) => {
-  const path = c.req.path.replace('/oauth/', '/api/oauth/')
-  const url = new URL(c.req.url)
-  url.pathname = path
-  return Response.redirect(url.toString(), 302)
-})
+// Mastodon OAuth compatibility: mount /oauth/* on same router
+app.route('/oauth', oauth)
 
 // Key Split — API Key 代理与统计
 app.route('/api/key-split', keySplit)
