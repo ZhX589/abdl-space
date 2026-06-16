@@ -58,13 +58,13 @@ oauth.get('/authorize', async (c) => {
   } catch {}
 
   if (userId) {
-    // Already logged in — auto-authorize and redirect
-    const code = await createAuthorizationCode(
-      c.env.abdl_space_db, clientId, userId, redirectUri, scope, codeChallenge, codeChallengeMethod
-    )
-    const sep = redirectUri.includes('?') ? '&' : '?'
-    const url = `${redirectUri}${sep}code=${code}${state ? `&state=${encodeURIComponent(state)}` : ''}`
-    return c.redirect(url, 302)
+    // Already logged in — return client info for frontend to show approval UI
+    const requestedScopes = scope.split(' ').filter(s => ALL_SCOPES.includes(s as any))
+    return c.json({
+      client: { name: client.name, description: client.description, logo_url: client.logo_url, homepage_url: client.homepage_url },
+      scopes: requestedScopes.map(s => ({ value: s, description: SCOPE_DESCRIPTIONS[s] || s })),
+      user_id: userId,
+    })
   }
 
   // Not logged in — return 401 JSON (frontend handles redirect)
