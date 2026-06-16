@@ -160,7 +160,7 @@ mastodon.post('/apps', async (c) => {
     c.env.abdl_space_db,
     `INSERT INTO oauth_clients
       (client_id, client_secret, name, redirect_uris, scopes, grant_types, token_endpoint_auth_method, owner_id, active, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'none', 1, 1, datetime('now'), datetime('now'))`,
+     VALUES (?, ?, ?, ?, ?, ?, 'client_secret_post', 1, 1, datetime('now'), datetime('now'))`,
     [clientId, secretHash, client_name, JSON.stringify(uris), scope, 'authorization_code,refresh_token']
   )
 
