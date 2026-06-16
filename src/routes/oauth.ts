@@ -49,11 +49,31 @@ oauth.get('/authorize', async (c) => {
   // Check if user is already logged in (JWT in cookie or header)
   let userId: number | null = null
   try {
+    // Try Authorization header first (JWT or OAuth token)
     const auth = c.req.header('Authorization')
-    if (auth) {
-      const { mastodonAuth } = await import('../mastodon/shared.ts')
-      const user = await mastodonAuth(c)
-      if (user) userId = user.sub
+    if (auth && auth.startsWith('Bearer ')) {
+      const token = auth.slice(7)
+      const { verifyJWT } = await import('../lib/auth.ts')
+      const payload = await verifyJWT(token, c.env.JWT_SECRET)
+      if (payload) {
+        userId = payload.sub
+      } else {
+        const { introspectToken } = await import('../lib/oauth.ts')
+        const result = await introspectToken(c.env.abdl_space_db, token)
+        if (result.active && result.sub) userId = result.sub
+      }
+    }
+    // Fallback to Cookie
+    if (!userId) {
+      const cookieHeader = c.req.header('Cookie')
+      if (cookieHeader) {
+        const match = cookieHeader.match(/(?:^|;\s*)token=([^;]+)/)
+        if (match) {
+          const { verifyJWT } = await import('../lib/auth.ts')
+          const payload = await verifyJWT(match[1], c.env.JWT_SECRET)
+          if (payload) userId = payload.sub
+        }
+      }
     }
   } catch {}
 
