@@ -1644,35 +1644,62 @@ mastodon.get('/announcements', async (c) => {
 })
 
 // POST /api/v1/announcements — 创建公告（admin only）
+// 与原自定义 API 统一：创建帖子并标记 is_announcement=1
 mastodon.post('/announcements', async (c) => {
   const user = await mastodonAuth(c)
   if (!user) return c.json({ error: 'The access token is invalid' }, 401)
   if (user.role !== 'admin') return c.json({ error: 'Forbidden' }, 403)
 
-  let body: { content?: string; starts_at?: string; ends_at?: string; all_day?: boolean }
+  let body: { content?: string }
   try { body = await c.req.json() } catch { return c.json({ error: 'invalid body' }, 400) }
   if (!body.content) return c.json({ error: 'content is required' }, 400)
 
+  // 创建帖子并标记为公告（与原自定义 API 统一）
   const result = await run(
     c.env.abdl_space_db,
-    'INSERT INTO announcements (content, starts_at, ends_at, all_day) VALUES (?, ?, ?, ?)',
-    [body.content, body.starts_at || null, body.ends_at || null, body.all_day ? 1 : 0]
+    'INSERT INTO posts (user_id, content, is_announcement) VALUES (?, ?, 1)',
+    [user.sub, body.content]
   )
 
   return c.json({ id: String(result.meta.last_row_id) }, 201)
 })
 
 // DELETE /api/v1/announcements/:id — 删除公告（admin only）
+// 与原自定义 API 统一：删除帖子
 mastodon.delete('/announcements/:id', async (c) => {
   const user = await mastodonAuth(c)
   if (!user) return c.json({ error: 'The access token is invalid' }, 401)
   if (user.role !== 'admin') return c.json({ error: 'Forbidden' }, 403)
 
-  const id = parseInt(c.req.param('id'))
-  if (!id) return c.json({ error: 'Invalid id' }, 400)
+  const rawId = c.req.param('id')
+  const resolved = await resolveStatus(c.env.abdl_space_db, rawId)
+  if (!resolved || resolved.kind !== 'post') return c.json({ error: 'Record not found' }, 404)
 
-  await run(c.env.abdl_space_db, 'DELETE FROM announcements WHERE id = ?', [id])
+  await run(c.env.abdl_space_db, 'DELETE FROM posts WHERE id = ?', [resolved.realId])
   return c.json({})
+})
+
+// PATCH /api/v1/announcements/:id — 更新公告（admin only）
+mastodon.patch('/announcements/:id', async (c) => {
+  const user = await mastodonAuth(c)
+  if (!user) return c.json({ error: 'The access token is invalid' }, 401)
+  if (user.role !== 'admin') return c.json({ error: 'Forbidden' }, 403)
+
+  const rawId = c.req.param('id')
+  const resolved = await resolveStatus(c.env.abdl_space_db, rawId)
+  if (!resolved || resolved.kind !== 'post') return c.json({ error: 'Record not found' }, 404)
+
+  let body: { content?: string; published?: boolean }
+  try { body = await c.req.json() } catch { return c.json({ error: 'invalid body' }, 400) }
+
+  if (body.content !== undefined) {
+    await run(c.env.abdl_space_db, 'UPDATE posts SET content = ? WHERE id = ?', [body.content, resolved.realId])
+  }
+  if (body.published !== undefined) {
+    await run(c.env.abdl_space_db, 'UPDATE posts SET is_announcement = ? WHERE id = ?', [body.published ? 1 : 0, resolved.realId])
+  }
+
+  return c.json({ id: rawId })
 })
 
 // GET /api/v1/lists
