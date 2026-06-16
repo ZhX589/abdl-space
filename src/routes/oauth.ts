@@ -92,6 +92,71 @@ oauth.get('/authorize', async (c) => {
 })
 
 /* ============================================================
+ * POST /oauth/authorize — 处理前端授权请求（JSON）
+ * Body: { client_id, redirect_uri, scope, state?, approved, code_challenge?, code_challenge_method? }
+ * ============================================================ */
+oauth.post('/authorize', async (c) => {
+  let body: Record<string, unknown>
+  try { body = await c.req.json() } catch { return c.json({ error: 'invalid body' }, 400) }
+
+  const { client_id, redirect_uri, scope, state, approved, code_challenge, code_challenge_method } = body as Record<string, string>
+  if (!client_id || !redirect_uri) return c.json({ error: 'client_id and redirect_uri required' }, 400)
+
+  // 用户拒绝
+  if (!approved) {
+    const sep = redirect_uri.includes('?') ? '&' : '?'
+    return c.json({
+      redirect: `${redirect_uri}${sep}error=access_denied&state=${encodeURIComponent(state || '')}`,
+    })
+  }
+
+  // 验证 client
+  const client = await getClient(c.env.abdl_space_db, client_id)
+  if (!client || !client.active) return c.json({ error: 'invalid_client' }, 400)
+  if (!client.redirect_uris.includes(redirect_uri)) return c.json({ error: 'invalid_redirect_uri' }, 400)
+
+  // 认证用户
+  let userId: number | null = null
+  try {
+    const auth = c.req.header('Authorization')
+    if (auth && auth.startsWith('Bearer ')) {
+      const token = auth.slice(7)
+      const { verifyJWT } = await import('../lib/auth.ts')
+      const payload = await verifyJWT(token, c.env.JWT_SECRET)
+      if (payload) {
+        userId = payload.sub
+      } else {
+        const { introspectToken } = await import('../lib/oauth.ts')
+        const result = await introspectToken(c.env.abdl_space_db, token)
+        if (result.active && result.sub) userId = result.sub
+      }
+    }
+    if (!userId) {
+      const cookieHeader = c.req.header('Cookie')
+      if (cookieHeader) {
+        const match = cookieHeader.match(/(?:^|;\s*)token=([^;]+)/)
+        if (match) {
+          const { verifyJWT } = await import('../lib/auth.ts')
+          const payload = await verifyJWT(match[1], c.env.JWT_SECRET)
+          if (payload) userId = payload.sub
+        }
+      }
+    }
+  } catch {}
+
+  if (!userId) return c.json({ error: 'unauthorized' }, 401)
+
+  // 签发授权码
+  const code = await createAuthorizationCode(
+    c.env.abdl_space_db, client_id, userId, redirect_uri, scope || 'profile', code_challenge, code_challenge_method
+  )
+
+  const sep = redirect_uri.includes('?') ? '&' : '?'
+  const redirectUrl = `${redirect_uri}${sep}code=${code}${state ? `&state=${encodeURIComponent(state)}` : ''}`
+  return c.json({ redirect: redirectUrl })
+})
+
+/* ============================================================
  * POST /oauth/authorize/login — 处理登录表单，登录后签发 code 并 redirect
  * ============================================================ */
 oauth.post('/authorize/login', async (c) => {
