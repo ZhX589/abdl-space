@@ -611,30 +611,26 @@ mastodon.post('/statuses', async (c) => {
     }
   }
 
-  // Create poll if provided
-  let pollId: number | null = null
+  const result = await run(
+    c.env.abdl_space_db,
+    `INSERT INTO posts (user_id, content, has_nsfw, spoiler_text, visibility, language, in_reply_to_id, in_reply_to_account_id, poll_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [user.sub, content, hasNsfw, spoilerText, visibility, language, inReplyToId, inReplyToAccountId, null]
+  )
+  const postId = result.meta.last_row_id as number
+
+  // Create poll if provided (after post so status_id FK is satisfied)
   if (body.poll && body.poll.options && body.poll.options.length >= 2) {
     const expiresAt = new Date(Date.now() + (body.poll.expires_in || 300) * 1000).toISOString()
     const options = body.poll.options.map(title => ({ title, votes_count: 0 }))
     const pollResult = await run(
       c.env.abdl_space_db,
-      'INSERT INTO polls (status_id, expires_at, multiple, hide_totals, options) VALUES (0, ?, ?, ?, ?)',
-      [expiresAt, body.poll.multiple ? 1 : 0, body.poll.hide_totals ? 1 : 0, JSON.stringify(options)]
+      'INSERT INTO polls (status_id, expires_at, multiple, hide_totals, options) VALUES (?, ?, ?, ?, ?)',
+      [postId, expiresAt, body.poll.multiple ? 1 : 0, body.poll.hide_totals ? 1 : 0, JSON.stringify(options)]
     )
-    pollId = pollResult.meta.last_row_id as number
-  }
-
-  const result = await run(
-    c.env.abdl_space_db,
-    `INSERT INTO posts (user_id, content, has_nsfw, spoiler_text, visibility, language, in_reply_to_id, in_reply_to_account_id, poll_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [user.sub, content, hasNsfw, spoilerText, visibility, language, inReplyToId, inReplyToAccountId, pollId]
-  )
-  const postId = result.meta.last_row_id as number
-
-  // Update poll status_id if poll was created
-  if (pollId) {
-    await run(c.env.abdl_space_db, 'UPDATE polls SET status_id = ? WHERE id = ?', [postId, pollId])
+    const pollId = pollResult.meta.last_row_id as number
+    // Link poll to post
+    await run(c.env.abdl_space_db, 'UPDATE posts SET poll_id = ? WHERE id = ?', [pollId, postId])
   }
 
   // Handle media attachments (images from media_ids)
