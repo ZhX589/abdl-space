@@ -330,13 +330,14 @@ nbw.get('/mobile-start', async (c) => {
   if (!clientId) return c.text('NBW OAuth 未配置', 500)
 
   const state = crypto.randomUUID()
+
   const url = new URL('https://www.newbabyworld.top/oauth/authorize.php')
   url.searchParams.set('client_id', clientId)
   url.searchParams.set('redirect_uri', redirectUri)
   url.searchParams.set('response_type', 'code')
   url.searchParams.set('state', state)
 
-  return c.redirect(url.toString(), 302)
+  return c.redirect(url.toString(), 302, { 'Set-Cookie': `nbw_state=${state}; Path=/; Max-Age=600; HttpOnly; Secure; SameSite=Lax` })
 })
 
 /**
@@ -350,12 +351,16 @@ nbw.get('/mobile-start', async (c) => {
 nbw.get('/mobile-callback', async (c) => {
   const code = c.req.query('code')
   if (!code) {
-    return c.html(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>授权失败</title></head><body style="font-family:system-ui;display:flex;justify-content:center;align-items:center;min-height:100vh;background:#f5f5f5;">
-<div style="background:#fff;border-radius:12px;padding:32px;text-align:center;max-width:400px;box-shadow:0 2px 8px rgba(0,0,0,0.1);">
-<h2 style="color:#d32f2f;">授权失败</h2>
-<p style="color:#666;margin:16px 0;">缺少授权码，请重试。</p>
-</div></body></html>`, 200, { 'Content-Type': 'text/html; charset=utf-8' })
+    return c.html(errorPage('授权失败：缺少授权码'), 200, { 'Content-Type': 'text/html; charset=utf-8' })
+  }
+
+  // 验证 state 防 CSRF
+  const state = c.req.query('state')
+  const cookieHeader = c.req.header('Cookie') || ''
+  const stateMatch = cookieHeader.match(/nbw_state=([^;]+)/)
+  const cookieState = stateMatch ? stateMatch[1] : null
+  if (!state || !cookieState || state !== cookieState) {
+    return c.html(errorPage('授权验证失败，请重试'), 200, { 'Content-Type': 'text/html; charset=utf-8' })
   }
 
   const { clientId, clientSecret, redirectUri } = getAppNBWConfig(c.env)
@@ -428,12 +433,13 @@ nbw.get('/mobile-callback', async (c) => {
 })
 
 function errorPage(message: string): string {
+  const safe = message.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
   return `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>登录失败</title></head><body style="font-family:system-ui;display:flex;justify-content:center;align-items:center;min-height:100vh;background:#f5f5f5;margin:0;">
 <div style="background:#fff;border-radius:12px;padding:32px;text-align:center;max-width:400px;box-shadow:0 2px 8px rgba(0,0,0,0.1);">
 <img src="https://img.abdl-space.top/file/system/1781439303787_play_store_512.png" style="width:48px;height:48px;border-radius:8px;margin-bottom:16px;">
 <h2 style="color:#d32f2f;margin-bottom:8px;">登录失败</h2>
-<p style="color:#666;margin:0;">${message}</p>
+<p style="color:#666;margin:0;">${safe}</p>
 </div></body></html>`
 }
 

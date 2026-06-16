@@ -86,6 +86,7 @@ async function loadReblogTargets(db: D1Database, repostIds: number[]): Promise<M
     map.set(o.id as number, toStatus({
       id: o.id as number, user_id: o.user_id as number, content: o.content as string,
       like_count: o.like_count as number, comment_count: o.comment_count as number, reblogs_count: o.reblogs_count as number,
+      has_nsfw: !!o.has_nsfw,
       created_at: o.created_at as string, images: imagesMap.get(o.id as number),
     }, account))
   }
@@ -94,26 +95,17 @@ async function loadReblogTargets(db: D1Database, repostIds: number[]): Promise<M
 
 async function loadCommentImages(db: D1Database, commentIds: number[]): Promise<Map<number, { image_url: string; is_nsfw: number }[]>> {
   if (commentIds.length === 0) return new Map()
-
-  // Ensure comment_images table exists
-  await run(db, `CREATE TABLE IF NOT EXISTS comment_images (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    comment_id INTEGER NOT NULL,
-    image_url TEXT NOT NULL,
-    is_nsfw INTEGER DEFAULT 0,
-    sort_order INTEGER DEFAULT 0,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  )`)
-
-  const allImages = await query<{ comment_id: number; image_url: string; is_nsfw: number }>(
-    db, `SELECT comment_id, image_url, is_nsfw FROM comment_images WHERE comment_id IN (${commentIds.map(() => '?').join(',')}) ORDER BY sort_order`, commentIds
-  )
-  const map = new Map<number, { image_url: string; is_nsfw: number }[]>()
-  for (const img of allImages) {
-    if (!map.has(img.comment_id)) map.set(img.comment_id, [])
-    map.get(img.comment_id)!.push(img)
-  }
-  return map
+  try {
+    const allImages = await query<{ comment_id: number; image_url: string; is_nsfw: number }>(
+      db, `SELECT comment_id, image_url, is_nsfw FROM comment_images WHERE comment_id IN (${commentIds.map(() => '?').join(',')}) ORDER BY sort_order`, commentIds
+    )
+    const map = new Map<number, { image_url: string; is_nsfw: number }[]>()
+    for (const img of allImages) {
+      if (!map.has(img.comment_id)) map.set(img.comment_id, [])
+      map.get(img.comment_id)!.push(img)
+    }
+    return map
+  } catch { return new Map() }
 }
 
 // ============================================================
@@ -449,6 +441,7 @@ mastodon.get('/accounts/:id/statuses', async (c) => {
 // ============================================================
 mastodon.get('/accounts/:id/followers', async (c) => {
   const id = parseInt(c.req.param('id'))
+  if (!id) return c.json({ error: 'Invalid id' }, 400)
   const limit = Math.min(80, Math.max(1, parseInt(c.req.query('limit') || '40')))
   const maxId = c.req.query('max_id')
   const sinceId = c.req.query('since_id')
@@ -482,6 +475,7 @@ mastodon.get('/accounts/:id/followers', async (c) => {
 // ============================================================
 mastodon.get('/accounts/:id/following', async (c) => {
   const id = parseInt(c.req.param('id'))
+  if (!id) return c.json({ error: 'Invalid id' }, 400)
   const limit = Math.min(80, Math.max(1, parseInt(c.req.query('limit') || '40')))
   const maxId = c.req.query('max_id')
   const sinceId = c.req.query('since_id')
@@ -587,10 +581,12 @@ mastodon.post('/statuses', async (c) => {
   const content = body.status?.trim()
   if (!content) return c.json({ error: "Validation failed: Text can't be blank" }, 422)
 
+  const hasNsfw = body.sensitive ? 1 : 0
+
   const result = await run(
     c.env.abdl_space_db,
-    'INSERT INTO posts (user_id, content) VALUES (?, ?)',
-    [user.sub, content]
+    'INSERT INTO posts (user_id, content, has_nsfw) VALUES (?, ?, ?)',
+    [user.sub, content, hasNsfw]
   )
   const postId = result.meta.last_row_id as number
 
@@ -600,7 +596,9 @@ mastodon.post('/statuses', async (c) => {
     for (const mediaId of body.media_ids) {
       if (typeof mediaId !== 'string' || !mediaId) continue
       // Validate: must be a URL from our image host
-      if (!mediaId.startsWith(IMGBED_HOST + '/')) continue
+      if (!mediaId.startsWith(IMGBED_HOST + '/')) {
+        return c.json({ error: `图片 URL 必须来自 ${IMGBED_HOST}，请先通过 /api/v1/media 上传` }, 400)
+      }
       try {
         await run(c.env.abdl_space_db, 'INSERT INTO post_images (post_id, image_url, sort_order) VALUES (?, ?, ?)', [postId, mediaId, sortOrder++])
       } catch {}
@@ -1092,29 +1090,40 @@ mastodon.get('/notifications', async (c) => {
     c.env.abdl_space_db, sql, params
   )
 
+  // Batch load user accounts and posts to avoid N+1 queries
+  const userIds = [...new Set(rows.filter(r => r.type === 'follow').map(r => r.related_id as number).filter(Boolean))]
+  const postIds = [...new Set(rows.filter(r => r.type !== 'follow' && r.related_id).map(r => r.related_id as number).filter(Boolean))]
+
+  const userMap = new Map<number, { id: number; username: string; avatar: string | null; role: string; created_at: string }>()
+  if (userIds.length > 0) {
+    const users = await query<{ id: number; username: string; avatar: string | null; role: string; created_at: string }>(
+      c.env.abdl_space_db, `SELECT id, username, avatar, role, created_at FROM users WHERE id IN (${userIds.map(() => '?').join(',')})`, userIds
+    )
+    for (const u of users) userMap.set(u.id, u)
+  }
+
+  const postMap = new Map<number, Record<string, unknown>>()
+  if (postIds.length > 0) {
+    const posts = await query<Record<string, unknown>>(
+      c.env.abdl_space_db,
+      `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
+       (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
+       (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count
+       FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id IN (${postIds.map(() => '?').join(',')})`, postIds
+    )
+    for (const p of posts) postMap.set(p.id as number, p)
+  }
+
   const notifs: MastodonNotification[] = []
   for (const r of rows) {
-    // Build a minimal account for the notification source
-    // We need to figure out who triggered the notification
     let sourceAccount: MastodonAccount | null = null
     let status: MastodonStatus | null = null
 
     if (r.type === 'follow') {
-      // related_id = follower user id
-      const src = await queryOne<{ id: number; username: string; avatar: string | null; role: string; created_at: string }>(
-        c.env.abdl_space_db, 'SELECT id, username, avatar, role, created_at FROM users WHERE id = ?', [r.related_id]
-      )
+      const src = userMap.get(r.related_id as number)
       if (src) sourceAccount = toAccount(src)
     } else if (r.type === 'like' || r.type === 'comment' || r.type === 'reply' || r.type === 'mention' || r.type === 'repost') {
-      // related_id = post id (or comment id)
-      const post = await queryOne<Record<string, unknown>>(
-        c.env.abdl_space_db,
-        `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
-         (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
-         (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count
-         FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`,
-        [r.related_id]
-      )
+      const post = postMap.get(r.related_id as number)
       if (post) {
         sourceAccount = toAccount({
           id: post.user_id as number, username: post.username as string, avatar: post.avatar as string | null,
@@ -1129,7 +1138,6 @@ mastodon.get('/notifications', async (c) => {
     }
 
     if (!sourceAccount) {
-      // Fallback: use a generic account
       sourceAccount = toAccount({ id: 0, username: 'system', avatar: null, role: 'user', created_at: new Date().toISOString() })
     }
 
