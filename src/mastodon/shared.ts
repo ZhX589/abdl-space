@@ -37,7 +37,10 @@ export async function mastodonAuth(c: { req: { header: (name: string) => string 
 // Instance — shared between v1 and v2
 // ============================================================
 export async function buildInstance(db: D1Database): Promise<MastodonInstance> {
-  const userCount = await queryOne<{ cnt: number }>(db, 'SELECT COUNT(*) as cnt FROM users')
+  const [userCount, postCount] = await Promise.all([
+    queryOne<{ cnt: number }>(db, 'SELECT COUNT(*) as cnt FROM users'),
+    queryOne<{ cnt: number }>(db, 'SELECT COUNT(*) as cnt FROM posts'),
+  ])
 
   return {
     uri: 'abdl-space.top',
@@ -46,6 +49,7 @@ export async function buildInstance(db: D1Database): Promise<MastodonInstance> {
     version: '4.2.0 (compatible; ABDL Space 1.0)',
     source_url: 'https://github.com/ZYongX09/abdl-space-v2',
     description: 'ABDL Space — 纸尿裤评分社区',
+    short_description: '纸尿裤评分社区',
     usage: { users: { active_month: userCount?.cnt ?? 0 } },
     thumbnail: 'https://img.abdl-space.top/file/system/1781439303787_play_store_512.png',
     languages: ['zh', 'en'],
@@ -67,6 +71,11 @@ export async function buildInstance(db: D1Database): Promise<MastodonInstance> {
     registrations: true,
     contact: { email: null, account: null },
     rules: [],
+    stats: {
+      user_count: userCount?.cnt ?? 0,
+      status_count: postCount?.cnt ?? 0,
+      domain_count: 1,
+    },
     api_versions: { mastodon: 1 },
   }
 }

@@ -128,6 +128,8 @@ export interface MastodonInstance {
   usage: { users: { active_month: number } }
   thumbnail: string
   languages: string[]
+  short_description?: string
+  stats?: { user_count: number; status_count: number; domain_count: number }
   configuration: {
     urls: { streaming: string | null; status: string | null; about: string | null; privacy_policy: string | null; terms_of_service: string | null }
     vapid: { public_key: string }
