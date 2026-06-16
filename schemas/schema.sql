@@ -100,12 +100,46 @@ CREATE TABLE IF NOT EXISTS posts (
   is_announcement INTEGER DEFAULT 0,     -- 公告帖子标记（仅管理员可发）
   repost_id INTEGER,                     -- 转发的原帖ID
   has_nsfw INTEGER DEFAULT 0,            -- 是否包含敏感图片
+  spoiler_text TEXT DEFAULT '',           -- 内容警告文本
+  visibility TEXT DEFAULT 'public',       -- public/unlisted/private/direct
+  language TEXT DEFAULT 'zh',             -- 语言标签
+  in_reply_to_id INTEGER,               -- 回复的帖子/评论ID
+  in_reply_to_account_id INTEGER,        -- 回复目标的用户ID
+  poll_id INTEGER,                       -- 关联的投票ID
+  edited_at DATETIME,                    -- 编辑时间
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (user_id) REFERENCES users(id),
   FOREIGN KEY (diaper_id) REFERENCES diapers(id),
-  FOREIGN KEY (repost_id) REFERENCES posts(id)
+  FOREIGN KEY (repost_id) REFERENCES posts(id),
+  FOREIGN KEY (poll_id) REFERENCES polls(id)
 );
 CREATE INDEX IF NOT EXISTS idx_posts_announcement ON posts(is_announcement, created_at DESC);
+
+-- 投票表
+CREATE TABLE IF NOT EXISTS polls (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  status_id INTEGER NOT NULL,
+  expires_at DATETIME NOT NULL,
+  expired INTEGER DEFAULT 0,
+  multiple INTEGER DEFAULT 0,
+  hide_totals INTEGER DEFAULT 0,
+  options TEXT NOT NULL DEFAULT '[]',     -- JSON: [{title, votes_count}]
+  voters_count INTEGER DEFAULT 0,
+  votes_count INTEGER DEFAULT 0,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (status_id) REFERENCES posts(id) ON DELETE CASCADE
+);
+
+-- 投票记录表
+CREATE TABLE IF NOT EXISTS poll_votes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  poll_id INTEGER NOT NULL,
+  user_id INTEGER NOT NULL,
+  choices TEXT NOT NULL DEFAULT '[]',     -- JSON: [option_index]
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(poll_id, user_id),
+  FOREIGN KEY (poll_id) REFERENCES polls(id) ON DELETE CASCADE
+);
 
 -- 帖子评论表（支持一层嵌套回复）
 CREATE TABLE IF NOT EXISTS post_comments (

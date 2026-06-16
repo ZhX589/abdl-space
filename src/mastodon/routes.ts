@@ -428,6 +428,10 @@ mastodon.get('/accounts/:id/statuses', async (c) => {
       reblogs_count: r.reblogs_count as number,
       created_at: r.created_at as string,
       images: imagesMap.get(r.id as number),
+      spoiler_text: r.spoiler_text as string, visibility: r.visibility as string,
+      language: r.language as string,
+      in_reply_to_id: r.in_reply_to_id as number | null,
+      in_reply_to_account_id: r.in_reply_to_account_id as number | null,
     }, account, { favourited: likedSet.has(r.id as number), reblog: r.repost_id ? reblogMap.get(r.repost_id as number) : undefined }))
   })()
 
@@ -575,27 +579,69 @@ mastodon.post('/statuses', async (c) => {
   const user = await mastodonAuth(c)
   if (!user) return c.json({ error: 'The access token is invalid' }, 401)
 
-  let body: { status?: string; media_ids?: string[]; in_reply_to_id?: string; sensitive?: boolean; visibility?: string }
+  let body: {
+    status?: string; media_ids?: string[]; in_reply_to_id?: string;
+    sensitive?: boolean; visibility?: string; spoiler_text?: string; language?: string;
+    poll?: { options?: string[]; expires_in?: number; multiple?: boolean; hide_totals?: boolean };
+    scheduled_at?: string;
+  }
   try { body = await c.req.json() } catch { return c.json({ error: 'invalid body' }, 400) }
 
-  const content = body.status?.trim()
-  if (!content) return c.json({ error: "Validation failed: Text can't be blank" }, 422)
-
+  const content = body.status?.trim() || ''
   const hasNsfw = body.sensitive ? 1 : 0
+  const visibility = body.visibility || 'public'
+  const spoilerText = body.spoiler_text || ''
+  const language = body.language || 'zh'
+
+  // Resolve in_reply_to_id (could be p_123 or c_123 format)
+  let inReplyToId: number | null = null
+  let inReplyToAccountId: number | null = null
+  if (body.in_reply_to_id) {
+    const resolved = await resolveStatus(c.env.abdl_space_db, body.in_reply_to_id)
+    if (resolved) {
+      inReplyToId = resolved.realId
+      // Find the account of the replied-to post/comment
+      if (resolved.kind === 'post') {
+        const repliedPost = await queryOne<{ user_id: number }>(c.env.abdl_space_db, 'SELECT user_id FROM posts WHERE id = ?', [resolved.realId])
+        inReplyToAccountId = repliedPost?.user_id ?? null
+      } else {
+        const repliedComment = await queryOne<{ user_id: number }>(c.env.abdl_space_db, 'SELECT user_id FROM post_comments WHERE id = ?', [resolved.realId])
+        inReplyToAccountId = repliedComment?.user_id ?? null
+      }
+    }
+  }
+
+  // Create poll if provided
+  let pollId: number | null = null
+  if (body.poll && body.poll.options && body.poll.options.length >= 2) {
+    const expiresAt = new Date(Date.now() + (body.poll.expires_in || 300) * 1000).toISOString()
+    const options = body.poll.options.map(title => ({ title, votes_count: 0 }))
+    const pollResult = await run(
+      c.env.abdl_space_db,
+      'INSERT INTO polls (status_id, expires_at, multiple, hide_totals, options) VALUES (0, ?, ?, ?, ?)',
+      [expiresAt, body.poll.multiple ? 1 : 0, body.poll.hide_totals ? 1 : 0, JSON.stringify(options)]
+    )
+    pollId = pollResult.meta.last_row_id as number
+  }
 
   const result = await run(
     c.env.abdl_space_db,
-    'INSERT INTO posts (user_id, content, has_nsfw) VALUES (?, ?, ?)',
-    [user.sub, content, hasNsfw]
+    `INSERT INTO posts (user_id, content, has_nsfw, spoiler_text, visibility, language, in_reply_to_id, in_reply_to_account_id, poll_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [user.sub, content, hasNsfw, spoilerText, visibility, language, inReplyToId, inReplyToAccountId, pollId]
   )
   const postId = result.meta.last_row_id as number
+
+  // Update poll status_id if poll was created
+  if (pollId) {
+    await run(c.env.abdl_space_db, 'UPDATE polls SET status_id = ? WHERE id = ?', [postId, pollId])
+  }
 
   // Handle media attachments (images from media_ids)
   if (body.media_ids && body.media_ids.length > 0) {
     let sortOrder = 0
     for (const mediaId of body.media_ids) {
       if (typeof mediaId !== 'string' || !mediaId) continue
-      // Validate: must be a URL from our image host
       if (!mediaId.startsWith(IMGBED_HOST + '/')) {
         return c.json({ error: `图片 URL 必须来自 ${IMGBED_HOST}，请先通过 /api/v1/media 上传` }, 400)
       }
@@ -605,27 +651,45 @@ mastodon.post('/statuses', async (c) => {
     }
   }
 
-  // Fetch the created post
+  // Fetch the created post with all fields
   const post = await queryOne<Record<string, unknown>>(
     c.env.abdl_space_db,
-    `SELECT p.*, u.username, u.avatar, u.role
+    `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
+     (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
+     (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
+     (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count
      FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`,
     [postId]
   )
   if (!post) return c.json({ error: 'Failed to create status' }, 500)
 
-  const dbUser = await queryOne<{ id: number; username: string; avatar: string | null; role: string; bio: string | null; created_at: string }>(
-    c.env.abdl_space_db, 'SELECT id, username, avatar, role, bio, created_at FROM users WHERE id = ?', [user.sub]
+  // Load images
+  const images = await query<{ image_url: string; is_nsfw: number }>(
+    c.env.abdl_space_db, 'SELECT image_url, is_nsfw FROM post_images WHERE post_id = ? ORDER BY sort_order', [postId]
   )
 
+  // Load poll if exists
+  let poll = null
+  if (post.poll_id) {
+    poll = await loadPoll(c.env.abdl_space_db, post.poll_id as number)
+  }
+
+  const account = toAccount({
+    id: post.user_id as number, username: post.username as string, avatar: post.avatar as string | null,
+    role: post.role as string, bio: post.bio as string | null, created_at: post.user_created_at as string,
+  })
+
   return c.json(toStatus({
-    id: post.id as number,
-    user_id: post.user_id as number,
-    content: post.content as string,
-    created_at: post.created_at as string,
-    like_count: 0,
-    comment_count: 0,
-  }, toAccount(dbUser!)))
+    id: post.id as number, user_id: post.user_id as number, content: post.content as string,
+    like_count: post.like_count as number, comment_count: post.comment_count as number,
+    reblogs_count: post.reblogs_count as number, has_nsfw: !!post.has_nsfw,
+    created_at: post.created_at as string, images,
+    spoiler_text: post.spoiler_text as string, visibility: post.visibility as string,
+    language: post.language as string,
+    in_reply_to_id: post.in_reply_to_id as number | null,
+    in_reply_to_account_id: post.in_reply_to_account_id as number | null,
+    poll: poll as any,
+  }, account))
 })
 
 // ============================================================
@@ -635,6 +699,7 @@ mastodon.get('/statuses/:id', async (c) => {
   const rawId = c.req.param('id')
   const resolved = await resolveStatus(c.env.abdl_space_db, rawId)
   if (!resolved) return c.json({ error: 'Record not found' }, 404)
+  const user = await mastodonAuth(c)
 
   if (resolved.kind === 'comment') {
     const comment = await queryOne<Record<string, unknown>>(
@@ -682,6 +747,9 @@ mastodon.get('/statuses/:id', async (c) => {
     reblog = reblogMap.get(post.repost_id as number)
   }
 
+  // Load poll if exists
+  const poll = post.poll_id ? await loadPoll(c.env.abdl_space_db, post.poll_id as number, user?.sub) : null
+
   return c.json(toStatus({
     id: post.id as number,
     user_id: post.user_id as number,
@@ -694,6 +762,13 @@ mastodon.get('/statuses/:id', async (c) => {
     reblogs_count: post.reblogs_count as number,
     created_at: post.created_at as string,
     images,
+    spoiler_text: post.spoiler_text as string,
+    visibility: post.visibility as string,
+    language: post.language as string,
+    edited_at: post.edited_at as string | null,
+    in_reply_to_id: post.in_reply_to_id as number | null,
+    in_reply_to_account_id: post.in_reply_to_account_id as number | null,
+    poll: poll as any,
   }, account, { reblog }))
 })
 
@@ -951,6 +1026,10 @@ mastodon.get('/timelines/home', async (c) => {
         has_nsfw: !!r.has_nsfw,
         created_at: r.created_at as string,
         images: imagesMap.get(r.id as number),
+        spoiler_text: r.spoiler_text as string, visibility: r.visibility as string,
+        language: r.language as string,
+        in_reply_to_id: r.in_reply_to_id as number | null,
+        in_reply_to_account_id: r.in_reply_to_account_id as number | null,
       }, account, { favourited: likedSet.has(r.id as number), reblog: r.repost_id ? reblogMap.get(r.repost_id as number) : undefined })
     })
   })()
@@ -1015,6 +1094,10 @@ mastodon.get('/timelines/public', async (c) => {
         has_nsfw: !!r.has_nsfw,
         created_at: r.created_at as string,
         images: imagesMap.get(r.id as number),
+        spoiler_text: r.spoiler_text as string, visibility: r.visibility as string,
+        language: r.language as string,
+        in_reply_to_id: r.in_reply_to_id as number | null,
+        in_reply_to_account_id: r.in_reply_to_account_id as number | null,
       }, account, { favourited: likedSet.has(r.id as number), reblog: r.repost_id ? reblogMap.get(r.repost_id as number) : undefined })
     })
   })()
@@ -1059,6 +1142,10 @@ mastodon.get('/timelines/tag/:hashtag', async (c) => {
         has_nsfw: !!r.has_nsfw,
         created_at: r.created_at as string,
         images: imagesMap.get(r.id as number),
+        spoiler_text: r.spoiler_text as string, visibility: r.visibility as string,
+        language: r.language as string,
+        in_reply_to_id: r.in_reply_to_id as number | null,
+        in_reply_to_account_id: r.in_reply_to_account_id as number | null,
       }, account, { reblog: r.repost_id ? reblogMap.get(r.repost_id as number) : undefined })
     })
   })()
@@ -1253,6 +1340,10 @@ mastodon.get('/search', async (c) => {
         has_nsfw: !!r.has_nsfw,
         created_at: r.created_at as string,
         images: imagesMap.get(r.id as number),
+        spoiler_text: r.spoiler_text as string, visibility: r.visibility as string,
+        language: r.language as string,
+        in_reply_to_id: r.in_reply_to_id as number | null,
+        in_reply_to_account_id: r.in_reply_to_account_id as number | null,
       }, account, { reblog: r.repost_id ? reblogMap.get(r.repost_id as number) : undefined })
     })
   })()
@@ -1639,6 +1730,10 @@ mastodon.get('/trends/statuses', async (c) => {
       has_nsfw: !!r.has_nsfw,
       created_at: r.created_at as string,
       images: imagesMap.get(r.id as number),
+      spoiler_text: r.spoiler_text as string, visibility: r.visibility as string,
+      language: r.language as string,
+      in_reply_to_id: r.in_reply_to_id as number | null,
+      in_reply_to_account_id: r.in_reply_to_account_id as number | null,
     }, account, { favourited: likedSet.has(r.id as number) })
   })
 
@@ -1683,5 +1778,234 @@ mastodon.get('/endorsements', async (c) => c.json([]))
 
 // GET /api/v1/domain_blocks
 mastodon.get('/domain_blocks', async (c) => c.json([]))
+
+// ============================================================
+// Helper: Load poll from database
+// ============================================================
+async function loadPoll(db: D1Database, pollId: number, userId?: number): Promise<{
+  id: string; expires_at: string; expired: boolean; multiple: boolean;
+  votes_count: number; voters_count: number; options: { title: string; votes_count: number }[];
+  emojis: unknown[]; voted?: boolean; own_votes?: number[];
+} | null> {
+  const poll = await queryOne<Record<string, unknown>>(
+    db, 'SELECT * FROM polls WHERE id = ?', [pollId]
+  )
+  if (!poll) return null
+
+  const options = JSON.parse(poll.options as string || '[]')
+  const expired = poll.expired || new Date(poll.expires_at as string) < new Date()
+
+  let voted = false
+  let ownVotes: number[] = []
+  if (userId) {
+    const vote = await queryOne<{ choices: string }>(
+      db, 'SELECT choices FROM poll_votes WHERE poll_id = ? AND user_id = ?', [pollId, userId]
+    )
+    if (vote) {
+      voted = true
+      ownVotes = JSON.parse(vote.choices || '[]')
+    }
+  }
+
+  return {
+    id: `poll_${pollId}`,
+    expires_at: poll.expires_at as string,
+    expired: !!expired,
+    multiple: !!poll.multiple,
+    votes_count: poll.votes_count as number,
+    voters_count: poll.voters_count as number,
+    options,
+    emojis: [],
+    voted,
+    own_votes: ownVotes,
+  }
+}
+
+// ============================================================
+// PUT /api/v1/statuses/:id — Edit a status
+// ============================================================
+mastodon.put('/statuses/:id', async (c) => {
+  const user = await mastodonAuth(c)
+  if (!user) return c.json({ error: 'The access token is invalid' }, 401)
+
+  const rawId = c.req.param('id')
+  const resolved = await resolveStatus(c.env.abdl_space_db, rawId)
+  if (!resolved || resolved.kind !== 'post') return c.json({ error: 'Record not found' }, 404)
+
+  // Check ownership
+  const post = await queryOne<{ user_id: number }>(c.env.abdl_space_db, 'SELECT user_id FROM posts WHERE id = ?', [resolved.realId])
+  if (!post) return c.json({ error: 'Record not found' }, 404)
+  if (post.user_id !== user.sub && user.role !== 'admin') return c.json({ error: 'Forbidden' }, 403)
+
+  let body: {
+    status?: string; media_ids?: string[]; sensitive?: boolean; visibility?: string;
+    spoiler_text?: string; language?: string;
+    poll?: { options?: string[]; expires_in?: number; multiple?: boolean; hide_totals?: boolean };
+  }
+  try { body = await c.req.json() } catch { return c.json({ error: 'invalid body' }, 400) }
+
+  const updates: string[] = []
+  const params: unknown[] = []
+
+  if (body.status !== undefined) { updates.push('content = ?'); params.push(body.status.trim()) }
+  if (body.sensitive !== undefined) { updates.push('has_nsfw = ?'); params.push(body.sensitive ? 1 : 0) }
+  if (body.visibility !== undefined) { updates.push('visibility = ?'); params.push(body.visibility) }
+  if (body.spoiler_text !== undefined) { updates.push('spoiler_text = ?'); params.push(body.spoiler_text) }
+  if (body.language !== undefined) { updates.push('language = ?'); params.push(body.language) }
+
+  updates.push('edited_at = ?')
+  params.push(new Date().toISOString())
+
+  if (updates.length > 0) {
+    params.push(resolved.realId)
+    await run(c.env.abdl_space_db, `UPDATE posts SET ${updates.join(', ')} WHERE id = ?`, params)
+  }
+
+  // Handle media updates (replace all images)
+  if (body.media_ids !== undefined) {
+    await run(c.env.abdl_space_db, 'DELETE FROM post_images WHERE post_id = ?', [resolved.realId])
+    let sortOrder = 0
+    for (const mediaId of body.media_ids) {
+      if (typeof mediaId !== 'string' || !mediaId) continue
+      if (!mediaId.startsWith(IMGBED_HOST + '/')) continue
+      await run(c.env.abdl_space_db, 'INSERT INTO post_images (post_id, image_url, sort_order) VALUES (?, ?, ?)', [resolved.realId, mediaId, sortOrder++])
+    }
+  }
+
+  // Handle poll update
+  if (body.poll) {
+    const existingPoll = await queryOne<{ id: number }>(c.env.abdl_space_db, 'SELECT id FROM polls WHERE status_id = ?', [resolved.realId])
+    if (existingPoll) {
+      // Delete old poll and votes
+      await run(c.env.abdl_space_db, 'DELETE FROM poll_votes WHERE poll_id = ?', [existingPoll.id])
+      await run(c.env.abdl_space_db, 'DELETE FROM polls WHERE id = ?', [existingPoll.id])
+    }
+    if (body.poll.options && body.poll.options.length >= 2) {
+      const expiresAt = new Date(Date.now() + (body.poll.expires_in || 300) * 1000).toISOString()
+      const options = body.poll.options.map(title => ({ title, votes_count: 0 }))
+      const pollResult = await run(
+        c.env.abdl_space_db,
+        'INSERT INTO polls (status_id, expires_at, multiple, hide_totals, options) VALUES (?, ?, ?, ?, ?)',
+        [resolved.realId, expiresAt, body.poll.multiple ? 1 : 0, body.poll.hide_totals ? 1 : 0, JSON.stringify(options)]
+      )
+      await run(c.env.abdl_space_db, 'UPDATE posts SET poll_id = ? WHERE id = ?', [pollResult.meta.last_row_id, resolved.realId])
+    } else {
+      await run(c.env.abdl_space_db, 'UPDATE posts SET poll_id = NULL WHERE id = ?', [resolved.realId])
+    }
+  }
+
+  // Return updated status
+  const updatedPost = await queryOne<Record<string, unknown>>(
+    c.env.abdl_space_db,
+    `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
+     (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
+     (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
+     (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count
+     FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`, [resolved.realId]
+  )
+  if (!updatedPost) return c.json({ error: 'Failed to update status' }, 500)
+
+  const images = await query<{ image_url: string; is_nsfw: number }>(
+    c.env.abdl_space_db, 'SELECT image_url, is_nsfw FROM post_images WHERE post_id = ? ORDER BY sort_order', [resolved.realId]
+  )
+  const poll = updatedPost.poll_id ? await loadPoll(c.env.abdl_space_db, updatedPost.poll_id as number) : null
+
+  return c.json(toStatus({
+    id: updatedPost.id as number, user_id: updatedPost.user_id as number, content: updatedPost.content as string,
+    like_count: updatedPost.like_count as number, comment_count: updatedPost.comment_count as number,
+    reblogs_count: updatedPost.reblogs_count as number, has_nsfw: !!updatedPost.has_nsfw,
+    created_at: updatedPost.created_at as string, images,
+    spoiler_text: updatedPost.spoiler_text as string, visibility: updatedPost.visibility as string,
+    language: updatedPost.language as string,
+    edited_at: updatedPost.edited_at as string | null,
+    in_reply_to_id: updatedPost.in_reply_to_id as number | null,
+    in_reply_to_account_id: updatedPost.in_reply_to_account_id as number | null,
+    poll: poll as any,
+  }, toAccount({
+    id: updatedPost.user_id as number, username: updatedPost.username as string, avatar: updatedPost.avatar as string | null,
+    role: updatedPost.role as string, bio: updatedPost.bio as string | null, created_at: updatedPost.user_created_at as string,
+  })))
+})
+
+// ============================================================
+// GET /api/v1/polls/:id — Get a poll
+// ============================================================
+mastodon.get('/polls/:id', async (c) => {
+  const pollIdStr = c.req.param('id')
+  const pollId = parseInt(pollIdStr.replace('poll_', ''))
+  if (isNaN(pollId)) return c.json({ error: 'Invalid poll ID' }, 400)
+
+  const user = await mastodonAuth(c)
+  const poll = await loadPoll(c.env.abdl_space_db, pollId, user?.sub)
+  if (!poll) return c.json({ error: 'Record not found' }, 404)
+
+  return c.json(poll)
+})
+
+// ============================================================
+// POST /api/v1/polls/:id/votes — Vote on a poll
+// ============================================================
+mastodon.post('/polls/:id/votes', async (c) => {
+  const user = await mastodonAuth(c)
+  if (!user) return c.json({ error: 'The access token is invalid' }, 401)
+
+  const pollIdStr = c.req.param('id')
+  const pollId = parseInt(pollIdStr.replace('poll_', ''))
+  if (isNaN(pollId)) return c.json({ error: 'Invalid poll ID' }, 400)
+
+  let body: { choices?: number[] }
+  try { body = await c.req.json() } catch { return c.json({ error: 'invalid body' }, 400) }
+  if (!body.choices || body.choices.length === 0) return c.json({ error: 'choices required' }, 400)
+
+  const poll = await queryOne<Record<string, unknown>>(c.env.abdl_space_db, 'SELECT * FROM polls WHERE id = ?', [pollId])
+  if (!poll) return c.json({ error: 'Record not found' }, 404)
+  if (poll.expired || new Date(poll.expires_at as string) < new Date()) return c.json({ error: 'Poll has expired' }, 400)
+
+  const options = JSON.parse(poll.options as string || '[]')
+  const maxIndex = options.length - 1
+  for (const choice of body.choices) {
+    if (choice < 0 || choice > maxIndex) return c.json({ error: `Invalid choice index: ${choice}` }, 400)
+  }
+
+  if (!poll.multiple && body.choices.length > 1) return c.json({ error: 'Poll does not allow multiple choices' }, 400)
+
+  // Check if already voted
+  const existingVote = await queryOne<{ id: number; choices: string }>(
+    c.env.abdl_space_db, 'SELECT id, choices FROM poll_votes WHERE poll_id = ? AND user_id = ?', [pollId, user.sub]
+  )
+
+  if (existingVote) {
+    // Update vote
+    const oldChoices: number[] = JSON.parse(existingVote.choices)
+    // Decrement old votes
+    for (const idx of oldChoices) {
+      options[idx].votes_count = Math.max(0, options[idx].votes_count - 1)
+    }
+    // Increment new votes
+    for (const idx of body.choices) {
+      options[idx].votes_count++
+    }
+    await run(c.env.abdl_space_db, 'UPDATE poll_votes SET choices = ? WHERE id = ?', [JSON.stringify(body.choices), existingVote.id])
+  } else {
+    // New vote
+    for (const idx of body.choices) {
+      options[idx].votes_count++
+    }
+    await run(c.env.abdl_space_db, 'INSERT INTO poll_votes (poll_id, user_id, choices) VALUES (?, ?, ?)', [pollId, user.sub, JSON.stringify(body.choices)])
+  }
+
+  // Update poll totals
+  const totalVotes = options.reduce((sum, o) => sum + o.votes_count, 0)
+  const voterCount = await queryOne<{ cnt: number }>(c.env.abdl_space_db, 'SELECT COUNT(*) as cnt FROM poll_votes WHERE poll_id = ?', [pollId])
+  await run(c.env.abdl_space_db, 'UPDATE polls SET options = ?, votes_count = ?, voters_count = ? WHERE id = ?',
+    [JSON.stringify(options), totalVotes, voterCount?.cnt ?? 0, pollId])
+
+  // Check if poll should be marked expired
+  if (new Date(poll.expires_at as string) < new Date()) {
+    await run(c.env.abdl_space_db, 'UPDATE polls SET expired = 1 WHERE id = ?', [pollId])
+  }
+
+  return c.json(await loadPoll(c.env.abdl_space_db, pollId, user.sub))
+})
 
 export default mastodon

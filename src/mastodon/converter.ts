@@ -3,7 +3,7 @@
  * All conversion functions are pure — no DB calls.
  */
 
-import type { MastodonAccount, MastodonStatus, MastodonMediaAttachment, MastodonNotification } from './types.ts'
+import type { MastodonAccount, MastodonStatus, MastodonMediaAttachment, MastodonNotification, MastodonPoll } from './types.ts'
 import { toMastoId } from './shared.ts'
 
 const INSTANCE_DOMAIN = 'abdl-space.top'
@@ -79,6 +79,13 @@ export function toStatus(post: {
   created_at: string
   images?: { image_url: string; is_nsfw?: boolean | number }[]
   repost?: unknown
+  spoiler_text?: string
+  visibility?: string
+  language?: string
+  in_reply_to_id?: string | number | null
+  in_reply_to_account_id?: string | number | null
+  edited_at?: string | null
+  poll?: MastodonPoll | null
 }, account: MastodonAccount, opts?: {
   favourited?: boolean
   reblogged?: boolean
@@ -90,12 +97,12 @@ export function toStatus(post: {
   return {
     id: toMastoId('post', post.id),
     created_at: toISOString(post.created_at),
-    in_reply_to_id: null,
-    in_reply_to_account_id: null,
+    in_reply_to_id: post.in_reply_to_id ? String(post.in_reply_to_id) : null,
+    in_reply_to_account_id: post.in_reply_to_account_id ? String(post.in_reply_to_account_id) : null,
     sensitive: !!post.has_nsfw,
-    spoiler_text: '',
-    visibility: 'public',
-    language: 'zh',
+    spoiler_text: post.spoiler_text || '',
+    visibility: (post.visibility as MastodonStatus['visibility']) || 'public',
+    language: post.language || 'zh',
     uri: `https://${INSTANCE_DOMAIN}/users/${account.username}/statuses/${post.id}`,
     url: `https://${INSTANCE_DOMAIN}/@${account.username}/${post.id}`,
     replies_count: post.comment_count ?? 0,
@@ -130,7 +137,8 @@ export function toStatus(post: {
       embed_url: '',
       blurhash: null,
     } : null,
-    poll: null,
+    poll: post.poll ?? null,
+    edited_at: post.edited_at || null,
   }
 }
 
