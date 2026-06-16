@@ -9,7 +9,7 @@
 import { Hono } from 'hono'
 import type { Env, JWTPayload } from '../types/index.ts'
 import { query, queryOne, run } from '../lib/db.ts'
-import { toAccount, toStatus, toStatusFromComment, toNotification } from './converter.ts'
+import { toAccount, toStatus, toStatusFromComment, toNotification, toISOString } from './converter.ts'
 import type { MastodonNotification, MastodonAccount, MastodonStatus } from './types.ts'
 import { mastodonAuth, buildInstance, resolveStatus, parseMastoIdForCursor } from './shared.ts'
 

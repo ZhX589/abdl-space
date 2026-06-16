@@ -11,7 +11,7 @@ const DEFAULT_AVATAR = 'https://img.abdl-space.top/file/system/1781439303787_pla
 const DEFAULT_HEADER = 'https://img.abdl-space.top/file/system/1781439303787_play_store_512.png'
 
 /** Convert date string to ISO 8601 format for Moshidon compatibility */
-function toISOString(dateStr: string): string {
+export function toISOString(dateStr: string): string {
   if (!dateStr) return new Date().toISOString()
   if (dateStr.includes('T')) return dateStr
   return dateStr.replace(' ', 'T') + 'Z'
