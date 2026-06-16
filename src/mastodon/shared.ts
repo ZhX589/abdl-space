@@ -46,7 +46,7 @@ export async function buildInstance(db: D1Database): Promise<MastodonInstance> {
     source_url: 'https://github.com/ZYongX09/abdl-space-v2',
     description: 'ABDL Space — 纸尿裤评分社区',
     usage: { users: { active_month: userCount?.cnt ?? 0 } },
-    thumbnail: { url: 'https://img.abdl-space.top/file/system/1781439303787_play_store_512.png', blurhash: null },
+    thumbnail: 'https://img.abdl-space.top/file/system/1781439303787_play_store_512.png',
     languages: ['zh', 'en'],
     configuration: {
       urls: { streaming: null, status: null, about: 'https://abdl-space.top', privacy_policy: null, terms_of_service: null },

@@ -22,113 +22,137 @@ oauth.use('/token', rateLimit('oauth-token', 60_000, 20))
 oauth.use('/authorize', rateLimit('oauth-authorize', 60_000, 30))
 
 /* ============================================================
- * GET /oauth/authorize — 授权端点（返回授权页面数据）
- * 前端调用: GET /api/oauth/authorize?client_id=xxx&redirect_uri=xxx&scope=xxx&state=xxx&response_type=code
- *
- * 注意: 这个端点不直接 redirect，而是返回 JSON 给前端
- * 前端渲染同意页面，用户确认后 POST /oauth/authorize
+ * GET /oauth/authorize — 授权端点
+ * 如果用户已登录，自动签发 code 并 redirect
+ * 如果未登录，返回 HTML 登录页面
  * ============================================================ */
-oauth.get('/authorize', authMiddleware, async (c) => {
+oauth.get('/authorize', async (c) => {
   const clientId = c.req.query('client_id')
   const redirectUri = c.req.query('redirect_uri')
-  const scope = c.req.query('scope') || 'profile'
+  const scope = c.req.query('scope') || 'read write follow push'
   const state = c.req.query('state') || ''
   const responseType = c.req.query('response_type') || 'code'
   const codeChallenge = c.req.query('code_challenge')
   const codeChallengeMethod = c.req.query('code_challenge_method')
 
-  if (responseType !== 'code') {
-    return c.json({ error: 'unsupported_response_type' }, 400)
-  }
-  if (!clientId) return c.json({ error: 'client_id required' }, 400)
-  if (!redirectUri) return c.json({ error: 'redirect_uri required' }, 400)
+  if (responseType !== 'code') return c.text('unsupported_response_type', 400)
+  if (!clientId) return c.text('client_id required', 400)
+  if (!redirectUri) return c.text('redirect_uri required', 400)
 
   const client = await getClient(c.env.abdl_space_db, clientId)
-  if (!client || !client.active) {
-    return c.json({ error: 'invalid_client' }, 400)
-  }
-  if (!client.redirect_uris.includes(redirectUri)) {
-    return c.json({ error: 'invalid_redirect_uri' }, 400)
-  }
+  if (!client || !client.active) return c.text('invalid_client', 400)
+  if (!client.redirect_uris.includes(redirectUri)) return c.text('invalid_redirect_uri', 400)
 
   const requestedScopes = scope.split(' ').filter(s => ALL_SCOPES.includes(s as any))
-  if (requestedScopes.length === 0) {
-    return c.json({ error: 'invalid_scope' }, 400)
+  if (requestedScopes.length === 0) return c.text('invalid_scope', 400)
+
+  // Check if user is already logged in (JWT in cookie or header)
+  let userId: number | null = null
+  try {
+    const auth = c.req.header('Authorization')
+    if (auth) {
+      const { mastodonAuth } = await import('../mastodon/shared.ts')
+      const user = await mastodonAuth(c)
+      if (user) userId = user.sub
+    }
+  } catch {}
+
+  if (userId) {
+    // Already logged in — auto-authorize and redirect
+    const code = await createAuthorizationCode(
+      c.env.abdl_space_db, clientId, userId, redirectUri, scope, codeChallenge, codeChallengeMethod
+    )
+    const sep = redirectUri.includes('?') ? '&' : '?'
+    const url = `${redirectUri}${sep}code=${code}${state ? `&state=${encodeURIComponent(state)}` : ''}`
+    return c.redirect(url, 302)
   }
 
-  // 获取用户信息
-  const user = c.get('user')
-  const dbUser = await queryOne<{ id: number; username: string; avatar: string | null }>(
-    c.env.abdl_space_db, 'SELECT id, username, avatar FROM users WHERE id = ?', [user.sub]
-  )
-
-  return c.json({
-    client: {
-      client_id: client.client_id,
-      name: client.name,
-      description: client.description,
-      logo_url: client.logo_url,
-      homepage_url: client.homepage_url,
-    },
-    user: dbUser ? { id: dbUser.id, username: dbUser.username, avatar: dbUser.avatar ?? DEFAULT_AVATAR } : null,
-    scopes: requestedScopes.map(s => ({
-      value: s,
-      description: SCOPE_DESCRIPTIONS[s as keyof typeof SCOPE_DESCRIPTIONS] || s,
-    })),
-    state,
-    redirect_uri: redirectUri,
-    code_challenge: codeChallenge,
-    code_challenge_method: codeChallengeMethod,
-    expires_in: OAUTH_CONFIG.CODE_TTL_S,
+  // Not logged in — return HTML login page
+  const params = new URLSearchParams({
+    client_id: clientId, redirect_uri: redirectUri, scope, state,
+    ...(codeChallenge ? { code_challenge: codeChallenge } : {}),
+    ...(codeChallengeMethod ? { code_challenge_method: codeChallengeMethod } : {}),
   })
+
+  return c.html(`<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ABDL Space - 登录授权</title>
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body { font-family: -apple-system, system-ui, sans-serif; background:#f0f2f5; display:flex; justify-content:center; align-items:center; min-height:100vh; }
+    .card { background:#fff; border-radius:16px; padding:32px; width:90%; max-width:400px; box-shadow:0 2px 12px rgba(0,0,0,0.1); text-align:center; }
+    .logo { width:64px; height:64px; border-radius:16px; margin-bottom:16px; }
+    h2 { margin-bottom:8px; color:#1a1a1a; }
+    .desc { color:#666; font-size:14px; margin-bottom:24px; }
+    input { width:100%; padding:12px; border:1px solid #ddd; border-radius:8px; margin-bottom:12px; font-size:15px; outline:none; }
+    input:focus { border-color:#196584; }
+    button { width:100%; padding:12px; background:#196584; color:#fff; border:none; border-radius:8px; font-size:15px; font-weight:600; cursor:pointer; }
+    button:hover { background:#145268; }
+    .error { color:#d32f2f; font-size:13px; margin-bottom:12px; display:none; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <img class="logo" src="https://img.abdl-space.top/file/system/1781439303787_play_store_512.png" alt="ABDL Space">
+    <h2>ABDL Space</h2>
+    <p class="desc">登录以授权 ${client.name || 'Moshidon'} 访问你的账号</p>
+    <div class="error" id="error"></div>
+    <form method="POST" action="/oauth/authorize/login">
+      <input type="hidden" name="params" value="${encodeURIComponent(params.toString())}">
+      <input type="text" name="login" placeholder="用户名或邮箱" required autocomplete="username">
+      <input type="password" name="password" placeholder="密码" required autocomplete="current-password">
+      <button type="submit">登录并授权</button>
+    </form>
+  </div>
+</body>
+</html>`)
 })
 
 /* ============================================================
- * POST /oauth/authorize — 用户确认授权，签发授权码
- * Body: { client_id, redirect_uri, scope, state?, code_challenge?, code_challenge_method? }
+ * POST /oauth/authorize/login — 处理登录表单，登录后签发 code 并 redirect
  * ============================================================ */
-oauth.post('/authorize', authMiddleware, async (c) => {
-  let body: {
-    client_id?: string; redirect_uri?: string; scope?: string;
-    state?: string; code_challenge?: string; code_challenge_method?: string;
-    approved?: boolean
-  }
-  try { body = await c.req.json() } catch { return c.json({ error: 'invalid body' }, 400) }
+oauth.post('/authorize/login', async (c) => {
+  const formText = await c.req.text()
+  const form = Object.fromEntries(new URLSearchParams(formText))
+  const { login, password } = form
+  const paramsStr = form.params
 
-  const { client_id, redirect_uri, scope, state, code_challenge, code_challenge_method, approved } = body
+  if (!login || !password) return c.text('请输入用户名和密码', 400)
 
-  if (!approved) {
-    // 用户拒绝授权
-    if (!redirect_uri || !client_id) return c.json({ error: 'denied' }, 403)
-    const sep = redirect_uri.includes('?') ? '&' : '?'
-    return c.json({
-      redirect: `${redirect_uri}${sep}error=access_denied&state=${encodeURIComponent(state || '')}`,
-    })
+  // 验证用户凭据
+  const user = await queryOne<{ id: number; password_hash: string; username: string }>(
+    c.env.abdl_space_db, 'SELECT id, password_hash, username FROM users WHERE username = ? OR email = ?', [login, login]
+  )
+  if (!user) {
+    return c.html('<html><body><h3>用户名或密码错误</h3><script>history.back()</script></body></html>', 401)
   }
 
-  if (!client_id || !redirect_uri || !scope) {
-    return c.json({ error: 'client_id, redirect_uri, scope required' }, 400)
+  // 验证密码
+  const { verifyPassword } = await import('../lib/auth.ts')
+  const valid = await verifyPassword(password, user.password_hash)
+  if (!valid) {
+    return c.html('<html><body><h3>用户名或密码错误</h3><script>history.back()</script></body></html>', 401)
   }
 
-  const client = await getClient(c.env.abdl_space_db, client_id)
-  if (!client || !client.active) return c.json({ error: 'invalid_client' }, 400)
-  if (!client.redirect_uris.includes(redirect_uri)) return c.json({ error: 'invalid_redirect_uri' }, 400)
+  // 解析 OAuth 参数
+  const params = new URLSearchParams(paramsStr)
+  const clientId = params.get('client_id')!
+  const redirectUri = params.get('redirect_uri')!
+  const scope = params.get('scope') || 'read write follow push'
+  const state = params.get('state') || ''
+  const codeChallenge = params.get('code_challenge') || undefined
+  const codeChallengeMethod = params.get('code_challenge_method') || undefined
 
-  const user = c.get('user')
   const code = await createAuthorizationCode(
-    c.env.abdl_space_db,
-    client_id,
-    user.sub,
-    redirect_uri,
-    scope,
-    code_challenge,
-    code_challenge_method
+    c.env.abdl_space_db, clientId, user.id, redirectUri, scope, codeChallenge, codeChallengeMethod
   )
 
-  const sep = redirect_uri.includes('?') ? '&' : '?'
-  const redirectUrl = `${redirect_uri}${sep}code=${code}${state ? `&state=${encodeURIComponent(state)}` : ''}`
-
-  return c.json({ redirect: redirectUrl })
+  const sep = redirectUri.includes('?') ? '&' : '?'
+  const url = `${redirectUri}${sep}code=${code}${state ? `&state=${encodeURIComponent(state)}` : ''}`
+  return c.redirect(url, 302)
 })
 
 /* ============================================================

@@ -125,7 +125,7 @@ export interface MastodonInstance {
   source_url: string
   description: string
   usage: { users: { active_month: number } }
-  thumbnail: { url: string; blurhash: string | null }
+  thumbnail: string
   languages: string[]
   configuration: {
     urls: { streaming: string | null; status: string | null; about: string | null; privacy_policy: string | null; terms_of_service: string | null }
