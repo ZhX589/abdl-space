@@ -1613,49 +1613,32 @@ mastodon.get('/custom_emojis', async (c) => c.json([]))
 mastodon.get('/announcements', async (c) => {
   const user = await mastodonAuth(c)
   if (!user) return c.json({ error: 'The access token is invalid' }, 401)
-  const withDismissed = c.req.query('with_dismissed') === 'true'
   const db = c.env.abdl_space_db
 
+  // 从 posts 表读取公告（is_announcement=1），与原自定义 API 数据统一
   const rows = await query<Record<string, unknown>>(
     db,
-    `SELECT a.*,
-      CASE WHEN ars.user_id IS NOT NULL THEN 1 ELSE 0 END as is_read
-     FROM announcements a
-     LEFT JOIN announcement_read_status ars ON a.id = ars.announcement_id AND ars.user_id = ?
-     WHERE a.published = 1
-       AND (a.starts_at IS NULL OR a.starts_at <= datetime('now'))
-       AND (a.ends_at IS NULL OR a.ends_at >= datetime('now'))
-       ${withDismissed ? '' : 'AND ars.user_id IS NULL'}
-     ORDER BY a.published_at DESC`,
-    [user.sub]
+    `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at
+     FROM posts p JOIN users u ON p.user_id = u.id
+     WHERE p.is_announcement = 1
+     ORDER BY p.created_at DESC`
   )
 
-  const results = []
-  for (const row of rows) {
-    const reactions = await query<{ emoji: string; count: number; me: number }>(
-      db,
-      `SELECT ar.emoji, COUNT(*) as count,
-        CASE WHEN EXISTS(SELECT 1 FROM announcement_reactions WHERE announcement_id = ? AND emoji = ar.emoji AND user_id = ?) THEN 1 ELSE 0 END as me
-       FROM announcement_reactions ar WHERE ar.announcement_id = ? GROUP BY ar.emoji`,
-      [row.id, user.sub, row.id]
-    )
-
-    results.push({
-      id: String(row.id),
-      content: row.content,
-      starts_at: row.starts_at,
-      ends_at: row.ends_at,
-      all_day: !!row.all_day,
-      published: !!row.published,
-      published_at: row.published_at,
-      updated_at: row.updated_at,
-      read: !!row.is_read,
-      emojis: [],
-      reactions: reactions.map(r => ({ name: r.emoji, count: r.count, me: !!r.me })),
-      mentions: [],
-      tags: [],
-    })
-  }
+  const results = rows.map(row => ({
+    id: String(row.id),
+    content: `<p>${row.content}</p>`,
+    starts_at: row.created_at,
+    ends_at: null,
+    all_day: false,
+    published: true,
+    published_at: row.created_at,
+    updated_at: row.created_at,
+    read: false,
+    emojis: [],
+    reactions: [],
+    mentions: [],
+    tags: [],
+  }))
 
   return c.json(results)
 })
