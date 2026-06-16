@@ -58,6 +58,30 @@ const mastodon = new Hono<AppType>()
 
 const IMGBED_HOST = 'https://img.abdl-space.top'
 
+async function loadPolls(db: D1Database, pollIds: number[]): Promise<Map<number, any>> {
+  if (pollIds.length === 0) return new Map()
+  const polls = await query<Record<string, unknown>>(
+    db, `SELECT * FROM polls WHERE id IN (${pollIds.map(() => '?').join(',')})`, pollIds
+  )
+  const map = new Map<number, any>()
+  for (const p of polls) {
+    const options = JSON.parse(p.options as string || '[]')
+    map.set(p.id as number, {
+      id: `poll_${p.id}`,
+      expires_at: p.expires_at as string,
+      expired: !!p.expired || new Date(p.expires_at as string) < new Date(),
+      multiple: !!p.multiple,
+      votes_count: p.votes_count as number,
+      voters_count: p.voters_count as number,
+      options,
+      emojis: [],
+      voted: false,
+      own_votes: [],
+    })
+  }
+  return map
+}
+
 async function loadPostImages(db: D1Database, postIds: number[]): Promise<Map<number, { image_url: string; is_nsfw: number }[]>> {
   if (postIds.length === 0) return new Map()
   const allImages = await query<{ post_id: number; image_url: string; is_nsfw: number }>(
@@ -413,6 +437,8 @@ mastodon.get('/accounts/:id/statuses', async (c) => {
   const statuses = await (async () => {
     const postIds = posts.map(r => r.id as number)
     const imagesMap = await loadPostImages(c.env.abdl_space_db, postIds)
+    const pollIds = posts.filter(r => r.poll_id).map(r => r.poll_id as number)
+    const pollMap = await loadPolls(c.env.abdl_space_db, pollIds)
     const repostIds = posts.filter(r => r.repost_id).map(r => r.repost_id as number)
     const reblogMap = await loadReblogTargets(c.env.abdl_space_db, repostIds)
     return posts.map(r => toStatus({
@@ -432,6 +458,7 @@ mastodon.get('/accounts/:id/statuses', async (c) => {
       language: r.language as string,
       in_reply_to_id: r.in_reply_to_id as number | null,
       in_reply_to_account_id: r.in_reply_to_account_id as number | null,
+      poll: r.poll_id ? pollMap.get(r.poll_id as number) ?? null : null,
     }, account, { favourited: likedSet.has(r.id as number), reblog: r.repost_id ? reblogMap.get(r.repost_id as number) : undefined }))
   })()
 
@@ -1013,6 +1040,8 @@ mastodon.get('/timelines/home', async (c) => {
 
   const homeStatuses = await (async () => {
     const imagesMap = await loadPostImages(c.env.abdl_space_db, postIds)
+    const pollIds = posts.filter(r => r.poll_id).map(r => r.poll_id as number)
+    const pollMap = await loadPolls(c.env.abdl_space_db, pollIds)
     const repostIds = posts.filter(r => r.repost_id).map(r => r.repost_id as number)
     const reblogMap = await loadReblogTargets(c.env.abdl_space_db, repostIds)
     return posts.map(r => {
@@ -1031,6 +1060,7 @@ mastodon.get('/timelines/home', async (c) => {
         language: r.language as string,
         in_reply_to_id: r.in_reply_to_id as number | null,
         in_reply_to_account_id: r.in_reply_to_account_id as number | null,
+        poll: r.poll_id ? pollMap.get(r.poll_id as number) ?? null : null,
       }, account, { favourited: likedSet.has(r.id as number), reblog: r.repost_id ? reblogMap.get(r.repost_id as number) : undefined })
     })
   })()
@@ -1081,6 +1111,8 @@ mastodon.get('/timelines/public', async (c) => {
   const publicStatuses = await (async () => {
     const postIds = posts.map(r => r.id as number)
     const imagesMap = await loadPostImages(c.env.abdl_space_db, postIds)
+    const pollIds = posts.filter(r => r.poll_id).map(r => r.poll_id as number)
+    const pollMap = await loadPolls(c.env.abdl_space_db, pollIds)
     const repostIds = posts.filter(r => r.repost_id).map(r => r.repost_id as number)
     const reblogMap = await loadReblogTargets(c.env.abdl_space_db, repostIds)
     return posts.map(r => {
@@ -1099,6 +1131,7 @@ mastodon.get('/timelines/public', async (c) => {
         language: r.language as string,
         in_reply_to_id: r.in_reply_to_id as number | null,
         in_reply_to_account_id: r.in_reply_to_account_id as number | null,
+        poll: r.poll_id ? pollMap.get(r.poll_id as number) ?? null : null,
       }, account, { favourited: likedSet.has(r.id as number), reblog: r.repost_id ? reblogMap.get(r.repost_id as number) : undefined })
     })
   })()
@@ -1129,6 +1162,8 @@ mastodon.get('/timelines/tag/:hashtag', async (c) => {
   const tagStatuses = await (async () => {
     const postIds = posts.map(r => r.id as number)
     const imagesMap = await loadPostImages(c.env.abdl_space_db, postIds)
+    const pollIds = posts.filter(r => r.poll_id).map(r => r.poll_id as number)
+    const pollMap = await loadPolls(c.env.abdl_space_db, pollIds)
     const repostIds = posts.filter(r => r.repost_id).map(r => r.repost_id as number)
     const reblogMap = await loadReblogTargets(c.env.abdl_space_db, repostIds)
     return posts.map(r => {
@@ -1147,6 +1182,7 @@ mastodon.get('/timelines/tag/:hashtag', async (c) => {
         language: r.language as string,
         in_reply_to_id: r.in_reply_to_id as number | null,
         in_reply_to_account_id: r.in_reply_to_account_id as number | null,
+        poll: r.poll_id ? pollMap.get(r.poll_id as number) ?? null : null,
       }, account, { reblog: r.repost_id ? reblogMap.get(r.repost_id as number) : undefined })
     })
   })()
@@ -1327,6 +1363,8 @@ mastodon.get('/search', async (c) => {
   const statuses = await (async () => {
     const postIds = posts.map(r => r.id as number)
     const imagesMap = await loadPostImages(c.env.abdl_space_db, postIds)
+    const pollIds = posts.filter(r => r.poll_id).map(r => r.poll_id as number)
+    const pollMap = await loadPolls(c.env.abdl_space_db, pollIds)
     const repostIds = posts.filter(r => r.repost_id).map(r => r.repost_id as number)
     const reblogMap = await loadReblogTargets(c.env.abdl_space_db, repostIds)
     return posts.map(r => {
@@ -1345,6 +1383,7 @@ mastodon.get('/search', async (c) => {
         language: r.language as string,
         in_reply_to_id: r.in_reply_to_id as number | null,
         in_reply_to_account_id: r.in_reply_to_account_id as number | null,
+        poll: r.poll_id ? pollMap.get(r.poll_id as number) ?? null : null,
       }, account, { reblog: r.repost_id ? reblogMap.get(r.repost_id as number) : undefined })
     })
   })()
@@ -1718,6 +1757,8 @@ mastodon.get('/trends/statuses', async (c) => {
   }
 
   const imagesMap = await loadPostImages(c.env.abdl_space_db, postIds)
+  const pollIds = posts.filter(r => r.poll_id).map(r => r.poll_id as number)
+  const pollMap = await loadPolls(c.env.abdl_space_db, pollIds)
 
   const statuses = posts.map(r => {
     const account = toAccount({
@@ -1735,6 +1776,7 @@ mastodon.get('/trends/statuses', async (c) => {
       language: r.language as string,
       in_reply_to_id: r.in_reply_to_id as number | null,
       in_reply_to_account_id: r.in_reply_to_account_id as number | null,
+      poll: r.poll_id ? pollMap.get(r.poll_id as number) ?? null : null,
     }, account, { favourited: likedSet.has(r.id as number) })
   })
 
