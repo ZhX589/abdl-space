@@ -67,48 +67,8 @@ oauth.get('/authorize', async (c) => {
     return c.redirect(url, 302)
   }
 
-  // Not logged in — return HTML login page
-  const params = new URLSearchParams({
-    client_id: clientId, redirect_uri: redirectUri, scope, state,
-    ...(codeChallenge ? { code_challenge: codeChallenge } : {}),
-    ...(codeChallengeMethod ? { code_challenge_method: codeChallengeMethod } : {}),
-  })
-
-  return c.html(`<!DOCTYPE html>
-<html lang="zh">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>ABDL Space - 登录授权</title>
-  <style>
-    * { margin:0; padding:0; box-sizing:border-box; }
-    body { font-family: -apple-system, system-ui, sans-serif; background:#f0f2f5; display:flex; justify-content:center; align-items:center; min-height:100vh; }
-    .card { background:#fff; border-radius:16px; padding:32px; width:90%; max-width:400px; box-shadow:0 2px 12px rgba(0,0,0,0.1); text-align:center; }
-    .logo { width:64px; height:64px; border-radius:16px; margin-bottom:16px; }
-    h2 { margin-bottom:8px; color:#1a1a1a; }
-    .desc { color:#666; font-size:14px; margin-bottom:24px; }
-    input { width:100%; padding:12px; border:1px solid #ddd; border-radius:8px; margin-bottom:12px; font-size:15px; outline:none; }
-    input:focus { border-color:#196584; }
-    button { width:100%; padding:12px; background:#196584; color:#fff; border:none; border-radius:8px; font-size:15px; font-weight:600; cursor:pointer; }
-    button:hover { background:#145268; }
-    .error { color:#d32f2f; font-size:13px; margin-bottom:12px; display:none; }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <img class="logo" src="https://img.abdl-space.top/file/system/1781439303787_play_store_512.png" alt="ABDL Space">
-    <h2>ABDL Space</h2>
-    <p class="desc">登录以授权 ${client.name || 'Moshidon'} 访问你的账号</p>
-    <div class="error" id="error"></div>
-    <form method="POST" action="/oauth/authorize/login">
-      <input type="hidden" name="params" value="${encodeURIComponent(params.toString())}">
-      <input type="text" name="login" placeholder="用户名或邮箱" required autocomplete="username">
-      <input type="password" name="password" placeholder="密码" required autocomplete="current-password">
-      <button type="submit">登录并授权</button>
-    </form>
-  </div>
-</body>
-</html>`)
+  // Not logged in — return 401 JSON (frontend handles redirect)
+  return c.json({ error: 'unauthorized', message: 'Please log in first' }, 401)
 })
 
 /* ============================================================
