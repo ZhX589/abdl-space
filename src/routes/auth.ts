@@ -389,6 +389,10 @@ auth.post('/register', async (c) => {
 })
 
 // ============================================================
+auth.get('/debug-verify', async (c) => {
+  return c.json({ error: 'debug endpoint removed' })
+})
+
 // POST /api/auth/login — 登录
 // ============================================================
 auth.post('/login', async (c) => {
