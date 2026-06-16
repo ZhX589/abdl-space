@@ -40,6 +40,7 @@ export async function buildInstance(db: D1Database): Promise<MastodonInstance> {
   const userCount = await queryOne<{ cnt: number }>(db, 'SELECT COUNT(*) as cnt FROM users')
 
   return {
+    uri: 'abdl-space.top',
     domain: 'abdl-space.top',
     title: 'ABDL Space',
     version: '4.2.0 (compatible; ABDL Space 1.0)',

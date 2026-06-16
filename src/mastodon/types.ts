@@ -119,6 +119,7 @@ export interface MastodonNotification {
 }
 
 export interface MastodonInstance {
+  uri: string
   domain: string
   title: string
   version: string
