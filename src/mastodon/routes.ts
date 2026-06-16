@@ -1610,7 +1610,87 @@ mastodon.post('/markers', async (c) => {
 mastodon.get('/custom_emojis', async (c) => c.json([]))
 
 // GET /api/v1/announcements
-mastodon.get('/announcements', async (c) => c.json([]))
+mastodon.get('/announcements', async (c) => {
+  const user = await mastodonAuth(c)
+  if (!user) return c.json({ error: 'The access token is invalid' }, 401)
+  const withDismissed = c.req.query('with_dismissed') === 'true'
+  const db = c.env.abdl_space_db
+
+  const rows = await query<Record<string, unknown>>(
+    db,
+    `SELECT a.*,
+      CASE WHEN ars.user_id IS NOT NULL THEN 1 ELSE 0 END as is_read
+     FROM announcements a
+     LEFT JOIN announcement_read_status ars ON a.id = ars.announcement_id AND ars.user_id = ?
+     WHERE a.published = 1
+       AND (a.starts_at IS NULL OR a.starts_at <= datetime('now'))
+       AND (a.ends_at IS NULL OR a.ends_at >= datetime('now'))
+       ${withDismissed ? '' : 'AND ars.user_id IS NULL'}
+     ORDER BY a.published_at DESC`,
+    [user.sub]
+  )
+
+  const results = []
+  for (const row of rows) {
+    const reactions = await query<{ emoji: string; count: number; me: number }>(
+      db,
+      `SELECT ar.emoji, COUNT(*) as count,
+        CASE WHEN EXISTS(SELECT 1 FROM announcement_reactions WHERE announcement_id = ? AND emoji = ar.emoji AND user_id = ?) THEN 1 ELSE 0 END as me
+       FROM announcement_reactions ar WHERE ar.announcement_id = ? GROUP BY ar.emoji`,
+      [row.id, user.sub, row.id]
+    )
+
+    results.push({
+      id: String(row.id),
+      content: row.content,
+      starts_at: row.starts_at,
+      ends_at: row.ends_at,
+      all_day: !!row.all_day,
+      published: !!row.published,
+      published_at: row.published_at,
+      updated_at: row.updated_at,
+      read: !!row.is_read,
+      emojis: [],
+      reactions: reactions.map(r => ({ name: r.emoji, count: r.count, me: !!r.me })),
+      mentions: [],
+      tags: [],
+    })
+  }
+
+  return c.json(results)
+})
+
+// POST /api/v1/announcements — 创建公告（admin only）
+mastodon.post('/announcements', async (c) => {
+  const user = await mastodonAuth(c)
+  if (!user) return c.json({ error: 'The access token is invalid' }, 401)
+  if (user.role !== 'admin') return c.json({ error: 'Forbidden' }, 403)
+
+  let body: { content?: string; starts_at?: string; ends_at?: string; all_day?: boolean }
+  try { body = await c.req.json() } catch { return c.json({ error: 'invalid body' }, 400) }
+  if (!body.content) return c.json({ error: 'content is required' }, 400)
+
+  const result = await run(
+    c.env.abdl_space_db,
+    'INSERT INTO announcements (content, starts_at, ends_at, all_day) VALUES (?, ?, ?, ?)',
+    [body.content, body.starts_at || null, body.ends_at || null, body.all_day ? 1 : 0]
+  )
+
+  return c.json({ id: String(result.meta.last_row_id) }, 201)
+})
+
+// DELETE /api/v1/announcements/:id — 删除公告（admin only）
+mastodon.delete('/announcements/:id', async (c) => {
+  const user = await mastodonAuth(c)
+  if (!user) return c.json({ error: 'The access token is invalid' }, 401)
+  if (user.role !== 'admin') return c.json({ error: 'Forbidden' }, 403)
+
+  const id = parseInt(c.req.param('id'))
+  if (!id) return c.json({ error: 'Invalid id' }, 400)
+
+  await run(c.env.abdl_space_db, 'DELETE FROM announcements WHERE id = ?', [id])
+  return c.json({})
+})
 
 // GET /api/v1/lists
 mastodon.get('/lists', async (c) => c.json([]))

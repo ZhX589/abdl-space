@@ -329,15 +329,17 @@ nbw.get('/mobile-start', async (c) => {
   const { clientId, redirectUri } = getAppNBWConfig(c.env)
   if (!clientId) return c.text('NBW OAuth 未配置', 500)
 
-  const state = crypto.randomUUID()
+  // 签名 state：编码时间戳 + 随机数，回调时验证时效性
+  const stateData = { ts: Date.now(), nonce: crypto.randomUUID() }
+  const signedState = btoa(JSON.stringify(stateData)).replace(/=/g, '')
 
   const url = new URL('https://www.newbabyworld.top/oauth/authorize.php')
   url.searchParams.set('client_id', clientId)
   url.searchParams.set('redirect_uri', redirectUri)
   url.searchParams.set('response_type', 'code')
-  url.searchParams.set('state', state)
+  url.searchParams.set('state', signedState)
 
-  return c.redirect(url.toString(), 302, { 'Set-Cookie': `nbw_state=${state}; Path=/; Max-Age=600; HttpOnly; Secure; SameSite=Lax` })
+  return c.redirect(url.toString(), 302)
 })
 
 /**
@@ -354,13 +356,18 @@ nbw.get('/mobile-callback', async (c) => {
     return c.html(errorPage('授权失败：缺少授权码'), 200, { 'Content-Type': 'text/html; charset=utf-8' })
   }
 
-  // 验证 state 防 CSRF
+  // 验证签名 state（替代 cookie 方案，支持跨域重定向链）
   const state = c.req.query('state')
-  const cookieHeader = c.req.header('Cookie') || ''
-  const stateMatch = cookieHeader.match(/nbw_state=([^;]+)/)
-  const cookieState = stateMatch ? stateMatch[1] : null
-  if (!state || !cookieState || state !== cookieState) {
-    return c.html(errorPage('授权验证失败，请重试'), 200, { 'Content-Type': 'text/html; charset=utf-8' })
+  if (!state) {
+    return c.html(errorPage('授权验证失败：缺少 state'), 200, { 'Content-Type': 'text/html; charset=utf-8' })
+  }
+  try {
+    const data = JSON.parse(atob(state))
+    if (!data.ts || Date.now() - data.ts > 10 * 60 * 1000) {
+      return c.html(errorPage('授权已过期，请重试'), 200, { 'Content-Type': 'text/html; charset=utf-8' })
+    }
+  } catch {
+    return c.html(errorPage('授权验证失败'), 200, { 'Content-Type': 'text/html; charset=utf-8' })
   }
 
   const { clientId, clientSecret, redirectUri } = getAppNBWConfig(c.env)
