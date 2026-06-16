@@ -646,9 +646,14 @@ mastodon.post('/statuses', async (c) => {
         return c.json({ error: `图片 URL 必须来自 ${IMGBED_HOST}，请先通过 /api/v1/media 上传` }, 400)
       }
       try {
-        await run(c.env.abdl_space_db, 'INSERT INTO post_images (post_id, image_url, sort_order) VALUES (?, ?, ?)', [postId, mediaId, sortOrder++])
+        await run(c.env.abdl_space_db, 'INSERT INTO post_images (post_id, image_url, is_nsfw, sort_order) VALUES (?, ?, ?, ?)', [postId, mediaId, hasNsfw, sortOrder++])
       } catch {}
     }
+  }
+
+  // If sensitive, also mark all existing images for this post as nsfw
+  if (hasNsfw) {
+    await run(c.env.abdl_space_db, 'UPDATE post_images SET is_nsfw = 1 WHERE post_id = ?', [postId])
   }
 
   // Fetch the created post with all fields
@@ -1859,6 +1864,11 @@ mastodon.put('/statuses/:id', async (c) => {
   if (updates.length > 0) {
     params.push(resolved.realId)
     await run(c.env.abdl_space_db, `UPDATE posts SET ${updates.join(', ')} WHERE id = ?`, params)
+  }
+
+  // If sensitive changed, propagate to images
+  if (body.sensitive !== undefined) {
+    await run(c.env.abdl_space_db, 'UPDATE post_images SET is_nsfw = ? WHERE post_id = ?', [body.sensitive ? 1 : 0, resolved.realId])
   }
 
   // Handle media updates (replace all images)
