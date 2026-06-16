@@ -360,6 +360,9 @@ export interface Env {
   NBW_CLIENT_ID_MOBILE?: string
   NBW_CLIENT_SECRET_MOBILE?: string
   NBW_REDIRECT_URI_MOBILE?: string
+  NBW_CLIENT_ID_APP?: string
+  NBW_CLIENT_SECRET_APP?: string
+  NBW_REDIRECT_URI_APP?: string
   // 其他
   TURNSTILE_SITE_KEY?: string
   TURNSTILE_SECRET_KEY?: string

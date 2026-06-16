@@ -29,3 +29,12 @@ export function getNBWConfig(c: { req: { header: (name: string) => string | unde
     redirectUri: c.env.NBW_REDIRECT_URI || '',
   }
 }
+
+/** 返回 App 专用的 NBW OAuth 配置（独立于桌面/移动端 Web） */
+export function getAppNBWConfig(env: Env): { clientId: string; clientSecret: string; redirectUri: string } {
+  return {
+    clientId: env.NBW_CLIENT_ID_APP || '',
+    clientSecret: env.NBW_CLIENT_SECRET_APP || '',
+    redirectUri: env.NBW_REDIRECT_URI_APP || 'https://api.abdl-space.top/api/auth/nbw/mobile-callback',
+  }
+}

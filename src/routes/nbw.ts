@@ -5,7 +5,7 @@ import { queryOne, run } from '../lib/db.ts'
 import { signJWT } from '../lib/auth.ts'
 import { hashPassword } from '../lib/auth.ts'
 import { authMiddleware } from '../middleware/auth.ts'
-import { getNBWConfig } from '../lib/nbw.ts'
+import { getNBWConfig, getAppNBWConfig } from '../lib/nbw.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
@@ -319,5 +319,122 @@ nbw.post('/unbind', authMiddleware, async (c) => {
 
   return c.json({ message: '已解绑宝宝新天地账户' })
 })
+
+/**
+ * GET /api/auth/nbw/mobile-start — App NBW 登录入口
+ * 构造 NBW 授权 URL 并 302 重定向
+ * 参数: state（CSRF 防护）
+ */
+nbw.get('/mobile-start', async (c) => {
+  const { clientId, redirectUri } = getAppNBWConfig(c.env)
+  if (!clientId) return c.text('NBW OAuth 未配置', 500)
+
+  const state = crypto.randomUUID()
+  const url = new URL('https://www.newbabyworld.top/oauth/authorize.php')
+  url.searchParams.set('client_id', clientId)
+  url.searchParams.set('redirect_uri', redirectUri)
+  url.searchParams.set('response_type', 'code')
+  url.searchParams.set('state', state)
+
+  return c.redirect(url.toString(), 302)
+})
+
+/**
+ * GET /api/auth/nbw/mobile-callback — App NBW 回调
+ * NBW 授权完成后重定向到此端点
+ * 参数: code, state
+ * 已绑定 → 302 abdl-space://callback?token={jwt}
+ * 未绑定 → 302 错误页 HTML
+ * 注意: 不设置 Set-Cookie（隔离网页端登录状态）
+ */
+nbw.get('/mobile-callback', async (c) => {
+  const code = c.req.query('code')
+  if (!code) {
+    return c.html(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>授权失败</title></head><body style="font-family:system-ui;display:flex;justify-content:center;align-items:center;min-height:100vh;background:#f5f5f5;">
+<div style="background:#fff;border-radius:12px;padding:32px;text-align:center;max-width:400px;box-shadow:0 2px 8px rgba(0,0,0,0.1);">
+<h2 style="color:#d32f2f;">授权失败</h2>
+<p style="color:#666;margin:16px 0;">缺少授权码，请重试。</p>
+</div></body></html>`, 200, { 'Content-Type': 'text/html; charset=utf-8' })
+  }
+
+  const { clientId, clientSecret, redirectUri } = getAppNBWConfig(c.env)
+  if (!clientId || !clientSecret) {
+    return c.html(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>配置错误</title></head><body style="font-family:system-ui;display:flex;justify-content:center;align-items:center;min-height:100vh;background:#f5f5f5;">
+<div style="background:#fff;border-radius:12px;padding:32px;text-align:center;max-width:400px;box-shadow:0 2px 8px rgba(0,0,0,0.1);">
+<h2 style="color:#d32f2f;">服务配置错误</h2>
+<p style="color:#666;margin:16px 0;">NBW OAuth 未配置，请联系管理员。</p>
+</div></body></html>`, 200, { 'Content-Type': 'text/html; charset=utf-8' })
+  }
+
+  const db = c.env.abdl_space_db
+
+  // 1. code → NBW access_token
+  let tokenData: { access_token?: string }
+  try {
+    const tokenRes = await fetch(NBW_TOKEN_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        client_id: clientId, client_secret: clientSecret,
+        grant_type: 'authorization_code', code, redirect_uri: redirectUri,
+      }),
+    })
+    if (!tokenRes.ok) {
+      return c.html(errorPage('NBW 授权码无效，请重试'), 200, { 'Content-Type': 'text/html; charset=utf-8' })
+    }
+    tokenData = await tokenRes.json()
+  } catch {
+    return c.html(errorPage('NBW 服务请求失败，请稍后重试'), 200, { 'Content-Type': 'text/html; charset=utf-8' })
+  }
+
+  if (!tokenData.access_token) {
+    return c.html(errorPage('NBW Token 获取失败'), 200, { 'Content-Type': 'text/html; charset=utf-8' })
+  }
+
+  // 2. access_token → NBW 用户信息
+  let nbwUser: { uid: string; username: string; avatar?: string }
+  try {
+    const userRes = await fetch(`${NBW_USERINFO_URL}?access_token=${tokenData.access_token}`)
+    if (!userRes.ok) {
+      return c.html(errorPage('NBW 用户信息获取失败'), 200, { 'Content-Type': 'text/html; charset=utf-8' })
+    }
+    const userData = await userRes.json()
+    if (userData.errcode !== 0 || !userData.data?.uid) {
+      return c.html(errorPage('NBW 用户信息无效'), 200, { 'Content-Type': 'text/html; charset=utf-8' })
+    }
+    nbwUser = userData.data
+  } catch {
+    return c.html(errorPage('NBW 用户信息请求失败'), 200, { 'Content-Type': 'text/html; charset=utf-8' })
+  }
+
+  // 3. 查 DB 是否已绑定
+  let existing: { id: number; username: string; email: string; avatar: string | null; role: string } | null = null
+  try {
+    existing = await queryOne(
+      db, 'SELECT id, username, email, avatar, role FROM users WHERE CAST(nbw_uid AS TEXT) = ?', [String(nbwUser.uid)]
+    )
+  } catch {}
+
+  if (existing) {
+    // 已绑定 → 签发 JWT → 302 回 App
+    const token = await signJWT({ sub: existing.id, username: existing.username, email: existing.email, role: existing.role }, c.env.JWT_SECRET)
+    return c.redirect(`abdl-space://callback?token=${encodeURIComponent(token)}`, 302)
+  }
+
+  // 4. 未绑定 → 返回错误页
+  return c.html(errorPage('该宝宝新天地账号尚未绑定 ABDL Space 账号，请先在 ABDL Space 网页端完成绑定后再使用此登录方式。'), 200, { 'Content-Type': 'text/html; charset=utf-8' })
+})
+
+function errorPage(message: string): string {
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>登录失败</title></head><body style="font-family:system-ui;display:flex;justify-content:center;align-items:center;min-height:100vh;background:#f5f5f5;margin:0;">
+<div style="background:#fff;border-radius:12px;padding:32px;text-align:center;max-width:400px;box-shadow:0 2px 8px rgba(0,0,0,0.1);">
+<img src="https://img.abdl-space.top/file/system/1781439303787_play_store_512.png" style="width:48px;height:48px;border-radius:8px;margin-bottom:16px;">
+<h2 style="color:#d32f2f;margin-bottom:8px;">登录失败</h2>
+<p style="color:#666;margin:0;">${message}</p>
+</div></body></html>`
+}
 
 export default nbw

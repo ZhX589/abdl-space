@@ -536,8 +536,10 @@ auth.get('/me', authMiddleware, async (c) => {
     return c.json({ error: 'User not found' }, 404)
   }
   // 如果是通过 Authorization header 认证的（切换账户），同时设置 cookie
+  // 但 App 请求不设置 cookie（隔离网页端登录状态）
   const authHeader = c.req.header('Authorization')
-  if (authHeader && authHeader.startsWith('Bearer ')) {
+  const isAppRequest = c.req.header('X-Client-Platform') === 'mobile'
+  if (authHeader && authHeader.startsWith('Bearer ') && !isAppRequest) {
     c.header('Set-Cookie', `token=${authHeader.slice(7)}; ${tokenCookieOptions}`)
   }
   return c.json({
