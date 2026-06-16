@@ -63,7 +63,7 @@ export async function buildInstance(db: D1Database): Promise<MastodonInstance> {
       },
       polls: { max_options: 4, max_characters_per_option: 50, min_expiration: 300, max_expiration: 2629746 },
     },
-    registrations: { enabled: true, approval_required: false, message: null },
+    registrations: true,
     contact: { email: null, account: null },
     rules: [],
     api_versions: { mastodon: 1 },

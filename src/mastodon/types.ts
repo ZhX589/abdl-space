@@ -142,7 +142,7 @@ export interface MastodonInstance {
     }
     polls: { max_options: number; max_characters_per_option: number; min_expiration: number; max_expiration: number }
   }
-  registrations: { enabled: boolean; approval_required: boolean; message: string | null }
+  registrations: boolean
   contact: { email: string | null; account: MastodonAccount | null }
   rules: { id: string; text: string; hint: string }[]
   api_versions?: { [key: string]: number }
