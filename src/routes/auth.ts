@@ -575,4 +575,179 @@ auth.post('/logout', async (c) => {
   return c.json({ message: '已登出' })
 })
 
+// ============================================================
+// QR 扫码登录
+// ============================================================
+
+const QR_SESSION_TTL = 300 // 5 分钟过期
+
+/**
+ * POST /api/auth/qr/create — 创建 QR 登录会话
+ * 桌面端调用，生成一个唯一的 sessionId 用于轮询
+ */
+auth.post('/qr/create', async (c) => {
+  const db = c.env.abdl_space_db
+  const ip = c.req.header('CF-Connecting-IP') || 'unknown'
+  const userAgent = c.req.header('User-Agent') || ''
+
+  const sessionId = crypto.randomUUID()
+  const expiresAt = Math.floor(Date.now() / 1000) + QR_SESSION_TTL
+
+  await run(db,
+    `INSERT INTO qr_login_sessions (id, status, created_at, expires_at, ip, user_agent)
+     VALUES (?, 'pending', unixepoch(), ?, ?, ?)`,
+    [sessionId, expiresAt, ip, userAgent]
+  )
+
+  return c.json({
+    sessionId,
+    qrUrl: `https://abdl-space.top/qr-login?session=${sessionId}`,
+    expiresIn: QR_SESSION_TTL
+  })
+})
+
+/**
+ * GET /api/auth/qr/poll/:sessionId — 桌面端轮询状态
+ * 返回: pending | scanned | done (含token) | expired
+ */
+auth.get('/qr/poll/:sessionId', async (c) => {
+  const db = c.env.abdl_space_db
+  const sessionId = c.req.param('sessionId')
+
+  if (!sessionId) return c.json({ error: 'sessionId required' }, 400)
+
+  const session = await queryOne<{ id: string; status: string; user_id: number; expires_at: number }>(
+    db, 'SELECT id, status, user_id, expires_at FROM qr_login_sessions WHERE id = ?', [sessionId]
+  )
+
+  if (!session) return c.json({ status: 'expired' })
+
+  // 检查是否过期
+  if (session.expires_at < Math.floor(Date.now() / 1000)) {
+    await run(db, "UPDATE qr_login_sessions SET status = 'expired' WHERE id = ?", [sessionId])
+    return c.json({ status: 'expired' })
+  }
+
+  if (session.status === 'pending') {
+    return c.json({ status: 'pending' })
+  }
+
+  if (session.status === 'scanned') {
+    // 查询扫码用户信息
+    const user = await queryOne<{ id: number; username: string }>(
+      db, 'SELECT id, username FROM users WHERE id = ?', [session.user_id]
+    )
+    return c.json({ status: 'scanned', username: user?.username || '未知用户' })
+  }
+
+  if (session.status === 'authorized') {
+    // 已授权，签发 token
+    const user = await queryOne<{ id: number; email: string; username: string; avatar: string; role: string }>(
+      db, 'SELECT id, email, username, avatar, role FROM users WHERE id = ?', [session.user_id]
+    )
+    if (!user) return c.json({ status: 'expired' })
+
+    const token = await signJWT(
+      { sub: user.id, username: user.username, email: user.email, role: user.role },
+      c.env.JWT_SECRET
+    )
+
+    return c.json({
+      status: 'done',
+      token,
+      user: { id: user.id, email: user.email, username: user.username, avatar: user.avatar ?? DEFAULT_AVATAR, role: user.role }
+    })
+  }
+
+  return c.json({ status: session.status })
+})
+
+/**
+ * POST /api/auth/qr/scan — 手机扫码
+ * 手机端扫描二维码后调用，通知桌面端"已扫码"
+ * Body: { sessionId: string }
+ * 需要登录（通过 cookie 或 Authorization header）
+ */
+auth.post('/qr/scan', authMiddleware, async (c) => {
+  const db = c.env.abdl_space_db
+  const user = c.get('user')
+  const body = await c.req.json<{ sessionId: string }>()
+
+  if (!body.sessionId) return c.json({ error: 'sessionId required' }, 400)
+
+  const session = await queryOne<{ id: string; status: string; expires_at: number }>(
+    db, 'SELECT id, status, expires_at FROM qr_login_sessions WHERE id = ?', [body.sessionId]
+  )
+
+  if (!session) return c.json({ error: '会话不存在' }, 404)
+  if (session.status !== 'pending') return c.json({ error: '会话已过期或已使用' }, 400)
+  if (session.expires_at < Math.floor(Date.now() / 1000)) {
+    return c.json({ error: '会话已过期' }, 400)
+  }
+
+  // 更新状态为 scanned，绑定用户
+  await run(db,
+    "UPDATE qr_login_sessions SET status = 'scanned', user_id = ? WHERE id = ?",
+    [user.sub, body.sessionId]
+  )
+
+  return c.json({ success: true })
+})
+
+/**
+ * POST /api/auth/qr/authorize — 手机授权
+ * 手机端点击"授权"按钮后调用，完成登录流程
+ * Body: { sessionId: string }
+ * 需要登录
+ */
+auth.post('/qr/authorize', authMiddleware, async (c) => {
+  const db = c.env.abdl_space_db
+  const user = c.get('user')
+  const body = await c.req.json<{ sessionId: string }>()
+
+  if (!body.sessionId) return c.json({ error: 'sessionId required' }, 400)
+
+  const session = await queryOne<{ id: string; status: string; user_id: number; expires_at: number }>(
+    db, 'SELECT id, status, user_id, expires_at FROM qr_login_sessions WHERE id = ?', [body.sessionId]
+  )
+
+  if (!session) return c.json({ error: '会话不存在' }, 404)
+  if (session.status !== 'scanned') return c.json({ error: '会话状态异常' }, 400)
+  if (session.user_id !== user.sub) return c.json({ error: '只能授权自己的会话' }, 403)
+  if (session.expires_at < Math.floor(Date.now() / 1000)) {
+    return c.json({ error: '会话已过期' }, 400)
+  }
+
+  // 更新状态为 authorized
+  await run(db,
+    "UPDATE qr_login_sessions SET status = 'authorized' WHERE id = ?",
+    [body.sessionId]
+  )
+
+  // 签发 token 返回给手机端
+  const fullUser = await queryOne<{ id: number; email: string; username: string; avatar: string; role: string }>(
+    db, 'SELECT id, email, username, avatar, role FROM users WHERE id = ?', [user.sub]
+  )
+  if (!fullUser) return c.json({ error: '用户不存在' }, 404)
+
+  const token = await signJWT(
+    { sub: fullUser.id, username: fullUser.username, email: fullUser.email, role: fullUser.role },
+    c.env.JWT_SECRET
+  )
+
+  return c.json({
+    token,
+    user: { id: fullUser.id, email: fullUser.email, username: fullUser.username, avatar: fullUser.avatar ?? DEFAULT_AVATAR, role: fullUser.role }
+  })
+})
+
+/**
+ * GET /api/auth/qr/cleanup — 清理过期会话（可由定时任务调用）
+ */
+auth.get('/qr/cleanup', async (c) => {
+  const db = c.env.abdl_space_db
+  const result = await run(db, "DELETE FROM qr_login_sessions WHERE expires_at < unixepoch()")
+  return c.json({ cleaned: result.meta?.changes ?? 0 })
+})
+
 export default auth
