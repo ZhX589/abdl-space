@@ -750,4 +750,17 @@ auth.get('/qr/cleanup', async (c) => {
   return c.json({ cleaned: result.meta?.changes ?? 0 })
 })
 
+/**
+ * POST /api/auth/qr/set-cookie — 用 token 设置登录 cookie
+ * Body: { token: string }
+ * 用于扫码登录后设置 cookie，使刷新页面后仍保持登录状态
+ */
+auth.post('/qr/set-cookie', async (c) => {
+  const body = await c.req.json<{ token: string }>()
+  if (!body.token) return c.json({ error: 'token required' }, 400)
+
+  c.header('Set-Cookie', `token=${body.token}; ${tokenCookieOptions}`)
+  return c.json({ success: true })
+})
+
 export default auth
