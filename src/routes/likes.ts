@@ -152,8 +152,8 @@ likes.post('/', authMiddleware, async (c) => {
     // 发通知
     await run(
       c.env.abdl_space_db,
-      'INSERT INTO notifications (user_id, type, message, related_id) VALUES (?, ?, ?, ?)',
-      [contentAuthorId, 'like', `${user.username} 赞了你的${target_type === 'post' ? '帖子' : '评论'}`, notificationRelatedId]
+      'INSERT INTO notifications (user_id, type, message, related_id, actor_id) VALUES (?, ?, ?, ?, ?)',
+      [contentAuthorId, 'like', `${user.username} 赞了你的${target_type === 'post' ? '帖子' : '评论'}`, notificationRelatedId, user.sub]
     )
 
     // 点赞奖励：经验 +3，积分 +3（每日上限 30 经验 = 10 个赞）

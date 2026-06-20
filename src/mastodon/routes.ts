@@ -942,8 +942,8 @@ mastodon.post('/statuses/:id/reblog', async (c) => {
   const origPost = await queryOne<{ user_id: number }>(c.env.abdl_space_db, 'SELECT user_id FROM posts WHERE id = ?', [realId])
   if (origPost && origPost.user_id !== user.sub) {
     await run(c.env.abdl_space_db,
-      'INSERT INTO notifications (user_id, type, message, related_id) VALUES (?, ?, ?, ?)',
-      [origPost.user_id, 'repost', `${user.sub} 转发了你的帖子`, realId]
+      'INSERT INTO notifications (user_id, type, message, related_id, actor_id) VALUES (?, ?, ?, ?, ?)',
+      [origPost.user_id, 'repost', `${user.sub} 转发了你的帖子`, realId, user.sub]
     )
   }
 
@@ -1215,13 +1215,13 @@ mastodon.get('/notifications', async (c) => {
   )
 
   // Batch load user accounts and posts to avoid N+1 queries
-  const userIds = [...new Set(rows.filter(r => r.type === 'follow').map(r => r.related_id as number).filter(Boolean))]
+  const actorIds = [...new Set(rows.map(r => r.actor_id as number).filter(Boolean))]
   const postIds = [...new Set(rows.filter(r => r.type !== 'follow' && r.related_id).map(r => r.related_id as number).filter(Boolean))]
 
   const userMap = new Map<number, { id: number; username: string; avatar: string | null; role: string; created_at: string }>()
-  if (userIds.length > 0) {
+  if (actorIds.length > 0) {
     const users = await query<{ id: number; username: string; avatar: string | null; role: string; created_at: string }>(
-      c.env.abdl_space_db, `SELECT id, username, avatar, role, created_at FROM users WHERE id IN (${userIds.map(() => '?').join(',')})`, userIds
+      c.env.abdl_space_db, `SELECT id, username, avatar, role, created_at FROM users WHERE id IN (${actorIds.map(() => '?').join(',')})`, actorIds
     )
     for (const u of users) userMap.set(u.id, u)
   }
@@ -1247,17 +1247,31 @@ mastodon.get('/notifications', async (c) => {
       const src = userMap.get(r.related_id as number)
       if (src) sourceAccount = toAccount(src)
     } else if (r.type === 'like' || r.type === 'comment' || r.type === 'reply' || r.type === 'mention' || r.type === 'repost') {
+      // Use actor_id to get the person who performed the action
+      const actorId = r.actor_id as number
+      if (actorId) {
+        const actor = userMap.get(actorId)
+        if (actor) sourceAccount = toAccount(actor)
+      }
+      // Fallback: derive from post author if actor_id missing (legacy data)
+      if (!sourceAccount) {
+        const post = postMap.get(r.related_id as number)
+        if (post) {
+          sourceAccount = toAccount({
+            id: post.user_id as number, username: post.username as string, avatar: post.avatar as string | null,
+            role: post.role as string, bio: post.bio as string | null, created_at: post.user_created_at as string,
+          })
+        }
+      }
+      // Build status from post
       const post = postMap.get(r.related_id as number)
       if (post) {
-        sourceAccount = toAccount({
-          id: post.user_id as number, username: post.username as string, avatar: post.avatar as string | null,
-          role: post.role as string, bio: post.bio as string | null, created_at: post.user_created_at as string,
-        })
+        const postAuthor = userMap.get(post.user_id as number) || { id: post.user_id as number, username: post.username as string, avatar: post.avatar as string | null, role: post.role as string, bio: post.bio as string | null, created_at: post.user_created_at as string }
         status = toStatus({
           id: post.id as number, user_id: post.user_id as number, content: post.content as string,
           like_count: post.like_count as number, comment_count: post.comment_count as number,
           created_at: post.created_at as string,
-        }, sourceAccount)
+        }, toAccount(postAuthor))
       }
     }
 

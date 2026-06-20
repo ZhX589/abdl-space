@@ -475,8 +475,8 @@ posts.post('/', authMiddleware, async (c) => {
     if (origPost && origPost.user_id !== user.sub) {
       await run(
         c.env.abdl_space_db,
-        'INSERT INTO notifications (user_id, type, message, related_id) VALUES (?, ?, ?, ?)',
-        [origPost.user_id, 'repost', `${user.username} 转发了你的帖子`, repost_id]
+        'INSERT INTO notifications (user_id, type, message, related_id, actor_id) VALUES (?, ?, ?, ?, ?)',
+        [origPost.user_id, 'repost', `${user.username} 转发了你的帖子`, repost_id, user.sub]
       )
     }
   }
@@ -745,8 +745,8 @@ posts.post('/:id/comments', authMiddleware, async (c) => {
   if (post.user_id !== user.sub) {
     await run(
       c.env.abdl_space_db,
-      'INSERT INTO notifications (user_id, type, message, related_id) VALUES (?, ?, ?, ?)',
-      [post.user_id, 'comment', `${user.username} 评论了你的帖子`, postId]
+      'INSERT INTO notifications (user_id, type, message, related_id, actor_id) VALUES (?, ?, ?, ?, ?)',
+      [post.user_id, 'comment', `${user.username} 评论了你的帖子`, postId, user.sub]
     )
   }
 
@@ -760,8 +760,8 @@ posts.post('/:id/comments', authMiddleware, async (c) => {
     if (parentComment && parentComment.user_id !== user.sub && parentComment.user_id !== post.user_id) {
       await run(
         c.env.abdl_space_db,
-        'INSERT INTO notifications (user_id, type, message, related_id) VALUES (?, ?, ?, ?)',
-        [parentComment.user_id, 'reply', `${user.username} 回复了你的评论`, postId]
+        'INSERT INTO notifications (user_id, type, message, related_id, actor_id) VALUES (?, ?, ?, ?, ?)',
+        [parentComment.user_id, 'reply', `${user.username} 回复了你的评论`, postId, user.sub]
       )
     }
   }

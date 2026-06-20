@@ -49,8 +49,8 @@ follows.post('/:userId', authMiddleware, async (c) => {
   )
   await run(
     c.env.abdl_space_db,
-    'INSERT INTO notifications (user_id, type, message, related_id) VALUES (?, ?, ?, ?)',
-    [targetId, 'follow', `${sender?.username || '用户'} 关注了你`, user.sub]
+    'INSERT INTO notifications (user_id, type, message, related_id, actor_id) VALUES (?, ?, ?, ?, ?)',
+    [targetId, 'follow', `${sender?.username || '用户'} 关注了你`, user.sub, user.sub]
   )
 
   // 检查是否互相关注（成为好友）
