@@ -10,6 +10,7 @@ import { Hono } from 'hono'
 import type { Env, JWTPayload } from '../types/index.ts'
 import { query, queryOne, run } from '../lib/db.ts'
 import { toAccount, toStatus, toStatusFromComment, toNotification, toISOString } from './converter.ts'
+import { generateCardsForPosts } from './linkpreview.ts'
 import type { MastodonNotification, MastodonAccount, MastodonStatus } from './types.ts'
 import { mastodonAuth, buildInstance, resolveStatus, parseMastoIdForCursor } from './shared.ts'
 
@@ -221,7 +222,7 @@ mastodon.get('/accounts/verify_credentials', async (c) => {
 
   const dbUser = await queryOne<Record<string, unknown>>(
     c.env.abdl_space_db,
-    'SELECT id, username, avatar, role, bio, created_at FROM users WHERE id = ?',
+    'SELECT id, username, avatar, header, role, bio, created_at FROM users WHERE id = ?',
     [user.sub]
   )
   if (!dbUser) return c.json({ error: 'User not found' }, 404)
@@ -325,6 +326,34 @@ mastodon.patch('/accounts/update_credentials', async (c) => {
     }
   }
 
+  if (body.header !== undefined) {
+    if (body.header instanceof File) {
+      const uploadForm = new FormData()
+      uploadForm.append('file', body.header)
+      let res = await fetch(`${IMGBED_HOST}/upload?returnFormat=full`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${c.env.IMGBED_UPLOAD_KEY}` },
+        body: uploadForm,
+      })
+      if (!res.ok && c.env.IMGBED_UPLOAD_KEY) {
+        const uploadForm2 = new FormData()
+        uploadForm2.append('file', body.header)
+        res = await fetch(`${IMGBED_HOST}/upload?returnFormat=full&authCode=${c.env.IMGBED_UPLOAD_KEY}`, {
+          method: 'POST',
+          body: uploadForm2,
+        })
+      }
+      if (res.ok) {
+        const data = await res.json() as { src: string }[]
+        const url = data[0]?.src
+        if (url) { updates.push('header = ?'); params.push(url) }
+      }
+    } else {
+      updates.push('header = ?')
+      params.push(String(body.header))
+    }
+  }
+
   if (updates.length > 0) {
     params.push(user.sub)
     await run(c.env.abdl_space_db, `UPDATE users SET ${updates.join(', ')} WHERE id = ?`, params)
@@ -333,7 +362,7 @@ mastodon.patch('/accounts/update_credentials', async (c) => {
   // Return updated account
   const dbUser = await queryOne<Record<string, unknown>>(
     c.env.abdl_space_db,
-    'SELECT id, username, avatar, role, bio, created_at FROM users WHERE id = ?',
+    'SELECT id, username, avatar, header, role, bio, created_at FROM users WHERE id = ?',
     [user.sub]
   )
   if (!dbUser) return c.json({ error: 'User not found' }, 404)
@@ -342,6 +371,7 @@ mastodon.patch('/accounts/update_credentials', async (c) => {
     id: dbUser.id as number,
     username: dbUser.username as string,
     avatar: dbUser.avatar as string | null,
+    header: dbUser.header as string | null,
     role: dbUser.role as string,
     bio: dbUser.bio as string | null,
     created_at: dbUser.created_at as string,
@@ -357,7 +387,7 @@ mastodon.get('/accounts/:id', async (c) => {
 
   const dbUser = await queryOne<Record<string, unknown>>(
     c.env.abdl_space_db,
-    'SELECT id, username, avatar, role, bio, created_at FROM users WHERE id = ?',
+    'SELECT id, username, avatar, header, role, bio, created_at FROM users WHERE id = ?',
     [id]
   )
   if (!dbUser) return c.json({ error: 'Record not found' }, 404)
@@ -398,8 +428,8 @@ mastodon.get('/accounts/:id/statuses', async (c) => {
   const maxId = c.req.query('max_id')
   const sinceId = c.req.query('since_id')
 
-  const dbUser = await queryOne<{ id: number; username: string; avatar: string | null; role: string; bio: string | null; created_at: string }>(
-    c.env.abdl_space_db, 'SELECT id, username, avatar, role, bio, created_at FROM users WHERE id = ?', [id]
+  const dbUser = await queryOne<{ id: number; username: string; avatar: string | null; header: string | null; role: string; bio: string | null; created_at: string }>(
+    c.env.abdl_space_db, 'SELECT id, username, avatar, header, role, bio, created_at FROM users WHERE id = ?', [id]
   )
   if (!dbUser) return c.json({ error: 'Record not found' }, 404)
 
@@ -441,6 +471,7 @@ mastodon.get('/accounts/:id/statuses', async (c) => {
     const pollMap = await loadPolls(c.env.abdl_space_db, pollIds)
     const repostIds = posts.filter(r => r.repost_id).map(r => r.repost_id as number)
     const reblogMap = await loadReblogTargets(c.env.abdl_space_db, repostIds)
+    const cardMap = await generateCardsForPosts(posts.map(r => ({ id: r.id as number, content: r.content as string, diaper_id: r.diaper_id as number | null })))
     return posts.map(r => toStatus({
       id: r.id as number,
       user_id: r.user_id as number,
@@ -459,6 +490,7 @@ mastodon.get('/accounts/:id/statuses', async (c) => {
       in_reply_to_id: r.in_reply_to_id as number | null,
       in_reply_to_account_id: r.in_reply_to_account_id as number | null,
       poll: r.poll_id ? pollMap.get(r.poll_id as number) ?? null : null,
+      linkCard: cardMap.get(r.id as number) ?? null,
     }, account, { favourited: likedSet.has(r.id as number), reblog: r.repost_id ? reblogMap.get(r.repost_id as number) : undefined }))
   })()
 
@@ -778,6 +810,10 @@ mastodon.get('/statuses/:id', async (c) => {
   // Load poll if exists
   const poll = post.poll_id ? await loadPoll(c.env.abdl_space_db, post.poll_id as number, user?.sub) : null
 
+  // Generate link preview card for this post
+  const { generateCardForContent } = await import('./linkpreview.ts')
+  const linkCard = await generateCardForContent(post.content as string)
+
   return c.json(toStatus({
     id: post.id as number,
     user_id: post.user_id as number,
@@ -797,6 +833,7 @@ mastodon.get('/statuses/:id', async (c) => {
     in_reply_to_id: post.in_reply_to_id as number | null,
     in_reply_to_account_id: post.in_reply_to_account_id as number | null,
     poll: poll as any,
+    linkCard,
   }, account, { reblog }))
 })
 
@@ -1044,6 +1081,7 @@ mastodon.get('/timelines/home', async (c) => {
     const pollMap = await loadPolls(c.env.abdl_space_db, pollIds)
     const repostIds = posts.filter(r => r.repost_id).map(r => r.repost_id as number)
     const reblogMap = await loadReblogTargets(c.env.abdl_space_db, repostIds)
+    const cardMap = await generateCardsForPosts(posts.map(r => ({ id: r.id as number, content: r.content as string, diaper_id: r.diaper_id as number | null })))
     return posts.map(r => {
       const account = toAccount({
         id: r.user_id as number, username: r.username as string, avatar: r.avatar as string | null,
@@ -1061,6 +1099,7 @@ mastodon.get('/timelines/home', async (c) => {
         in_reply_to_id: r.in_reply_to_id as number | null,
         in_reply_to_account_id: r.in_reply_to_account_id as number | null,
         poll: r.poll_id ? pollMap.get(r.poll_id as number) ?? null : null,
+        linkCard: cardMap.get(r.id as number) ?? null,
       }, account, { favourited: likedSet.has(r.id as number), reblog: r.repost_id ? reblogMap.get(r.repost_id as number) : undefined })
     })
   })()
@@ -1115,6 +1154,7 @@ mastodon.get('/timelines/public', async (c) => {
     const pollMap = await loadPolls(c.env.abdl_space_db, pollIds)
     const repostIds = posts.filter(r => r.repost_id).map(r => r.repost_id as number)
     const reblogMap = await loadReblogTargets(c.env.abdl_space_db, repostIds)
+    const cardMap = await generateCardsForPosts(posts.map(r => ({ id: r.id as number, content: r.content as string, diaper_id: r.diaper_id as number | null })))
     return posts.map(r => {
       const account = toAccount({
         id: r.user_id as number, username: r.username as string, avatar: r.avatar as string | null,
@@ -1132,6 +1172,7 @@ mastodon.get('/timelines/public', async (c) => {
         in_reply_to_id: r.in_reply_to_id as number | null,
         in_reply_to_account_id: r.in_reply_to_account_id as number | null,
         poll: r.poll_id ? pollMap.get(r.poll_id as number) ?? null : null,
+        linkCard: cardMap.get(r.id as number) ?? null,
       }, account, { favourited: likedSet.has(r.id as number), reblog: r.repost_id ? reblogMap.get(r.repost_id as number) : undefined })
     })
   })()
@@ -1166,6 +1207,7 @@ mastodon.get('/timelines/tag/:hashtag', async (c) => {
     const pollMap = await loadPolls(c.env.abdl_space_db, pollIds)
     const repostIds = posts.filter(r => r.repost_id).map(r => r.repost_id as number)
     const reblogMap = await loadReblogTargets(c.env.abdl_space_db, repostIds)
+    const cardMap = await generateCardsForPosts(posts.map(r => ({ id: r.id as number, content: r.content as string, diaper_id: r.diaper_id as number | null })))
     return posts.map(r => {
       const account = toAccount({
         id: r.user_id as number, username: r.username as string, avatar: r.avatar as string | null,
@@ -1183,6 +1225,7 @@ mastodon.get('/timelines/tag/:hashtag', async (c) => {
         in_reply_to_id: r.in_reply_to_id as number | null,
         in_reply_to_account_id: r.in_reply_to_account_id as number | null,
         poll: r.poll_id ? pollMap.get(r.poll_id as number) ?? null : null,
+        linkCard: cardMap.get(r.id as number) ?? null,
       }, account, { reblog: r.repost_id ? reblogMap.get(r.repost_id as number) : undefined })
     })
   })()
@@ -1221,7 +1264,7 @@ mastodon.get('/notifications', async (c) => {
   const userMap = new Map<number, { id: number; username: string; avatar: string | null; role: string; created_at: string }>()
   if (actorIds.length > 0) {
     const users = await query<{ id: number; username: string; avatar: string | null; role: string; created_at: string }>(
-      c.env.abdl_space_db, `SELECT id, username, avatar, role, created_at FROM users WHERE id IN (${actorIds.map(() => '?').join(',')})`, actorIds
+      c.env.abdl_space_db, `SELECT id, username, avatar, header, role, created_at FROM users WHERE id IN (${actorIds.map(() => '?').join(',')})`, actorIds
     )
     for (const u of users) userMap.set(u.id, u)
   }
@@ -1359,7 +1402,7 @@ mastodon.get('/search', async (c) => {
 
   const [users, posts] = await Promise.all([
     query<{ id: number; username: string; avatar: string | null; role: string; bio: string | null; created_at: string }>(
-      c.env.abdl_space_db, 'SELECT id, username, avatar, role, bio, created_at FROM users WHERE username LIKE ? LIMIT 10', [likePattern]
+      c.env.abdl_space_db, 'SELECT id, username, avatar, header, role, bio, created_at FROM users WHERE username LIKE ? LIMIT 10', [likePattern]
     ),
     query<Record<string, unknown>>(
       c.env.abdl_space_db,
@@ -1750,7 +1793,7 @@ mastodon.get('/notifications/:id', async (c) => {
 
   if (r.type === 'follow') {
     const src = await queryOne<{ id: number; username: string; avatar: string | null; role: string; created_at: string }>(
-      c.env.abdl_space_db, 'SELECT id, username, avatar, role, created_at FROM users WHERE id = ?', [r.related_id]
+      c.env.abdl_space_db, 'SELECT id, username, avatar, header, role, created_at FROM users WHERE id = ?', [r.related_id]
     )
     if (src) sourceAccount = toAccount(src)
   } else {

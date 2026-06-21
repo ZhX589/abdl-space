@@ -348,6 +348,7 @@ export async function issueToken(
     expires_in: OAUTH_CONFIG.ACCESS_TTL_S,
     refresh_token: refreshToken,
     scope: scopes,
+    created_at: now,
   }
 }
 

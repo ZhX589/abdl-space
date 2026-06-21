@@ -22,6 +22,7 @@ export function toAccount(user: {
   id: number
   username: string
   avatar: string | null
+  header?: string | null
   role: string
   bio?: string | null
   created_at: string
@@ -32,6 +33,7 @@ export function toAccount(user: {
   last_status_at?: string | null
 }): MastodonAccount {
   const avatar = user.avatar || DEFAULT_AVATAR
+  const header = user.header || DEFAULT_HEADER
   return {
     id: String(user.id),
     username: user.username,
@@ -47,8 +49,8 @@ export function toAccount(user: {
     uri: `https://${INSTANCE_DOMAIN}/users/${user.username}`,
     avatar,
     avatar_static: avatar,
-    header: DEFAULT_HEADER,
-    header_static: DEFAULT_HEADER,
+    header,
+    header_static: header,
     followers_count: opts?.followers_count ?? 0,
     following_count: opts?.following_count ?? 0,
     statuses_count: opts?.statuses_count ?? 0,
@@ -86,6 +88,7 @@ export function toStatus(post: {
   in_reply_to_account_id?: string | number | null
   edited_at?: string | null
   poll?: MastodonPoll | null
+  linkCard?: MastodonPreviewCard | null
 }, account: MastodonAccount, opts?: {
   favourited?: boolean
   reblogged?: boolean
@@ -121,7 +124,7 @@ export function toStatus(post: {
     mentions: [],
     tags: extractTags(post.content),
     emojis: [],
-    card: post.diaper_id ? {
+    card: post.linkCard ?? (post.diaper_id ? {
       url: `https://abdl-space.top/diaper/${post.diaper_id}`,
       title: `纸尿裤 #${post.diaper_id}`,
       description: '查看纸尿裤详情',
@@ -136,7 +139,7 @@ export function toStatus(post: {
       image: null,
       embed_url: '',
       blurhash: null,
-    } : null,
+    } : null),
     poll: post.poll ?? null,
     edited_at: post.edited_at || null,
   }
