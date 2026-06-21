@@ -24,19 +24,39 @@ function cleanupCache() {
   }
 }
 
+// Common TLDs whitelist (same as frontend RichContent.jsx)
+const TLDS = /^(com|net|org|cn|top|xyz|io|dev|app|co|me|cc|info|edu|gov|mil|club|online|site|tech|store|blog|work|live|video|social|design|shop|icu|ltd|fun|space|host|press|link|click|buzz|pro|vip|wang|ren)$/i
+
 /** Extract the first URL from HTML or plain text content */
 export function extractFirstUrl(content: string): string | null {
   // Strip HTML tags first
   const text = content.replace(/<[^>]*>/g, ' ')
-  // Match URLs
-  const match = text.match(/https?:\/\/[^\s<>"')\]]+/)
+
+  // 1. Try explicit http(s) URLs — exclude CJK to avoid "https://site.com/中文帖子内容" 误匹配
+  let match = text.match(/https?:\/\/[^\s<>"'`,;)}\]\u3000-\u303f\uff00-\uffef\u4e00-\u9fff]+/)
   if (match) {
-    let url = match[0].replace(/[.,;:!?)]+$/, '') // Strip trailing punctuation
-    try {
-      new URL(url)
-      return url
-    } catch { return null }
+    let url = match[0].replace(/[.,;:!?)]+$/, '')
+    try { new URL(url); return url } catch {}
   }
+
+  // 2. Try bare domain with www prefix — exclude CJK from path
+  match = text.match(/(?:^|\s)(www\.[a-zA-Z0-9][-a-zA-Z0-9]*(?:\.[a-zA-Z0-9][-a-zA-Z0-9]*)+(?:\/[^\s<>"'`,;)}\]\u3000-\u303f\uff00-\uffef\u4e00-\u9fff]*)?)/)
+  if (match) {
+    let url = 'https://' + match[1].replace(/[.,;:!?)]+$/, '')
+    try { new URL(url); return url } catch {}
+  }
+
+  // 3. Bare domain with TLD whitelist — exclude CJK from path
+  const delim = '(?:^|[\\s.,;:!?([{\"])'
+  const domainBody = '(?:[a-zA-Z0-9][a-zA-Z0-9-]*\\.){0,2}[a-zA-Z0-9][a-zA-Z0-9-]+\\.(' + TLDS.source.replace(/\^|\$/g, '') + ')(?:/[^\\s<>\'"`,;)}\\]\u3000-\u303f\uff00-\uffef\u4e00-\u9fff]*)?'
+  const domainRe = new RegExp(delim + '(' + domainBody + ')', 'i')
+  match = text.match(domainRe)
+  if (match) {
+    const domain = match[match.length - 1]
+    let url = 'https://' + domain
+    try { new URL(url); return url } catch {}
+  }
+
   return null
 }
 

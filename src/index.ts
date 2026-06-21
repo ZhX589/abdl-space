@@ -53,6 +53,30 @@ type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 const app = new Hono<AppType>()
 
 app.use('*', async (c, next) => {
+  // Handle /@username routes before CORS
+  if (c.req.method === 'GET' && c.req.path.startsWith('/@') && c.req.path.length > 2) {
+    const username = decodeURIComponent(c.req.path.substring(2))
+    if (username) {
+      const user = await queryOne<{ id: number }>(
+        c.env.abdl_space_db, 'SELECT id FROM users WHERE username = ?', [username]
+      )
+      if (user) {
+        const accept = c.req.header('Accept') || ''
+        if (accept.includes('application/activity+json') || accept.includes('application/ld+json')) {
+          return c.json({
+            '@context': 'https://www.w3.org/ns/activitystreams',
+            type: 'Person',
+            id: `https://abdl-space.top/users/${username}`,
+            preferredUsername: username,
+            inbox: `https://abdl-space.top/users/${username}/inbox`,
+            outbox: `https://abdl-space.top/users/${username}/outbox`,
+          })
+        }
+        return c.redirect(`https://abdl-space.top/profile/${user.id}`, 302)
+      }
+      return c.text('User not found', 404)
+    }
+  }
   // /api/v1/* 路由由各自处理 CORS（允许所有来源）
   if (c.req.path.startsWith('/api/v1/') || c.req.path.startsWith('/v1/')) return next()
   return corsWithOrigin(c, next)
@@ -97,6 +121,91 @@ async function corsWithOrigin(c: Context<AppType>, next: Next) {
 app.get('/', (c) => c.json({ message: 'ABDL Space API' }))
 
 app.get('/api/health', (c) => c.json({ status: 'ok', timestamp: new Date().toISOString() }))
+
+// ============================================================
+// GET /@username — User profile page redirect
+// ============================================================
+app.get(/^\/@(.+)$/, async (c) => {
+  const rawPath = c.req.path
+  if (!rawPath.startsWith('/@') || rawPath.length <= 2) return c.text('Not found', 404)
+  const username = decodeURIComponent(rawPath.substring(2))
+  if (!username) return c.text('Not found', 404)
+
+  const user = await queryOne<{ id: number }>(
+    c.env.abdl_space_db, 'SELECT id FROM users WHERE username = ?', [username]
+  )
+  if (!user) return c.text('User not found', 404)
+
+  const accept = c.req.header('Accept') || ''
+  if (accept.includes('application/activity+json') || accept.includes('application/ld+json')) {
+    return c.json({
+      '@context': 'https://www.w3.org/ns/activitystreams',
+      type: 'Person',
+      id: `https://abdl-space.top/users/${username}`,
+      preferredUsername: username,
+      inbox: `https://abdl-space.top/users/${username}/inbox`,
+      outbox: `https://abdl-space.top/users/${username}/outbox`,
+    })
+  }
+  return c.redirect(`https://abdl-space.top/profile/${user.id}`, 302)
+})
+
+// ============================================================
+// GET /.well-known/webfinger — Federation discovery
+// ============================================================
+app.get('/.well-known/webfinger', async (c) => {
+  const resource = c.req.query('resource')
+  if (!resource) return c.json({ error: 'resource parameter required' }, 400)
+
+  const match = resource.match(/^acct:([^@]+)@(.+)$/)
+  if (!match) return c.json({ error: 'Invalid resource format' }, 400)
+
+  const [, username, domain] = match
+  if (domain !== 'abdl-space.top') return c.json({ error: 'Unknown domain' }, 404)
+
+  const user = await queryOne<{ id: number; username: string }>(
+    c.env.abdl_space_db, 'SELECT id, username FROM users WHERE username = ?', [username]
+  )
+  if (!user) return c.json({ error: 'User not found' }, 404)
+
+  return c.json({
+    subject: `acct:${username}@abdl-space.top`,
+    aliases: [`https://abdl-space.top/@${username}`, `https://abdl-space.top/users/${username}`],
+    links: [
+      { rel: 'self', type: 'application/activity+json', href: `https://abdl-space.top/users/${username}` },
+      { rel: 'http://webfinger.net/rel/profile-page', type: 'text/html', href: `https://abdl-space.top/@${username}` },
+    ],
+  })
+})
+
+// ============================================================
+// GET /@username — handled in CORS middleware above
+
+// ============================================================
+// GET /nodeinfo/2.1
+// ============================================================
+app.get('/nodeinfo/2.1', async (c) => {
+  const userCount = await queryOne<{ cnt: number }>(c.env.abdl_space_db, 'SELECT COUNT(*) as cnt FROM users')
+  const postCount = await queryOne<{ cnt: number }>(c.env.abdl_space_db, 'SELECT COUNT(*) as cnt FROM posts')
+  return c.json({
+    version: '2.1',
+    software: { name: 'abdl-space', version: '1.0.0', repository: 'https://github.com/ZYongX09/ABDL-Space-V2', homepage: 'https://abdl-space.top' },
+    protocols: ['activitypub'],
+    services: { outbound: [], inbound: [] },
+    usage: { users: { total: userCount?.cnt ?? 0 }, posts: { total: postCount?.cnt ?? 0 } },
+    openRegistrations: true,
+  })
+})
+
+// ============================================================
+// GET /.well-known/host-meta
+// ============================================================
+app.get('/.well-known/host-meta', (c) => {
+  return c.text(
+    '<?xml version="1.0" encoding="UTF-8"?>\n<XRD xmlns="http://docs.oasis-open.org/ns/xri/xrd-1.0">\n  <Link rel="lrdd" type="application/xrd+xml" template="https://abdl-space.top/.well-known/webfinger?resource={uri}"/>\n</XRD>',
+    200, { 'Content-Type': 'application/xrd+xml' }
+  )
+})
 
 app.get('/api/health/db', async (c) => {
   try {
