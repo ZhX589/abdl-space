@@ -33,7 +33,7 @@ async function deleteImageFromImgbed(env: Env, imageUrl: string) {
 async function safeGetCommentImages(db: D1Database, commentId: number): Promise<{image_url: string; is_nsfw: number}[]> {
   try {
     const result = await db.prepare(
-      'SELECT image_url, is_nsfw FROM comment_images WHERE comment_id = ? ORDER BY sort_order'
+      'SELECT image_url, is_nsfw, alt_text FROM comment_images WHERE comment_id = ? ORDER BY sort_order'
     ).bind(commentId).all();
     return result.results as { image_url: string; is_nsfw: number }[];
   } catch {
@@ -43,7 +43,7 @@ async function safeGetCommentImages(db: D1Database, commentId: number): Promise<
 
 async function safeGetImages(db: D1Database, postId: number): Promise<{image_url: string; is_nsfw: number}[]> {
   try {
-    const result = await db.prepare('SELECT image_url, is_nsfw FROM post_images WHERE post_id = ? ORDER BY sort_order').bind(postId).all();
+    const result = await db.prepare('SELECT image_url, is_nsfw, alt_text FROM post_images WHERE post_id = ? ORDER BY sort_order').bind(postId).all();
     return (result.results || []) as {image_url: string; is_nsfw: number}[];
   } catch {
     return [];
@@ -155,7 +155,7 @@ posts.get('/', async (c) => {
   const allImages = postIds.length > 0
     ? await query<{ post_id: number; image_url: string; is_nsfw: number }>(
         c.env.abdl_space_db,
-        `SELECT post_id, image_url, is_nsfw FROM post_images WHERE post_id IN (${postIds.map(() => '?').join(',')}) ORDER BY sort_order`,
+        `SELECT post_id, image_url, is_nsfw, alt_text FROM post_images WHERE post_id IN (${postIds.map(() => '?').join(',')}) ORDER BY sort_order`,
         postIds
       )
     : []
@@ -176,7 +176,7 @@ posts.get('/', async (c) => {
     )
     const repostImages = await query<{ post_id: number; image_url: string; is_nsfw: number }>(
       c.env.abdl_space_db,
-      `SELECT post_id, image_url, is_nsfw FROM post_images WHERE post_id IN (${repostIds.map(() => '?').join(',')}) ORDER BY sort_order`,
+      `SELECT post_id, image_url, is_nsfw, alt_text FROM post_images WHERE post_id IN (${repostIds.map(() => '?').join(',')}) ORDER BY sort_order`,
       repostIds
     )
     const repostImagesMap = new Map<number, { image_url: string; is_nsfw: number }[]>()
@@ -333,7 +333,7 @@ posts.get('/:id', async (c) => {
   const allCmtImages = commentIds.length > 0
     ? await query<{ comment_id: number; image_url: string; is_nsfw: number }>(
         c.env.abdl_space_db,
-        `SELECT comment_id, image_url, is_nsfw FROM comment_images WHERE comment_id IN (${commentIds.map(() => '?').join(',')}) ORDER BY sort_order`,
+        `SELECT comment_id, image_url, is_nsfw, alt_text FROM comment_images WHERE comment_id IN (${commentIds.map(() => '?').join(',')}) ORDER BY sort_order`,
         commentIds
       )
     : []

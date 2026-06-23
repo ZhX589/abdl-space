@@ -70,27 +70,22 @@ export function extractFirstUrl(content: string): string | null {
 
 /** Fetch and parse Open Graph metadata from a URL */
 async function fetchOgMetadata(url: string): Promise<MastodonPreviewCard | null> {
-  const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
-
   try {
     const res = await fetch(url, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; ABDL-Space/1.0; +https://abdl-space.top)',
-        'Accept': 'text/html',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
       },
       redirect: 'follow',
-      signal: controller.signal,
     })
-    clearTimeout(timeout)
 
     if (!res.ok) return null
 
     const contentType = res.headers.get('content-type') || ''
-    if (!contentType.includes('text/html')) return null
+    if (!contentType.includes('text/html') && !contentType.includes('text/plain')) return null
 
     const html = await res.text()
-    // Limit parse size
     const limitedHtml = html.substring(0, MAX_CONTENT_LENGTH)
 
     // Extract meta tags
@@ -196,7 +191,6 @@ async function fetchOgMetadata(url: string): Promise<MastodonPreviewCard | null>
       blurhash: null,
     }
   } catch {
-    clearTimeout(timeout)
     return null
   }
 }

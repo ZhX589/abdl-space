@@ -86,7 +86,7 @@ async function loadPolls(db: D1Database, pollIds: number[]): Promise<Map<number,
 async function loadPostImages(db: D1Database, postIds: number[]): Promise<Map<number, { image_url: string; is_nsfw: number }[]>> {
   if (postIds.length === 0) return new Map()
   const allImages = await query<{ post_id: number; image_url: string; is_nsfw: number }>(
-    db, `SELECT post_id, image_url, is_nsfw FROM post_images WHERE post_id IN (${postIds.map(() => '?').join(',')}) ORDER BY sort_order`, postIds
+    db, `SELECT post_id, image_url, is_nsfw, alt_text FROM post_images WHERE post_id IN (${postIds.map(() => '?').join(',')}) ORDER BY sort_order`, postIds
   )
   const map = new Map<number, { image_url: string; is_nsfw: number }[]>()
   for (const img of allImages) {
@@ -122,7 +122,7 @@ async function loadCommentImages(db: D1Database, commentIds: number[]): Promise<
   if (commentIds.length === 0) return new Map()
   try {
     const allImages = await query<{ comment_id: number; image_url: string; is_nsfw: number }>(
-      db, `SELECT comment_id, image_url, is_nsfw FROM comment_images WHERE comment_id IN (${commentIds.map(() => '?').join(',')}) ORDER BY sort_order`, commentIds
+      db, `SELECT comment_id, image_url, is_nsfw, alt_text FROM comment_images WHERE comment_id IN (${commentIds.map(() => '?').join(',')}) ORDER BY sort_order`, commentIds
     )
     const map = new Map<number, { image_url: string; is_nsfw: number }[]>()
     for (const img of allImages) {
@@ -737,7 +737,7 @@ mastodon.post('/statuses', async (c) => {
 
   // Load images
   const images = await query<{ image_url: string; is_nsfw: number }>(
-    c.env.abdl_space_db, 'SELECT image_url, is_nsfw FROM post_images WHERE post_id = ? ORDER BY sort_order', [postId]
+    c.env.abdl_space_db, 'SELECT image_url, is_nsfw, alt_text FROM post_images WHERE post_id = ? ORDER BY sort_order', [postId]
   )
 
   // Load poll if exists
@@ -805,7 +805,7 @@ mastodon.get('/statuses/:id', async (c) => {
   if (!post) return c.json({ error: 'Record not found' }, 404)
 
   const images = await query<{ image_url: string; is_nsfw: number }>(
-    c.env.abdl_space_db, 'SELECT image_url, is_nsfw FROM post_images WHERE post_id = ? ORDER BY sort_order', [resolved.realId]
+    c.env.abdl_space_db, 'SELECT image_url, is_nsfw, alt_text FROM post_images WHERE post_id = ? ORDER BY sort_order', [resolved.realId]
   )
 
   const account = toAccount({
@@ -977,7 +977,7 @@ mastodon.post('/statuses/:id/reblog', async (c) => {
        FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`, [realId])
     if (!post) return c.json({ error: 'Record not found' }, 404)
     const account = toAccount({ id: post.user_id as number, username: post.username as string, avatar: post.avatar as string | null, role: post.role as string, bio: post.bio as string | null, created_at: post.user_created_at as string })
-    const images = await query<{ image_url: string; is_nsfw: number }>(c.env.abdl_space_db, 'SELECT image_url, is_nsfw FROM post_images WHERE post_id = ? ORDER BY sort_order', [realId])
+    const images = await query<{ image_url: string; is_nsfw: number }>(c.env.abdl_space_db, 'SELECT image_url, is_nsfw, alt_text FROM post_images WHERE post_id = ? ORDER BY sort_order', [realId])
     return c.json(toStatus({ id: post.id as number, user_id: post.user_id as number, content: post.content as string, like_count: post.like_count as number, comment_count: post.comment_count as number, reblogs_count: post.reblogs_count as number, created_at: post.created_at as string, images }, account, { reblogged: true }))
   }
 
@@ -1005,7 +1005,7 @@ mastodon.post('/statuses/:id/reblog', async (c) => {
      FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`, [realId])
   if (!post) return c.json({ error: 'Record not found' }, 404)
   const account = toAccount({ id: post.user_id as number, username: post.username as string, avatar: post.avatar as string | null, role: post.role as string, bio: post.bio as string | null, created_at: post.user_created_at as string })
-  const images = await query<{ image_url: string; is_nsfw: number }>(c.env.abdl_space_db, 'SELECT image_url, is_nsfw FROM post_images WHERE post_id = ? ORDER BY sort_order', [realId])
+  const images = await query<{ image_url: string; is_nsfw: number }>(c.env.abdl_space_db, 'SELECT image_url, is_nsfw, alt_text FROM post_images WHERE post_id = ? ORDER BY sort_order', [realId])
   return c.json(toStatus({ id: post.id as number, user_id: post.user_id as number, content: post.content as string, like_count: post.like_count as number, comment_count: post.comment_count as number, reblogs_count: post.reblogs_count as number, created_at: post.created_at as string, images }, account, { reblogged: true }))
 })
 
@@ -1043,7 +1043,7 @@ mastodon.post('/statuses/:id/unreblog', async (c) => {
      FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`, [realId])
   if (!post) return c.json({ error: 'Record not found' }, 404)
   const account = toAccount({ id: post.user_id as number, username: post.username as string, avatar: post.avatar as string | null, role: post.role as string, bio: post.bio as string | null, created_at: post.user_created_at as string })
-  const images = await query<{ image_url: string; is_nsfw: number }>(c.env.abdl_space_db, 'SELECT image_url, is_nsfw FROM post_images WHERE post_id = ? ORDER BY sort_order', [realId])
+  const images = await query<{ image_url: string; is_nsfw: number }>(c.env.abdl_space_db, 'SELECT image_url, is_nsfw, alt_text FROM post_images WHERE post_id = ? ORDER BY sort_order', [realId])
   return c.json(toStatus({ id: post.id as number, user_id: post.user_id as number, content: post.content as string, like_count: post.like_count as number, comment_count: post.comment_count as number, reblogs_count: post.reblogs_count as number, created_at: post.created_at as string, images }, account, { reblogged: false }))
 })
 
@@ -1360,6 +1360,7 @@ mastodon.post('/media', async (c) => {
   if (!file || typeof file === 'string') {
     return c.json({ error: 'file is required' }, 422)
   }
+  const description = formData.get('description') || null
 
   // Forward to img.abdl-space.top
   const IMGBED_URL = IMGBED_HOST
@@ -1397,7 +1398,7 @@ mastodon.post('/media', async (c) => {
     remote_url: null,
     text_url: null,
     meta: {},
-    description: null,
+    description: description || null,
     blurhash: null,
   })
 })
@@ -2205,7 +2206,7 @@ mastodon.put('/statuses/:id', async (c) => {
   if (!updatedPost) return c.json({ error: 'Failed to update status' }, 500)
 
   const images = await query<{ image_url: string; is_nsfw: number }>(
-    c.env.abdl_space_db, 'SELECT image_url, is_nsfw FROM post_images WHERE post_id = ? ORDER BY sort_order', [resolved.realId]
+    c.env.abdl_space_db, 'SELECT image_url, is_nsfw, alt_text FROM post_images WHERE post_id = ? ORDER BY sort_order', [resolved.realId]
   )
   const poll = updatedPost.poll_id ? await loadPoll(c.env.abdl_space_db, updatedPost.poll_id as number) : null
 

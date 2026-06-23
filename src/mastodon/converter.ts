@@ -120,7 +120,7 @@ export function toStatus(post: {
     reblog: opts?.reblog ?? null,
     application: { name: 'ABDL Space', website: `https://${INSTANCE_DOMAIN}` },
     account,
-    media_attachments: images.map((img, i) => toMediaAttachment(i, img.image_url)),
+    media_attachments: images.map((img, i) => toMediaAttachment(i, img.image_url, img.alt_text)),
     mentions: [],
     tags: extractTags(post.content),
     emojis: [],
@@ -182,7 +182,7 @@ export function toStatusFromComment(comment: {
     reblog: null,
     application: { name: 'ABDL Space', website: `https://${INSTANCE_DOMAIN}` },
     account,
-    media_attachments: images.map((img, i) => toMediaAttachment(i, img.image_url)),
+    media_attachments: images.map((img, i) => toMediaAttachment(i, img.image_url, img.alt_text)),
     mentions: [],
     tags: [],
     emojis: [],
@@ -192,7 +192,7 @@ export function toStatusFromComment(comment: {
 }
 
 /** Image URL → Mastodon MediaAttachment */
-function toMediaAttachment(id: number, url: string): MastodonMediaAttachment {
+function toMediaAttachment(id: number, url: string, description?: string | null): MastodonMediaAttachment {
   return {
     id: String(id),
     type: 'image',
@@ -201,7 +201,7 @@ function toMediaAttachment(id: number, url: string): MastodonMediaAttachment {
     remote_url: null,
     text_url: null,
     meta: {},
-    description: null,
+    description: description || null,
     blurhash: null,
   }
 }
