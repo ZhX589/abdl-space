@@ -113,6 +113,44 @@ async function fetchOgMetadata(url: string): Promise<MastodonPreviewCard | null>
     const description = getMeta('og:description') || getMeta('twitter:description') || getMeta('description') || ''
     const image = getMeta('og:image') || getMeta('twitter:image') || null
     const type = getMeta('og:type') || 'link'
+    const width = parseInt(getMeta('og:video:width') || getMeta('og:image:width') || '0') || 0
+    const height = parseInt(getMeta('og:video:height') || getMeta('og:image:height') || '0') || 0
+    const videoUrl = getMeta('og:video') || getMeta('og:video:url') || getMeta('twitter:player') || null
+
+    // Generate embed_url for common video platforms
+    let embedUrl = ''
+    const mappedType = mapOgType(type)
+    try {
+      const u = new URL(url)
+      const host = u.hostname.replace(/^www\./, '')
+      if (host.includes('youtube.com') || host === 'youtu.be') {
+        const videoId = host === 'youtu.be' ? u.pathname.slice(1) : u.searchParams.get('v')
+        if (videoId) embedUrl = `https://www.youtube.com/embed/${videoId}`
+      } else if (host.includes('bilibili.com') || host === 'b23.tv') {
+        // BV号: /video/BV1xx411c7mD
+        const bvMatch = u.pathname.match(/\/(BV[\w]+)/)
+        if (bvMatch) embedUrl = `https://player.bilibili.com/player.html?bvid=${bvMatch[1]}`
+        // AV号: /video/av12345 或 /av12345
+        else {
+          const avMatch = u.pathname.match(/\/av(\d+)/)
+          if (avMatch) embedUrl = `https://player.bilibili.com/player.html?aid=${avMatch[1]}`
+        }
+        // 番剧: /bangumi/play/ep12345
+        if (!embedUrl) {
+          const epMatch = u.pathname.match(/\/bangumi\/play\/(ep\d+)/)
+          if (epMatch) embedUrl = `https://player.bilibili.com/player.html?bvid=${epMatch[1]}`
+        }
+        // 短链 b23.tv 需要跟随后续跳转获取真实URL，这里无法同步解析
+        // 但OG标签中通常已有video信息，由上方OG提取处理
+      } else if (host.includes('vimeo.com')) {
+        const vimeoId = u.pathname.match(/\/(\d+)/)
+        if (vimeoId) embedUrl = `https://player.vimeo.com/video/${vimeoId[1]}`
+      }
+    } catch {}
+
+    // If no explicit OG type but we detected a video URL, set type to video
+    let finalType = mappedType
+    if (finalType === 'link' && embedUrl) finalType = 'video'
 
     // Try to get site name
     const siteName = getMeta('og:site_name') || ''
@@ -145,16 +183,16 @@ async function fetchOgMetadata(url: string): Promise<MastodonPreviewCard | null>
       url,
       title: title.substring(0, 256),
       description: description.substring(0, 512),
-      type: mapOgType(type),
+      type: finalType,
       author_name: '',
       author_url: '',
       provider_name: providerName.substring(0, 100),
       provider_url: providerUrl,
       html: '',
-      width: 0,
-      height: 0,
+      width: width || 0,
+      height: height || 0,
       image: absoluteImage,
-      embed_url: '',
+      embed_url: embedUrl,
       blurhash: null,
     }
   } catch {
@@ -172,9 +210,9 @@ function mapOgType(ogType: string): string {
     'video.movie': 'video',
     'video.episode': 'video',
     'video.tv_show': 'video',
-    'music.song': 'music',
-    'music.album': 'music',
-    'music.playlist': 'music',
+    'music.song': 'video',
+    'music.album': 'video',
+    'music.playlist': 'video',
     'profile': 'link',
   }
   return typeMap[ogType] || 'link'
