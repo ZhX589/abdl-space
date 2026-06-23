@@ -249,42 +249,15 @@ function extractTags(content: string): { name: string; url: string }[] {
 
 /** Format plain text content to HTML */
 function formatContent(text: string): string {
-  // First escape HTML, then apply transformations
+  // Just escape HTML entities — URL linking is handled by the frontend RichContent component
+  // Also convert #hashtags and @mentions
   let html = escapeHtml(text)
-  // Convert URLs to links only if content doesn't already contain <a> tags
-  // (web frontend may have already linked URLs before storing)
-  if (!html.includes('&lt;a ') && !html.includes('<a ')) {
-    // 1. Explicit http(s) URLs — exclude CJK to avoid matching trailing Chinese text
-    html = html.replace(/(https?:\/\/[^\s<>\u3000-\u303f\uff00-\uffef\u4e00-\u9fff]+)/g, '<a href="$1" rel="nofollow noopener noreferrer" target="_blank">$1</a>')
-    // 2. Bare domains with www — exclude CJK from path
-    html = html.replace(/(?:^|\s)(www\.[a-zA-Z0-9][-a-zA-Z0-9]*(?:\.[a-zA-Z0-9][-a-zA-Z0-9]*)+(?:\/[^\s<\u3000-\u303f\uff00-\uffef\u4e00-\u9fff]*)?)/g, (m, domain) => {
-      const clean = domain.replace(/[.,;:!?]+$/, '')
-      const prefix = m[0] === ' ' || m[0] === '\n' ? m[0] : ''
-      return `${prefix}<a href="https://${clean}" rel="nofollow noopener noreferrer" target="_blank">${clean}</a>`
-    })
-    // 3. Bare domains with TLD whitelist, supports subdomains — exclude CJK from path
-    const URL_TLDS = 'com|net|org|cn|top|xyz|io|dev|app|co|me|cc|info|edu|gov|club|online|site|tech|store|blog|work|live|video|social|design|shop|icu|ltd|fun|space|host|press|link|buzz|pro|vip|wang|ren'
-    const bareDomainRe = new RegExp(`(?:^|[\\s.,;:!?([{\\"\\u4e00-\\u9fff])((?:[a-zA-Z0-9][a-zA-Z0-9-]*\\.){0,2}[a-zA-Z0-9][a-zA-Z0-9-]+\\.(?:${URL_TLDS})(?:/[^\\s<\\u3000-\\u303f\\uff00-\\uffef\\u4e00-\\u9fff]*)?)`, 'g')
-    html = html.replace(bareDomainRe, (m, domain) => {
-      const clean = domain.replace(/[.,;:!?]+$/, '')
-      const prefix = m.slice(0, m.length - domain.length)
-      return `${prefix}<a href="https://${clean}" rel="nofollow noopener noreferrer" target="_blank">${clean}</a>`
-    })
-  }
-  // 3. Bare domains with TLD whitelist, supports subdomains — exclude CJK from path
-  const URL_TLDS = 'com|net|org|cn|top|xyz|io|dev|app|co|me|cc|info|edu|gov|club|online|site|tech|store|blog|work|live|video|social|design|shop|icu|ltd|fun|space|host|press|link|buzz|pro|vip|wang|ren'
-  const bareDomainRe = new RegExp(`(?:^|[\\s.,;:!?([{\\"\\u4e00-\\u9fff])((?:[a-zA-Z0-9][a-zA-Z0-9-]*\\.){0,2}[a-zA-Z0-9][a-zA-Z0-9-]+\\.(?:${URL_TLDS})(?:/[^\\s<\\u3000-\\u303f\\uff00-\\uffef\\u4e00-\\u9fff]*)?)`, 'g')
-  html = html.replace(bareDomainRe, (m, domain) => {
-    const clean = domain.replace(/[.,;:!?]+$/, '')
-    const prefix = m.slice(0, m.length - domain.length)
-    // Avoid double-linking: skip if already inside an <a> tag
-    return `${prefix}<a href="https://${clean}" rel="nofollow noopener noreferrer" target="_blank">${clean}</a>`
-  })
   // Convert #hashtags (only word chars + CJK, not HTML entities)
   html = html.replace(/(^|[^\/\w])#([\w\u4e00-\u9fa5]+)/g, `$1<a href="https://${INSTANCE_DOMAIN}/tags/$2" class="mention hashtag" rel="tag">#<span>$2</span></a>`)
   // Convert @mentions (only word chars + CJK)
   html = html.replace(/@([\w\u4e00-\u9fa5]+)/g, `<span class="h-card"><a href="https://${INSTANCE_DOMAIN}/@$1" class="u-url mention" rel="nofollow noopener noreferrer" target="_blank">@<span>$1</span></a></span>`)
-  // Convert newlines to paragraphs
+
+  // Wrap in paragraphs
   const paragraphs = html.split(/\n\n+/)
   if (paragraphs.length > 1) {
     return paragraphs.map(p => `<p>${p.replace(/\n/g, '<br />')}</p>`).join('')

@@ -140,6 +140,18 @@ mastodon.get('/instance', async (c) => {
   return c.json(await buildInstance(c.env.abdl_space_db))
 })
 
+// DEBUG: check raw content of a post
+mastodon.get('/debug/post/:id', async (c) => {
+  const id = parseInt(c.req.param('id'))
+  const post = await queryOne<{ id: number; content: string }>(
+    c.env.abdl_space_db, 'SELECT id, content FROM posts WHERE id = ?', [id]
+  )
+  if (!post) return c.json({ error: 'not found' }, 404)
+  const hasATags = post.content.includes('<a ')
+  const hasEscapedATags = post.content.includes('&lt;a')
+  return c.json({ id: post.id, raw_content: post.content.substring(0, 500), hasATags, hasEscapedATags, contentLength: post.content.length })
+})
+
 // ============================================================
 // POST /api/v1/apps — Register OAuth application
 // ============================================================
