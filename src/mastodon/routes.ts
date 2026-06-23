@@ -1480,10 +1480,94 @@ mastodon.get('/favourites', async (c) => {
 })
 
 // ============================================================
-// GET /api/v1/bookmarks (not implemented, return empty)
+// GET /api/v1/bookmarks
 // ============================================================
 mastodon.get('/bookmarks', async (c) => {
+  const user = await mastodonAuth(c)
+  if (!user) return c.json({ error: 'The access token is invalid' }, 401)
+  // Bookmarks are stored as likes on a special "bookmark" target type
+  // For now return empty until we implement full bookmark storage
   return c.json([])
+})
+
+// ============================================================
+// POST /api/v1/statuses/:id/bookmark
+// ============================================================
+mastodon.post('/statuses/:id/bookmark', async (c) => {
+  const user = await mastodonAuth(c)
+  if (!user) return c.json({ error: 'The access token is invalid' }, 401)
+  const rawId = c.req.param('id')
+  const resolved = await resolveStatus(c.env.abdl_space_db, rawId)
+  if (!resolved) return c.json({ error: 'Record not found' }, 404)
+
+  // Store bookmark as a special like with target_type 'bookmark'
+  const existing = await queryOne<{ id: number }>(
+    c.env.abdl_space_db,
+    'SELECT id FROM likes WHERE user_id = ? AND target_type = ? AND target_id = ?',
+    [user.sub, 'bookmark', resolved.realId]
+  )
+  if (!existing) {
+    await run(c.env.abdl_space_db,
+      'INSERT INTO likes (user_id, target_type, target_id) VALUES (?, ?, ?)',
+      [user.sub, 'bookmark', resolved.realId]
+    )
+  }
+
+  const post = await queryOne<Record<string, unknown>>(
+    c.env.abdl_space_db,
+    `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
+     (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
+     (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
+     (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count
+     FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`,
+    [resolved.realId]
+  )
+  if (!post) return c.json({ error: 'Record not found' }, 404)
+
+  const account = toAccount({ id: post.user_id as number, username: post.username as string, avatar: post.avatar as string | null, header: post.header as string | null, role: post.role as string, bio: post.bio as string | null, created_at: post.user_created_at as string })
+  const images = await loadPostImages(c.env.abdl_space_db, [resolved.realId])
+  return c.json(toStatus({
+    id: post.id as number, user_id: post.user_id as number, content: post.content as string,
+    has_nsfw: !!post.has_nsfw, like_count: post.like_count as number, comment_count: post.comment_count as number,
+    reblogs_count: post.reblogs_count as number, created_at: post.created_at as string,
+    images: images.get(resolved.realId), bookmarked: true,
+  }, account, { bookmarked: true }))
+})
+
+// ============================================================
+// POST /api/v1/statuses/:id/unbookmark
+// ============================================================
+mastodon.post('/statuses/:id/unbookmark', async (c) => {
+  const user = await mastodonAuth(c)
+  if (!user) return c.json({ error: 'The access token is invalid' }, 401)
+  const rawId = c.req.param('id')
+  const resolved = await resolveStatus(c.env.abdl_space_db, rawId)
+  if (!resolved) return c.json({ error: 'Record not found' }, 404)
+
+  await run(c.env.abdl_space_db,
+    'DELETE FROM likes WHERE user_id = ? AND target_type = ? AND target_id = ?',
+    [user.sub, 'bookmark', resolved.realId]
+  )
+
+  const post = await queryOne<Record<string, unknown>>(
+    c.env.abdl_space_db,
+    `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
+     (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
+     (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
+     (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count
+     FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`,
+    [resolved.realId]
+  )
+  if (!post) return c.json({ error: 'Record not found' }, 404)
+
+  const account = toAccount({ id: post.user_id as number, username: post.username as string, avatar: post.avatar as string | null, header: post.header as string | null, role: post.role as string, bio: post.bio as string | null, created_at: post.user_created_at as string })
+  const images = await loadPostImages(c.env.abdl_space_db, [resolved.realId])
+  return c.json(toStatus({
+    id: post.id as number, user_id: post.user_id as number, content: post.content as string,
+    has_nsfw: !!post.has_nsfw, like_count: post.like_count as number, comment_count: post.comment_count as number,
+    reblogs_count: post.reblogs_count as number, created_at: post.created_at as string,
+    images: images.get(resolved.realId), bookmarked: false,
+  }, account, { bookmarked: false }))
 })
 
 // ============================================================
@@ -1939,7 +2023,21 @@ mastodon.get('/trends/links', async (c) => c.json([]))
 mastodon.get('/trends/tags', async (c) => c.json([]))
 
 // GET /api/v1/instance/extended_description
-mastodon.get('/instance/extended_description', async (c) => c.json({ content: '' }))
+mastodon.get('/instance/extended_description', async (c) => {
+  return c.json({
+    content: '<p>欢迎来到 <strong>ABDL Space</strong> —— 纸尿裤评价与社区平台。</p>\n' +
+      '<p>在这里您可以：</p>\n' +
+      '<ul>\n' +
+      '<li>浏览和评分各类纸尿裤产品</li>\n' +
+      '<li>分享您的使用感受和评价</li>\n' +
+      '<li>参与社区广场讨论</li>\n' +
+      '<li>获取AI智能推荐</li>\n' +
+      '</ul>\n' +
+      '<p>请遵守社区规则，文明交流。</p>\n' +
+      '<p>更多信息请访问 <a href="https://abdl-space.top/about">官方网站</a>。</p>',
+    updated_at: new Date().toISOString(),
+  })
+})
 
 // GET /api/v1/preferences
 mastodon.get('/preferences', async (c) => {

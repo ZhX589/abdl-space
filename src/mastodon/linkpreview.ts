@@ -29,7 +29,14 @@ const TLDS = /^(com|net|org|cn|top|xyz|io|dev|app|co|me|cc|info|edu|gov|mil|club
 
 /** Extract the first URL from HTML or plain text content */
 export function extractFirstUrl(content: string): string | null {
-  // Strip HTML tags first
+  // 0. Before stripping HTML, extract URLs from <a href="..."> tags first
+  const hrefMatch = content.match(/href="(https?:\/\/[^"]+)"/i)
+  if (hrefMatch) {
+    let url = hrefMatch[1].replace(/[.,;:!?)]+$/, '')
+    try { new URL(url); return url } catch {}
+  }
+
+  // Strip HTML tags
   const text = content.replace(/<[^>]*>/g, ' ')
 
   // 1. Try explicit http(s) URLs — exclude CJK to avoid "https://site.com/中文帖子内容" 误匹配
@@ -47,13 +54,14 @@ export function extractFirstUrl(content: string): string | null {
   }
 
   // 3. Bare domain with TLD whitelist — exclude CJK from path
-  const delim = '(?:^|[\\s.,;:!?([{\"])'
-  const domainBody = '(?:[a-zA-Z0-9][a-zA-Z0-9-]*\\.){0,2}[a-zA-Z0-9][a-zA-Z0-9-]+\\.(' + TLDS.source.replace(/\^|\$/g, '') + ')(?:/[^\\s<>\'"`,;)}\\]\u3000-\u303f\uff00-\uffef\u4e00-\u9fff]*)?'
+  const delim = '(?:^|[\\s.,;:!?([{\u201c"])'
+  const domainBody = '(?:[a-zA-Z0-9][a-zA-Z0-9-]*\\.){0,2}([a-zA-Z0-9][a-zA-Z0-9-]+\\.(?:' + TLDS.source.replace(/\^|\$/g, '') + '))(?:/[^\\s<>\\u2018\\u2019`,;)}\\]\\u3000-\\u303f\\uff00-\\uffef\\u4e00-\\u9fff]*)?'
   const domainRe = new RegExp(delim + '(' + domainBody + ')', 'i')
   match = text.match(domainRe)
   if (match) {
-    const domain = match[match.length - 1]
-    let url = 'https://' + domain
+    // match[1] is the full domain (e.g., "baidu.com"), match[2] is just the domain part before TLD
+    const fullDomain = match[1]
+    let url = 'https://' + fullDomain
     try { new URL(url); return url } catch {}
   }
 
@@ -81,24 +89,9 @@ async function fetchOgMetadata(url: string): Promise<MastodonPreviewCard | null>
     const contentType = res.headers.get('content-type') || ''
     if (!contentType.includes('text/html')) return null
 
-    // Only read the first part of the page for OG tags
-    const reader = res.body?.getReader()
-    if (!reader) return null
-
-    const chunks: Uint8Array[] = []
-    let totalSize = 0
-    while (totalSize < MAX_CONTENT_LENGTH) {
-      const { done, value } = await reader.read()
-      if (done) break
-      chunks.push(value)
-      totalSize += value.length
-      // Stop if we've found enough to parse OG tags
-      const partial = new TextDecoder().decode(value)
-      if (partial.includes('</head>') || partial.includes('<meta ')) break
-    }
-    reader.cancel()
-
-    const html = new TextDecoder().decode(new Uint8Array(chunks.flatMap(c => [...c])))
+    const html = await res.text()
+    // Limit parse size
+    const limitedHtml = html.substring(0, MAX_CONTENT_LENGTH)
 
     // Extract meta tags
     const getMeta = (property: string): string | null => {
@@ -110,7 +103,7 @@ async function fetchOgMetadata(url: string): Promise<MastodonPreviewCard | null>
         new RegExp(`<meta[^>]*content="([^"]*)"[^>]*name="${property}"`, 'i'),
       ]
       for (const p of patterns) {
-        const m = html.match(p)
+        const m = limitedHtml.match(p)
         if (m) return m[1]
       }
       return null
@@ -202,7 +195,36 @@ export async function getLinkPreviewCard(url: string): Promise<MastodonPreviewCa
     return null
   }
 
-  const card = await fetchOgMetadata(url)
+  // Try to fetch OG metadata, but always return at least a basic card
+  let card: MastodonPreviewCard | null = null
+  try {
+    card = await fetchOgMetadata(url)
+  } catch {}
+
+  // If OG fetch failed or returned null, create a basic card from URL info
+  if (!card) {
+    try {
+      const u = new URL(url)
+      const providerName = u.hostname.replace(/^www\./, '')
+      card = {
+        url,
+        title: providerName,
+        description: url,
+        type: 'link',
+        author_name: '',
+        author_url: '',
+        provider_name: providerName,
+        provider_url: u.origin,
+        html: '',
+        width: 0,
+        height: 0,
+        image: null,
+        embed_url: '',
+        blurhash: null,
+      }
+    } catch {}
+  }
+
   cardCache.set(url, { card, expiresAt: Date.now() + CACHE_TTL_MS })
   return card
 }
