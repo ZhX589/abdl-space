@@ -249,12 +249,23 @@ function extractTags(content: string): { name: string; url: string }[] {
 
 /** Format plain text content to HTML */
 function formatContent(text: string): string {
-  // Just escape HTML entities — URL linking is handled by the frontend RichContent component
-  // Also convert #hashtags and @mentions
   let html = escapeHtml(text)
-  // Convert #hashtags (only word chars + CJK, not HTML entities)
+
+  // Convert explicit http(s) URLs to clickable links
+  // Use negative lookbehind to avoid matching URLs already inside href="..."
+  html = html.replace(/(?<!href=")(https?:\/\/[^\s<>]+)/g, '<a href="$1" rel="nofollow noopener noreferrer" target="_blank">$1</a>')
+
+  // Convert bare domains with common TLDs
+  const URL_TLDS = 'com|net|org|cn|top|xyz|io|dev|app|co|me|cc|info|edu|gov|club|online|site|tech|store|blog|work|live|video|social|design|shop|icu|ltd|fun|space|host|press|link|buzz|pro|vip|wang|ren'
+  html = html.replace(/(?<!href=")(?<!:\/\/)(?<![a-zA-Z0-9])((?:[a-zA-Z0-9][a-zA-Z0-9-]*\.){0,2}[a-zA-Z0-9][a-zA-Z0-9-]+\.)(?:${URL_TLDS})(?:\/[^\s<>]*)?/g, (match, domain, tld) => {
+    const full = domain + tld
+    const rest = match.substring(full.length)
+    return `<a href="https://${full}${rest}" rel="nofollow noopener noreferrer" target="_blank">${full}${rest}</a>`
+  })
+
+  // Convert #hashtags
   html = html.replace(/(^|[^\/\w])#([\w\u4e00-\u9fa5]+)/g, `$1<a href="https://${INSTANCE_DOMAIN}/tags/$2" class="mention hashtag" rel="tag">#<span>$2</span></a>`)
-  // Convert @mentions (only word chars + CJK)
+  // Convert @mentions
   html = html.replace(/@([\w\u4e00-\u9fa5]+)/g, `<span class="h-card"><a href="https://${INSTANCE_DOMAIN}/@$1" class="u-url mention" rel="nofollow noopener noreferrer" target="_blank">@<span>$1</span></a></span>`)
 
   // Wrap in paragraphs
