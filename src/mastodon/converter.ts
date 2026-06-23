@@ -114,7 +114,7 @@ export function toStatus(post: {
     favourited: opts?.favourited ?? false,
     reblogged: opts?.reblogged ?? false,
     muted: false,
-    bookmarked: false,
+    bookmarked: opts?.bookmarked ?? false,
     pinned: !!post.pinned,
     content: contentHtml,
     reblog: opts?.reblog ?? null,
