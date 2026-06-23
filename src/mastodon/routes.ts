@@ -1501,17 +1501,11 @@ mastodon.post('/statuses/:id/bookmark', async (c) => {
   if (!resolved) return c.json({ error: 'Record not found' }, 404)
 
   // Store bookmark as a special like with target_type 'bookmark'
-  const existing = await queryOne<{ id: number }>(
-    c.env.abdl_space_db,
-    'SELECT id FROM likes WHERE user_id = ? AND target_type = ? AND target_id = ?',
+  // Use INSERT OR IGNORE to handle unique constraint gracefully
+  await run(c.env.abdl_space_db,
+    'INSERT OR IGNORE INTO likes (user_id, target_type, target_id) VALUES (?, ?, ?)',
     [user.sub, 'bookmark', resolved.realId]
   )
-  if (!existing) {
-    await run(c.env.abdl_space_db,
-      'INSERT INTO likes (user_id, target_type, target_id) VALUES (?, ?, ?)',
-      [user.sub, 'bookmark', resolved.realId]
-    )
-  }
 
   const post = await queryOne<Record<string, unknown>>(
     c.env.abdl_space_db,
@@ -1547,7 +1541,7 @@ mastodon.post('/statuses/:id/unbookmark', async (c) => {
   await run(c.env.abdl_space_db,
     'DELETE FROM likes WHERE user_id = ? AND target_type = ? AND target_id = ?',
     [user.sub, 'bookmark', resolved.realId]
-  )
+  ).catch(() => {}) // Ignore errors if no bookmark exists
 
   const post = await queryOne<Record<string, unknown>>(
     c.env.abdl_space_db,
