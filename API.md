@@ -2610,10 +2610,64 @@ src/mastodon/
 
 ---
 
-## 九、变更记录
+## 十、版本管理 API
+
+> 用于 Android App 的版本检查、更新和安装包管理。
+
+### `GET /api/v1/version`
+
+获取最新版本信息。App 启动时调用，检查是否有新版本。
+
+**响应：**
+```json
+{
+  "hasUpdate": true,
+  "versionName": "1.0.0",
+  "versionCode": 1,
+  "downloadUrl": "https://img.abdl-space.top/apk/...",
+  "changelog": "更新内容说明",
+  "releasedAt": "2026-06-25T..."
+}
+```
+
+无版本时返回：
+```json
+{ "hasUpdate": false, "message": "暂无版本信息" }
+```
+
+### `POST /api/v1/version/upload`
+
+上传新版本 APK 并更新版本配置。**仅管理员可用。**
+
+**Content-Type:** `multipart/form-data`
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| apk | File | ✓ | APK 安装包文件 |
+| versionName | string | ✓ | 版本名称（如 "1.0.0"） |
+| versionCode | number | ✓ | 版本号（整数） |
+| changelog | string | 否 | 更新日志 |
+
+**响应：**
+```json
+{
+  "success": true,
+  "versionName": "1.0.1",
+  "versionCode": 2,
+  "downloadUrl": "https://img.abdl-space.top/apk/...",
+  "message": "版本更新成功"
+}
+```
+
+**存储机制：** D1 `kv_store` 表，key=`app_version_latest`，value=JSON。
+
+---
+
+## 十一、变更记录
 
 | 日期 | 变更 |
 |------|------|
 | 2026-06-14 | 全面重写：补充所有新增 API（Follows、Messages、Reports、Checkin、Points、Badges、Invite、OAuth、NBW、Beta、Search、Sync、Key Split、Content API、Captcha V1 等）；修正 Ratings 为 5 维度（无 fit_score）；修正评分为贝叶斯加权；补充奖励系统、图片上传、转发、公告等功能 |
 | 2026-06-15 | 新增 Mastodon 兼容 API 层（/api/v1/* + /api/v2/*），支持 Moshidon 等 Mastodon 客户端连接；Status ID 使用 p_/c_ 前缀格式；支持 OAuth + JWT 双模认证；实现 28+ 端点 + 15 个 stub 端点 |
 | 2026-06-15 | 新增 WebPush 推送订阅（/api/v1/push/subscription）；新增 ABDL 自定义端点（/api/v1/abdl/*），包含纸尿裤、评分、感受、排行榜、术语、用户档案等 13 个端点 |
+| 2026-06-25 | 新增版本管理 API（/api/v1/version）：GET 查询最新版本、POST 上传 APK 并更新版本配置 |
