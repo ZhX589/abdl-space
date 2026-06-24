@@ -32,6 +32,7 @@ import captchaV1 from './routes/captcha_v1.ts'
 import oauth from './routes/oauth.ts'
 import oauthClients from './routes/oauth_clients.ts'
 import contentKeys from './routes/content_keys.ts'
+import version from './routes/version.ts'
 import contentV1 from './routes/content_v1.ts'
 import nbw from './routes/nbw.ts'
 import keySplit from './routes/key_split.ts'
@@ -242,6 +243,7 @@ app.route('/api/v1/captcha', captchaV1)
 app.route('/api/v1', mastodon)
 app.route('/api/v1/push', mastodonPush)
 app.route('/api/v1/abdl', mastodonAbdl)
+app.route('/api/v1/version', version)
 app.route('/api/v2', mastodonV2)
 app.route('/api/oauth', oauth)
 app.route('/api/oauth/clients', oauthClients)
