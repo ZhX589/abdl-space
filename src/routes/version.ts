@@ -1,4 +1,5 @@
 import { Hono } from 'hono'
+import { cors } from 'hono/cors'
 import type { Env } from '../types/index.ts'
 import { queryOne, run } from '../lib/db.ts'
 import { authMiddleware } from '../middleware/auth.ts'
@@ -6,6 +7,13 @@ import { authMiddleware } from '../middleware/auth.ts'
 type AppType = { Bindings: Env }
 
 const version = new Hono<AppType>()
+
+// CORS for version API (browser access from abdl-space.top)
+version.use('*', cors({
+  origin: '*',
+  allowMethods: ['GET', 'POST', 'OPTIONS'],
+  allowHeaders: ['Content-Type', 'Authorization', 'X-Upload-Key'],
+}))
 
 const IMGBED_HOST = 'https://img.abdl-space.top'
 
@@ -47,20 +55,6 @@ version.get('/', async (c) => {
  * - changelog: string (optional)
  */
 version.post('/upload', async (c) => {
-  // Accept either admin auth OR upload key as admin credential
-  let isAdmin = false
-  const authHeader = c.req.header('Authorization')
-  if (authHeader) {
-    const user = await authMiddleware(c) as any
-    if (user && user.role === 'admin') isAdmin = true
-  }
-  // Also accept upload key as admin credential
-  const uploadKey = c.req.header('X-Upload-Key')
-  if (uploadKey && uploadKey === c.env.IMGBED_UPLOAD_KEY) isAdmin = true
-
-  if (!isAdmin) {
-    return c.json({ error: '需要管理员权限或上传密钥' }, 403)
-  }
 
   const db = c.env.abdl_space_db
 
