@@ -260,6 +260,12 @@ oauth.post('/token', async (c) => {
     }
 
     const token = await issueToken(c.env.abdl_space_db, clientId, result.userId!, result.scopes!)
+    // 标记该用户使用过 App
+    try {
+      await c.env.abdl_space_db.prepare(
+        'UPDATE users SET has_app = 1 WHERE id = ? AND has_app = 0'
+      ).bind(result.userId!).run()
+    } catch {}
     return c.json(token)
   }
 

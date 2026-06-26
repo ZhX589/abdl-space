@@ -33,12 +33,13 @@ const admin = new Hono<AppType>()
  * GET /api/admin/stats — 站点统计
  */
 admin.get('/stats', adminMiddleware, async (c) => {
-  const [users, posts, comments, diapers, ratings] = await Promise.all([
+  const [users, posts, comments, diapers, ratings, appUsers] = await Promise.all([
     queryOne<{ count: number }>(c.env.abdl_space_db, 'SELECT COUNT(*) as count FROM users'),
     queryOne<{ count: number }>(c.env.abdl_space_db, 'SELECT COUNT(*) as count FROM posts'),
     queryOne<{ count: number }>(c.env.abdl_space_db, 'SELECT COUNT(*) as count FROM post_comments'),
     queryOne<{ count: number }>(c.env.abdl_space_db, 'SELECT COUNT(*) as count FROM diapers'),
     queryOne<{ count: number }>(c.env.abdl_space_db, 'SELECT COUNT(*) as count FROM ratings'),
+    queryOne<{ count: number }>(c.env.abdl_space_db, 'SELECT COUNT(*) as count FROM users WHERE has_app = 1'),
   ])
 
   return c.json({
@@ -46,7 +47,8 @@ admin.get('/stats', adminMiddleware, async (c) => {
     posts: posts?.count ?? 0,
     comments: comments?.count ?? 0,
     diapers: diapers?.count ?? 0,
-    ratings: ratings?.count ?? 0
+    ratings: ratings?.count ?? 0,
+    appUsers: appUsers?.count ?? 0
   })
 })
 
