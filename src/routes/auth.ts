@@ -429,6 +429,14 @@ auth.post('/login', async (c) => {
 
   c.header('Set-Cookie', `token=${token}; ${tokenCookieOptions}`)
 
+  // 标记 App 用户（通过 User-Agent 检测 Android 客户端）
+  const ua = c.req.header('User-Agent') || ''
+  if (/MastodonAndroid/i.test(ua)) {
+    try {
+      await db.prepare('UPDATE users SET has_app = 1 WHERE id = ? AND has_app = 0').bind(user.id).run()
+    } catch {}
+  }
+
   return c.json({
     token,
     user: { id: user.id, email: user.email, username: user.username, avatar: user.avatar ?? DEFAULT_AVATAR, role: user.role }

@@ -432,6 +432,10 @@ nbw.get('/mobile-callback', async (c) => {
   if (existing) {
     // 已绑定 → 签发 JWT → 302 回 App
     const token = await signJWT({ sub: existing.id, username: existing.username, email: existing.email, role: existing.role }, c.env.JWT_SECRET)
+    // 标记用户使用过 App
+    try {
+      await db.prepare('UPDATE users SET has_app = 1 WHERE id = ? AND has_app = 0').bind(existing.id).run()
+    } catch {}
     return c.redirect(`abdl-space://callback?token=${encodeURIComponent(token)}`, 302)
   }
 
