@@ -1058,13 +1058,14 @@ mastodon.get('/timelines/home', async (c) => {
   const maxId = c.req.query('max_id')
   const sinceId = c.req.query('since_id')
 
-  // Home timeline = posts from followed users + own posts
+  // Home timeline = posts from followed users + own posts (filter out replies)
   let sql = `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
     (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
     (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
     (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count
     FROM posts p JOIN users u ON p.user_id = u.id
-    WHERE (p.user_id = ? OR p.user_id IN (SELECT following_id FROM follows WHERE follower_id = ?))`
+    WHERE (p.user_id = ? OR p.user_id IN (SELECT following_id FROM follows WHERE follower_id = ?))
+    AND p.in_reply_to_id IS NULL AND p.repost_id IS NULL`
   const params: unknown[] = [user.sub, user.sub]
 
   if (maxId) { sql += ' AND p.id < ?'; params.push(parseMastoIdForCursor(maxId) ?? 0) }
@@ -1133,7 +1134,7 @@ mastodon.get('/timelines/public', async (c) => {
     (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
     (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
     (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count
-    FROM posts p JOIN users u ON p.user_id = u.id WHERE 1=1`
+    FROM posts p JOIN users u ON p.user_id = u.id WHERE 1=1 AND p.in_reply_to_id IS NULL AND p.repost_id IS NULL`
   const params: unknown[] = []
 
   if (maxId) { sql += ' AND p.id < ?'; params.push(parseMastoIdForCursor(maxId) ?? 0) }
@@ -1208,7 +1209,7 @@ mastodon.get('/timelines/tag/:hashtag', async (c) => {
      (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
      (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count
      FROM posts p JOIN users u ON p.user_id = u.id
-     WHERE p.content LIKE ? OR p.content LIKE ? OR p.content LIKE ? OR p.content LIKE ? ORDER BY p.created_at DESC LIMIT ?`,
+      WHERE (p.content LIKE ? OR p.content LIKE ? OR p.content LIKE ? OR p.content LIKE ?) AND p.in_reply_to_id IS NULL AND p.repost_id IS NULL ORDER BY p.created_at DESC LIMIT ?`,
     [`%#${hashtag} %`, `%#${hashtag}\n%`, `#${hashtag} %`, `#${hashtag}\n%`, limit]
   )
 
@@ -1585,10 +1586,11 @@ mastodon.get('/statuses/:id/context', async (c) => {
   const resolved = await resolveStatus(c.env.abdl_space_db, rawId)
   if (!resolved) return c.json({ error: 'Record not found' }, 404)
 
-  // For posts, get comments as descendants; for comments, get siblings
+  // Get the post ID (for posts directly, for comments find parent post)
   const postId = resolved.kind === 'post' ? resolved.realId : (await queryOne<{ post_id: number }>(c.env.abdl_space_db, 'SELECT post_id FROM post_comments WHERE id = ?', [resolved.realId]))?.post_id
   if (!postId) return c.json({ ancestors: [], descendants: [] })
 
+  // Get comments from post_comments table
   const comments = await query<Record<string, unknown>>(
     c.env.abdl_space_db,
     `SELECT pc.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
@@ -1604,8 +1606,7 @@ mastodon.get('/statuses/:id/context', async (c) => {
     commentImagesMap = await loadCommentImages(c.env.abdl_space_db, commentIds)
   } catch {}
 
-  const ancestors: MastodonStatus[] = []
-  const descendants = comments.map(r => {
+  const commentDescendants = comments.map(r => {
     const account = toAccount({
       id: r.user_id as number, username: r.username as string, avatar: r.avatar as string | null,
       role: r.role as string, bio: r.bio as string | null, created_at: r.user_created_at as string,
@@ -1617,6 +1618,46 @@ mastodon.get('/statuses/:id/context', async (c) => {
       images: commentImagesMap.get(r.id as number),
     }, account)
   })
+
+  // Also get posts that reply to this post (in_reply_to_id = postId)
+  const replyPosts = await query<Record<string, unknown>>(
+    c.env.abdl_space_db,
+    `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
+     (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
+     (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
+     (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count
+     FROM posts p JOIN users u ON p.user_id = u.id
+     WHERE p.in_reply_to_id = ? ORDER BY p.created_at ASC`,
+    [postId]
+  )
+
+  const replyPostIds = replyPosts.map(r => r.id as number)
+  const replyImagesMap = replyPostIds.length > 0 ? await loadPostImages(c.env.abdl_space_db, replyPostIds) : new Map()
+  const replyCardMap = replyPostIds.length > 0 ? await generateCardsForPosts(replyPosts.map(r => ({ id: r.id as number, content: r.content as string, diaper_id: r.diaper_id as number | null }))) : new Map()
+
+  const postDescendants = replyPosts.map(r => {
+    const account = toAccount({
+      id: r.user_id as number, username: r.username as string, avatar: r.avatar as string | null,
+      role: r.role as string, bio: r.bio as string | null, created_at: r.user_created_at as string,
+    })
+    return toStatus({
+      id: r.id as number, user_id: r.user_id as number, content: r.content as string,
+      diaper_id: r.diaper_id as number | null, like_count: r.like_count as number,
+      comment_count: r.comment_count as number, reblogs_count: r.reblogs_count as number,
+      has_nsfw: !!r.has_nsfw, created_at: r.created_at as string,
+      images: replyImagesMap.get(r.id as number),
+      spoiler_text: r.spoiler_text as string, visibility: r.visibility as string,
+      language: r.language as string,
+      in_reply_to_id: r.in_reply_to_id as number | null,
+      in_reply_to_account_id: r.in_reply_to_account_id as number | null,
+      poll: null, linkCard: replyCardMap.get(r.id as number) ?? null,
+    }, account)
+  })
+
+  const ancestors: MastodonStatus[] = []
+  const descendants = [...commentDescendants, ...postDescendants].sort((a, b) =>
+    new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+  )
 
   return c.json({ ancestors, descendants })
 })
