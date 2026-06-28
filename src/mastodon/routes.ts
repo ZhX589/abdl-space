@@ -439,6 +439,7 @@ mastodon.get('/accounts/:id/statuses', async (c) => {
   const limit = Math.min(40, Math.max(1, parseInt(c.req.query('limit') || '20')))
   const maxId = c.req.query('max_id')
   const sinceId = c.req.query('since_id')
+  const excludeReplies = c.req.query('exclude_replies') === 'true'
 
   const dbUser = await queryOne<{ id: number; username: string; avatar: string | null; header: string | null; role: string; bio: string | null; created_at: string }>(
     c.env.abdl_space_db, 'SELECT id, username, avatar, header, role, bio, created_at FROM users WHERE id = ?', [id]
@@ -452,6 +453,7 @@ mastodon.get('/accounts/:id/statuses', async (c) => {
     FROM posts p JOIN users u ON p.user_id = u.id WHERE p.user_id = ?`
   const params: unknown[] = [id]
 
+  if (excludeReplies) { sql += ' AND p.in_reply_to_id IS NULL' }
   if (maxId) { sql += ' AND p.id < ?'; params.push(parseMastoIdForCursor(maxId) ?? 0) }
   if (sinceId) { sql += ' AND p.id > ?'; params.push(parseMastoIdForCursor(sinceId) ?? 0) }
 
@@ -655,6 +657,7 @@ mastodon.post('/statuses', async (c) => {
     sensitive?: boolean; visibility?: string; spoiler_text?: string; language?: string;
     poll?: { options?: string[]; expires_in?: number; multiple?: boolean; hide_totals?: boolean };
     scheduled_at?: string;
+    media_attributes?: { id?: string; description?: string }[];
   }
   try { body = await c.req.json() } catch { return c.json({ error: 'invalid body' }, 400) }
 
@@ -712,8 +715,14 @@ mastodon.post('/statuses', async (c) => {
       if (!mediaId.startsWith(IMGBED_HOST + '/')) {
         return c.json({ error: `图片 URL 必须来自 ${IMGBED_HOST}，请先通过 /api/v1/media 上传` }, 400)
       }
+      // Find description from media_attributes if provided
+      let altText: string | null = null
+      if (body.media_attributes && body.media_attributes.length > 0) {
+        const attr = body.media_attributes.find(a => a.id === mediaId)
+        if (attr && attr.description) altText = attr.description
+      }
       try {
-        await run(c.env.abdl_space_db, 'INSERT INTO post_images (post_id, image_url, is_nsfw, sort_order) VALUES (?, ?, ?, ?)', [postId, mediaId, hasNsfw, sortOrder++])
+        await run(c.env.abdl_space_db, 'INSERT INTO post_images (post_id, image_url, is_nsfw, sort_order, alt_text) VALUES (?, ?, ?, ?, ?)', [postId, mediaId, hasNsfw, sortOrder++, altText])
       } catch {}
     }
   }
@@ -1405,6 +1414,39 @@ mastodon.post('/media', async (c) => {
 })
 
 // ============================================================
+// PUT /api/v1/media/:id — Update media description
+// ============================================================
+mastodon.put('/media/:id', async (c) => {
+  const user = await mastodonAuth(c)
+  if (!user) return c.json({ error: 'The access token is invalid' }, 401)
+
+  const mediaId = c.req.param('id')
+  let body: { description?: string }
+  try { body = await c.req.json() } catch { body = {} }
+
+  // Update alt_text in post_images where image_url matches the media id
+  if (mediaId && body.description !== undefined) {
+    await run(
+      c.env.abdl_space_db,
+      'UPDATE post_images SET alt_text = ? WHERE image_url = ?',
+      [body.description || null, mediaId]
+    ).catch(() => {})
+  }
+
+  return c.json({
+    id: mediaId,
+    type: 'image',
+    url: mediaId,
+    preview_url: mediaId,
+    remote_url: null,
+    text_url: null,
+    meta: {},
+    description: body.description || null,
+    blurhash: null,
+  })
+})
+
+// ============================================================
 // GET /api/v1/search
 // ============================================================
 mastodon.get('/search', async (c) => {
@@ -1813,6 +1855,17 @@ mastodon.get('/announcements', async (c) => {
      ORDER BY p.created_at DESC`
   )
 
+  // Get read status for this user
+  const readIds = new Set<number>()
+  if (rows.length > 0) {
+    const readRows = await query<{ announcement_id: number }>(
+      db,
+      `SELECT announcement_id FROM announcement_read_status WHERE user_id = ? AND announcement_id IN (${rows.map(() => '?').join(',')})`,
+      [user.sub, ...rows.map(r => r.id as number)]
+    )
+    for (const r of readRows) readIds.add(r.announcement_id)
+  }
+
   const results = rows.map(row => ({
     id: String(row.id),
     content: `<p>${row.content}</p>`,
@@ -1822,7 +1875,7 @@ mastodon.get('/announcements', async (c) => {
     published: true,
     published_at: toISOString(row.created_at as string),
     updated_at: toISOString(row.created_at as string),
-    read: false,
+    read: readIds.has(row.id as number),
     emojis: [],
     reactions: [],
     mentions: [],
@@ -1889,6 +1942,26 @@ mastodon.patch('/announcements/:id', async (c) => {
   }
 
   return c.json({ id: rawId })
+})
+
+// POST /api/v1/announcements/:id/dismiss — 标记公告为已读
+mastodon.post('/announcements/:id/dismiss', async (c) => {
+  const user = await mastodonAuth(c)
+  if (!user) return c.json({ error: 'The access token is invalid' }, 401)
+
+  const rawId = c.req.param('id')
+  const resolved = await resolveStatus(c.env.abdl_space_db, rawId)
+  if (!resolved || resolved.kind !== 'post') return c.json({ error: 'Record not found' }, 404)
+
+  try {
+    await run(
+      c.env.abdl_space_db,
+      'INSERT OR IGNORE INTO announcement_read_status (user_id, announcement_id) VALUES (?, ?)',
+      [user.sub, resolved.realId]
+    )
+  } catch {}
+
+  return c.json({})
 })
 
 // GET /api/v1/lists
@@ -2017,7 +2090,7 @@ mastodon.get('/trends/statuses', async (c) => {
      (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
      (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count
      FROM posts p JOIN users u ON p.user_id = u.id
-     WHERE p.repost_id IS NULL
+     WHERE p.repost_id IS NULL AND p.in_reply_to_id IS NULL
      ORDER BY p.created_at DESC LIMIT ? OFFSET ?`
   const params: unknown[] = [limit, offset]
 
