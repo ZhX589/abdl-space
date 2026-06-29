@@ -418,6 +418,7 @@ mastodon.get('/accounts/:id', async (c) => {
     id: dbUser.id as number,
     username: dbUser.username as string,
     avatar: dbUser.avatar as string | null,
+    header: dbUser.header as string | null,
     role: dbUser.role as string,
     bio: dbUser.bio as string | null,
     created_at: dbUser.created_at as string,
