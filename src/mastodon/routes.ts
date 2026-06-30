@@ -101,7 +101,7 @@ async function loadReblogTargets(db: D1Database, repostIds: number[]): Promise<M
   const originals = await query<Record<string, unknown>>(
     db, `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
     (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
-    (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
+    (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) + (SELECT COUNT(*) FROM posts WHERE in_reply_to_id = p.id) as comment_count,
     (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count,
      (SELECT COUNT(*) FROM likes WHERE target_type = 'bookmark' AND target_id = p.id) as bookmarks_count
     FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id IN (${repostIds.map(() => '?').join(',')})`, repostIds)
@@ -450,7 +450,7 @@ mastodon.get('/accounts/:id/statuses', async (c) => {
 
   let sql = `SELECT p.*, u.username, u.avatar, u.role,
     (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
-    (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
+    (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) + (SELECT COUNT(*) FROM posts WHERE in_reply_to_id = p.id) as comment_count,
     (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count,
      (SELECT COUNT(*) FROM likes WHERE target_type = 'bookmark' AND target_id = p.id) as bookmarks_count
     FROM posts p JOIN users u ON p.user_id = u.id WHERE p.user_id = ?`
@@ -747,7 +747,7 @@ mastodon.post('/statuses', async (c) => {
     c.env.abdl_space_db,
     `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
      (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
-     (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
+     (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) + (SELECT COUNT(*) FROM posts WHERE in_reply_to_id = p.id) as comment_count,
      (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count,
      (SELECT COUNT(*) FROM likes WHERE target_type = 'bookmark' AND target_id = p.id) as bookmarks_count
      FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`,
@@ -817,7 +817,7 @@ mastodon.get('/statuses/:id', async (c) => {
     c.env.abdl_space_db,
     `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
      (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
-     (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
+     (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) + (SELECT COUNT(*) FROM posts WHERE in_reply_to_id = p.id) as comment_count,
      (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count,
      (SELECT COUNT(*) FROM likes WHERE target_type = 'bookmark' AND target_id = p.id) as bookmarks_count
      FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`,
@@ -926,7 +926,7 @@ mastodon.post('/statuses/:id/favourite', async (c) => {
   const post = await queryOne<Record<string, unknown>>(c.env.abdl_space_db,
     `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
      (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
-     (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count
+     (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) + (SELECT COUNT(*) FROM posts WHERE in_reply_to_id = p.id) as comment_count
      FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`, [resolved.realId])
   if (!post) return c.json({ error: 'Record not found' }, 404)
   const account = toAccount({ id: post.user_id as number, username: post.username as string, avatar: post.avatar as string | null, role: post.role as string, bio: post.bio as string | null, created_at: post.user_created_at as string })
@@ -960,7 +960,7 @@ mastodon.post('/statuses/:id/unfavourite', async (c) => {
   const post = await queryOne<Record<string, unknown>>(c.env.abdl_space_db,
     `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
      (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
-     (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count
+     (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) + (SELECT COUNT(*) FROM posts WHERE in_reply_to_id = p.id) as comment_count
      FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`, [resolved.realId])
   if (!post) return c.json({ error: 'Record not found' }, 404)
   const account = toAccount({ id: post.user_id as number, username: post.username as string, avatar: post.avatar as string | null, role: post.role as string, bio: post.bio as string | null, created_at: post.user_created_at as string })
@@ -993,7 +993,7 @@ mastodon.post('/statuses/:id/reblog', async (c) => {
     const post = await queryOne<Record<string, unknown>>(c.env.abdl_space_db,
       `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
        (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
-       (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
+       (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) + (SELECT COUNT(*) FROM posts WHERE in_reply_to_id = p.id) as comment_count,
        (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count,
      (SELECT COUNT(*) FROM likes WHERE target_type = 'bookmark' AND target_id = p.id) as bookmarks_count
        FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`, [realId])
@@ -1022,7 +1022,7 @@ mastodon.post('/statuses/:id/reblog', async (c) => {
   const post = await queryOne<Record<string, unknown>>(c.env.abdl_space_db,
     `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
      (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
-     (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
+     (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) + (SELECT COUNT(*) FROM posts WHERE in_reply_to_id = p.id) as comment_count,
      (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count,
      (SELECT COUNT(*) FROM likes WHERE target_type = 'bookmark' AND target_id = p.id) as bookmarks_count
      FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`, [realId])
@@ -1061,7 +1061,7 @@ mastodon.post('/statuses/:id/unreblog', async (c) => {
   const post = await queryOne<Record<string, unknown>>(c.env.abdl_space_db,
     `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
      (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
-     (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
+     (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) + (SELECT COUNT(*) FROM posts WHERE in_reply_to_id = p.id) as comment_count,
      (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count,
      (SELECT COUNT(*) FROM likes WHERE target_type = 'bookmark' AND target_id = p.id) as bookmarks_count
      FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`, [realId])
@@ -1085,7 +1085,7 @@ mastodon.get('/timelines/home', async (c) => {
   // Home timeline = posts from followed users + own posts (filter out replies)
   let sql = `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
     (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
-    (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
+    (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) + (SELECT COUNT(*) FROM posts WHERE in_reply_to_id = p.id) as comment_count,
     (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count,
      (SELECT COUNT(*) FROM likes WHERE target_type = 'bookmark' AND target_id = p.id) as bookmarks_count
     FROM posts p JOIN users u ON p.user_id = u.id
@@ -1164,7 +1164,7 @@ mastodon.get('/timelines/public', async (c) => {
 
   let sql = `    SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
     (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
-    (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
+    (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) + (SELECT COUNT(*) FROM posts WHERE in_reply_to_id = p.id) as comment_count,
     (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count,
      (SELECT COUNT(*) FROM likes WHERE target_type = 'bookmark' AND target_id = p.id) as bookmarks_count
     FROM posts p JOIN users u ON p.user_id = u.id WHERE 1=1 AND p.in_reply_to_id IS NULL AND p.repost_id IS NULL`
@@ -1246,7 +1246,7 @@ mastodon.get('/timelines/tag/:hashtag', async (c) => {
     c.env.abdl_space_db,
     `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
      (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
-     (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
+     (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) + (SELECT COUNT(*) FROM posts WHERE in_reply_to_id = p.id) as comment_count,
      (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count,
      (SELECT COUNT(*) FROM likes WHERE target_type = 'bookmark' AND target_id = p.id) as bookmarks_count
      FROM posts p JOIN users u ON p.user_id = u.id
@@ -1329,7 +1329,7 @@ mastodon.get('/notifications', async (c) => {
       c.env.abdl_space_db,
       `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
        (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
-       (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count
+       (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) + (SELECT COUNT(*) FROM posts WHERE in_reply_to_id = p.id) as comment_count
        FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id IN (${postIds.map(() => '?').join(',')})`, postIds
     )
     for (const p of posts) postMap.set(p.id as number, p)
@@ -1496,7 +1496,7 @@ mastodon.get('/search', async (c) => {
       c.env.abdl_space_db,
        `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
        (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
-       (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
+       (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) + (SELECT COUNT(*) FROM posts WHERE in_reply_to_id = p.id) as comment_count,
        (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count,
      (SELECT COUNT(*) FROM likes WHERE target_type = 'bookmark' AND target_id = p.id) as bookmarks_count
        FROM posts p JOIN users u ON p.user_id = u.id
@@ -1716,7 +1716,7 @@ mastodon.post('/statuses/:id/bookmark', async (c) => {
     c.env.abdl_space_db,
     `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
      (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
-     (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
+     (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) + (SELECT COUNT(*) FROM posts WHERE in_reply_to_id = p.id) as comment_count,
      (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count,
      (SELECT COUNT(*) FROM likes WHERE target_type = 'bookmark' AND target_id = p.id) as bookmarks_count
      FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`,
@@ -1753,7 +1753,7 @@ mastodon.post('/statuses/:id/unbookmark', async (c) => {
     c.env.abdl_space_db,
     `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
      (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
-     (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
+     (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) + (SELECT COUNT(*) FROM posts WHERE in_reply_to_id = p.id) as comment_count,
      (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count,
      (SELECT COUNT(*) FROM likes WHERE target_type = 'bookmark' AND target_id = p.id) as bookmarks_count
      FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`,
@@ -1817,7 +1817,7 @@ mastodon.get('/statuses/:id/context', async (c) => {
     c.env.abdl_space_db,
     `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
      (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
-     (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
+     (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) + (SELECT COUNT(*) FROM posts WHERE in_reply_to_id = p.id) as comment_count,
      (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count,
      (SELECT COUNT(*) FROM likes WHERE target_type = 'bookmark' AND target_id = p.id) as bookmarks_count
      FROM posts p JOIN users u ON p.user_id = u.id
@@ -2158,7 +2158,7 @@ mastodon.get('/notifications/:id', async (c) => {
       c.env.abdl_space_db,
       `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
        (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
-       (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count
+       (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) + (SELECT COUNT(*) FROM posts WHERE in_reply_to_id = p.id) as comment_count
        FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`,
       [r.related_id]
     )
@@ -2239,7 +2239,7 @@ mastodon.get('/trends/statuses', async (c) => {
 
   let sql = `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
      (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
-     (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
+     (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) + (SELECT COUNT(*) FROM posts WHERE in_reply_to_id = p.id) as comment_count,
      (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count,
      (SELECT COUNT(*) FROM likes WHERE target_type = 'bookmark' AND target_id = p.id) as bookmarks_count
      FROM posts p JOIN users u ON p.user_id = u.id
@@ -2473,7 +2473,7 @@ mastodon.put('/statuses/:id', async (c) => {
     c.env.abdl_space_db,
     `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
      (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
-     (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
+     (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) + (SELECT COUNT(*) FROM posts WHERE in_reply_to_id = p.id) as comment_count,
      (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count,
      (SELECT COUNT(*) FROM likes WHERE target_type = 'bookmark' AND target_id = p.id) as bookmarks_count
      FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`, [resolved.realId]
