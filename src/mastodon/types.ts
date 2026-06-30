@@ -45,6 +45,8 @@ export interface MastodonStatus {
   replies_count: number
   reblogs_count: number
   favourites_count: number
+  bookmarks_count: number
+  shares_count: number
   favourited: boolean
   reblogged: boolean
   muted: boolean

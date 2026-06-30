@@ -102,7 +102,8 @@ async function loadReblogTargets(db: D1Database, repostIds: number[]): Promise<M
     db, `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
     (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
     (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
-    (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count
+    (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count,
+     (SELECT COUNT(*) FROM likes WHERE target_type = 'bookmark' AND target_id = p.id) as bookmarks_count
     FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id IN (${repostIds.map(() => '?').join(',')})`, repostIds)
   const imagesMap = await loadPostImages(db, repostIds)
   const map = new Map<number, MastodonStatus>()
@@ -450,7 +451,8 @@ mastodon.get('/accounts/:id/statuses', async (c) => {
   let sql = `SELECT p.*, u.username, u.avatar, u.role,
     (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
     (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
-    (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count
+    (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count,
+     (SELECT COUNT(*) FROM likes WHERE target_type = 'bookmark' AND target_id = p.id) as bookmarks_count
     FROM posts p JOIN users u ON p.user_id = u.id WHERE p.user_id = ?`
   const params: unknown[] = [id]
 
@@ -504,7 +506,7 @@ mastodon.get('/accounts/:id/statuses', async (c) => {
       is_announcement: !!r.is_announcement,
       like_count: r.like_count as number,
       comment_count: r.comment_count as number,
-      reblogs_count: r.reblogs_count as number,
+      reblogs_count: r.reblogs_count as number, bookmarks_count: r.bookmarks_count as number, shares_count: 0,
       created_at: r.created_at as string,
       images: imagesMap.get(r.id as number),
       spoiler_text: r.spoiler_text as string, visibility: r.visibility as string,
@@ -746,7 +748,8 @@ mastodon.post('/statuses', async (c) => {
     `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
      (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
      (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
-     (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count
+     (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count,
+     (SELECT COUNT(*) FROM likes WHERE target_type = 'bookmark' AND target_id = p.id) as bookmarks_count
      FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`,
     [postId]
   )
@@ -771,7 +774,7 @@ mastodon.post('/statuses', async (c) => {
   return c.json(toStatus({
     id: post.id as number, user_id: post.user_id as number, content: post.content as string,
     like_count: post.like_count as number, comment_count: post.comment_count as number,
-    reblogs_count: post.reblogs_count as number, has_nsfw: !!post.has_nsfw,
+    reblogs_count: post.reblogs_count as number, bookmarks_count: post.bookmarks_count as number, shares_count: 0, has_nsfw: !!post.has_nsfw,
     created_at: post.created_at as string, images,
     spoiler_text: post.spoiler_text as string, visibility: post.visibility as string,
     language: post.language as string,
@@ -815,7 +818,8 @@ mastodon.get('/statuses/:id', async (c) => {
     `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
      (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
      (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
-     (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count
+     (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count,
+     (SELECT COUNT(*) FROM likes WHERE target_type = 'bookmark' AND target_id = p.id) as bookmarks_count
      FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`,
     [resolved.realId]
   )
@@ -852,7 +856,7 @@ mastodon.get('/statuses/:id', async (c) => {
     has_nsfw: !!post.has_nsfw,
     like_count: post.like_count as number,
     comment_count: post.comment_count as number,
-    reblogs_count: post.reblogs_count as number,
+    reblogs_count: post.reblogs_count as number, bookmarks_count: post.bookmarks_count as number, shares_count: 0,
     created_at: post.created_at as string,
     images,
     spoiler_text: post.spoiler_text as string,
@@ -990,12 +994,13 @@ mastodon.post('/statuses/:id/reblog', async (c) => {
       `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
        (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
        (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
-       (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count
+       (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count,
+     (SELECT COUNT(*) FROM likes WHERE target_type = 'bookmark' AND target_id = p.id) as bookmarks_count
        FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`, [realId])
     if (!post) return c.json({ error: 'Record not found' }, 404)
     const account = toAccount({ id: post.user_id as number, username: post.username as string, avatar: post.avatar as string | null, role: post.role as string, bio: post.bio as string | null, created_at: post.user_created_at as string })
     const images = await query<{ image_url: string; is_nsfw: number }>(c.env.abdl_space_db, 'SELECT image_url, is_nsfw, alt_text FROM post_images WHERE post_id = ? ORDER BY sort_order', [realId])
-    return c.json(toStatus({ id: post.id as number, user_id: post.user_id as number, content: post.content as string, like_count: post.like_count as number, comment_count: post.comment_count as number, reblogs_count: post.reblogs_count as number, created_at: post.created_at as string, images }, account, { reblogged: true }))
+    return c.json(toStatus({ id: post.id as number, user_id: post.user_id as number, content: post.content as string, like_count: post.like_count as number, comment_count: post.comment_count as number, reblogs_count: post.reblogs_count as number, bookmarks_count: post.bookmarks_count as number, shares_count: 0, created_at: post.created_at as string, images }, account, { reblogged: true }))
   }
 
   // Create repost (reblog = new post with repost_id pointing to original)
@@ -1018,12 +1023,13 @@ mastodon.post('/statuses/:id/reblog', async (c) => {
     `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
      (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
      (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
-     (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count
+     (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count,
+     (SELECT COUNT(*) FROM likes WHERE target_type = 'bookmark' AND target_id = p.id) as bookmarks_count
      FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`, [realId])
   if (!post) return c.json({ error: 'Record not found' }, 404)
   const account = toAccount({ id: post.user_id as number, username: post.username as string, avatar: post.avatar as string | null, role: post.role as string, bio: post.bio as string | null, created_at: post.user_created_at as string })
   const images = await query<{ image_url: string; is_nsfw: number }>(c.env.abdl_space_db, 'SELECT image_url, is_nsfw, alt_text FROM post_images WHERE post_id = ? ORDER BY sort_order', [realId])
-  return c.json(toStatus({ id: post.id as number, user_id: post.user_id as number, content: post.content as string, like_count: post.like_count as number, comment_count: post.comment_count as number, reblogs_count: post.reblogs_count as number, created_at: post.created_at as string, images }, account, { reblogged: true }))
+  return c.json(toStatus({ id: post.id as number, user_id: post.user_id as number, content: post.content as string, like_count: post.like_count as number, comment_count: post.comment_count as number, reblogs_count: post.reblogs_count as number, bookmarks_count: post.bookmarks_count as number, shares_count: 0, created_at: post.created_at as string, images }, account, { reblogged: true }))
 })
 
 // ============================================================
@@ -1056,12 +1062,13 @@ mastodon.post('/statuses/:id/unreblog', async (c) => {
     `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
      (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
      (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
-     (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count
+     (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count,
+     (SELECT COUNT(*) FROM likes WHERE target_type = 'bookmark' AND target_id = p.id) as bookmarks_count
      FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`, [realId])
   if (!post) return c.json({ error: 'Record not found' }, 404)
   const account = toAccount({ id: post.user_id as number, username: post.username as string, avatar: post.avatar as string | null, role: post.role as string, bio: post.bio as string | null, created_at: post.user_created_at as string })
   const images = await query<{ image_url: string; is_nsfw: number }>(c.env.abdl_space_db, 'SELECT image_url, is_nsfw, alt_text FROM post_images WHERE post_id = ? ORDER BY sort_order', [realId])
-  return c.json(toStatus({ id: post.id as number, user_id: post.user_id as number, content: post.content as string, like_count: post.like_count as number, comment_count: post.comment_count as number, reblogs_count: post.reblogs_count as number, created_at: post.created_at as string, images }, account, { reblogged: false }))
+  return c.json(toStatus({ id: post.id as number, user_id: post.user_id as number, content: post.content as string, like_count: post.like_count as number, comment_count: post.comment_count as number, reblogs_count: post.reblogs_count as number, bookmarks_count: post.bookmarks_count as number, shares_count: 0, created_at: post.created_at as string, images }, account, { reblogged: false }))
 })
 
 // ============================================================
@@ -1079,7 +1086,8 @@ mastodon.get('/timelines/home', async (c) => {
   let sql = `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
     (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
     (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
-    (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count
+    (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count,
+     (SELECT COUNT(*) FROM likes WHERE target_type = 'bookmark' AND target_id = p.id) as bookmarks_count
     FROM posts p JOIN users u ON p.user_id = u.id
     WHERE (p.user_id = ? OR p.user_id IN (SELECT following_id FROM follows WHERE follower_id = ?))
     AND p.in_reply_to_id IS NULL AND p.repost_id IS NULL`
@@ -1127,7 +1135,7 @@ mastodon.get('/timelines/home', async (c) => {
       return toStatus({
         id: r.id as number, user_id: r.user_id as number, content: r.content as string,
         diaper_id: r.diaper_id as number | null, like_count: r.like_count as number,
-        comment_count: r.comment_count as number, reblogs_count: r.reblogs_count as number,
+        comment_count: r.comment_count as number, reblogs_count: r.reblogs_count as number, bookmarks_count: r.bookmarks_count as number, shares_count: 0,
         has_nsfw: !!r.has_nsfw,
         created_at: r.created_at as string,
         images: imagesMap.get(r.id as number),
@@ -1157,7 +1165,8 @@ mastodon.get('/timelines/public', async (c) => {
   let sql = `    SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
     (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
     (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
-    (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count
+    (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count,
+     (SELECT COUNT(*) FROM likes WHERE target_type = 'bookmark' AND target_id = p.id) as bookmarks_count
     FROM posts p JOIN users u ON p.user_id = u.id WHERE 1=1 AND p.in_reply_to_id IS NULL AND p.repost_id IS NULL`
   const params: unknown[] = []
 
@@ -1207,7 +1216,7 @@ mastodon.get('/timelines/public', async (c) => {
       return toStatus({
         id: r.id as number, user_id: r.user_id as number, content: r.content as string,
         diaper_id: r.diaper_id as number | null, like_count: r.like_count as number,
-        comment_count: r.comment_count as number, reblogs_count: r.reblogs_count as number,
+        comment_count: r.comment_count as number, reblogs_count: r.reblogs_count as number, bookmarks_count: r.bookmarks_count as number, shares_count: 0,
         has_nsfw: !!r.has_nsfw,
         created_at: r.created_at as string,
         images: imagesMap.get(r.id as number),
@@ -1238,7 +1247,8 @@ mastodon.get('/timelines/tag/:hashtag', async (c) => {
     `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
      (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
      (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
-     (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count
+     (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count,
+     (SELECT COUNT(*) FROM likes WHERE target_type = 'bookmark' AND target_id = p.id) as bookmarks_count
      FROM posts p JOIN users u ON p.user_id = u.id
       WHERE (p.content LIKE ? OR p.content LIKE ? OR p.content LIKE ? OR p.content LIKE ?) AND p.in_reply_to_id IS NULL AND p.repost_id IS NULL ORDER BY p.created_at DESC LIMIT ?`,
     [`%#${hashtag} %`, `%#${hashtag}\n%`, `#${hashtag} %`, `#${hashtag}\n%`, limit]
@@ -1260,7 +1270,7 @@ mastodon.get('/timelines/tag/:hashtag', async (c) => {
       return toStatus({
         id: r.id as number, user_id: r.user_id as number, content: r.content as string,
         like_count: r.like_count as number, comment_count: r.comment_count as number,
-        reblogs_count: r.reblogs_count as number,
+        reblogs_count: r.reblogs_count as number, bookmarks_count: r.bookmarks_count as number, shares_count: 0,
         has_nsfw: !!r.has_nsfw,
         created_at: r.created_at as string,
         images: imagesMap.get(r.id as number),
@@ -1487,7 +1497,8 @@ mastodon.get('/search', async (c) => {
        `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
        (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
        (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
-       (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count
+       (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count,
+     (SELECT COUNT(*) FROM likes WHERE target_type = 'bookmark' AND target_id = p.id) as bookmarks_count
        FROM posts p JOIN users u ON p.user_id = u.id
        WHERE p.content LIKE ? ORDER BY p.created_at DESC LIMIT 10`,
       [likePattern]
@@ -1510,7 +1521,7 @@ mastodon.get('/search', async (c) => {
       return toStatus({
         id: r.id as number, user_id: r.user_id as number, content: r.content as string,
         like_count: r.like_count as number, comment_count: r.comment_count as number,
-        reblogs_count: r.reblogs_count as number,
+        reblogs_count: r.reblogs_count as number, bookmarks_count: r.bookmarks_count as number, shares_count: 0,
         has_nsfw: !!r.has_nsfw,
         created_at: r.created_at as string,
         images: imagesMap.get(r.id as number),
@@ -1563,7 +1574,8 @@ mastodon.get('/favourites', async (c) => {
   let sql = `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
     (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
     (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) + (SELECT COUNT(*) FROM posts WHERE in_reply_to_id = p.id) as comment_count,
-    (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count
+    (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count,
+     (SELECT COUNT(*) FROM likes WHERE target_type = 'bookmark' AND target_id = p.id) as bookmarks_count
     FROM posts p JOIN users u ON p.user_id = u.id
     WHERE p.id IN (SELECT target_id FROM likes WHERE user_id = ? AND target_type = 'post')`
   const params: unknown[] = [user.sub]
@@ -1604,7 +1616,7 @@ mastodon.get('/favourites', async (c) => {
     return toStatus({
       id: r.id as number, user_id: r.user_id as number, content: r.content as string,
       like_count: r.like_count as number, comment_count: r.comment_count as number,
-      reblogs_count: r.reblogs_count as number, has_nsfw: !!r.has_nsfw,
+      reblogs_count: r.reblogs_count as number, bookmarks_count: r.bookmarks_count as number, shares_count: 0, has_nsfw: !!r.has_nsfw,
       created_at: r.created_at as string,
       images: imagesMap.get(r.id as number),
       spoiler_text: r.spoiler_text as string, visibility: r.visibility as string,
@@ -1632,7 +1644,8 @@ mastodon.get('/bookmarks', async (c) => {
   let sql = `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
     (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
     (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) + (SELECT COUNT(*) FROM posts WHERE in_reply_to_id = p.id) as comment_count,
-    (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count
+    (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count,
+     (SELECT COUNT(*) FROM likes WHERE target_type = 'bookmark' AND target_id = p.id) as bookmarks_count
     FROM posts p JOIN users u ON p.user_id = u.id
     WHERE p.id IN (SELECT target_id FROM likes WHERE user_id = ? AND target_type = 'bookmark')`
   const params: unknown[] = [user.sub]
@@ -1668,7 +1681,7 @@ mastodon.get('/bookmarks', async (c) => {
     return toStatus({
       id: r.id as number, user_id: r.user_id as number, content: r.content as string,
       like_count: r.like_count as number, comment_count: r.comment_count as number,
-      reblogs_count: r.reblogs_count as number, has_nsfw: !!r.has_nsfw,
+      reblogs_count: r.reblogs_count as number, bookmarks_count: r.bookmarks_count as number, shares_count: 0, has_nsfw: !!r.has_nsfw,
       created_at: r.created_at as string,
       images: imagesMap.get(r.id as number),
       spoiler_text: r.spoiler_text as string, visibility: r.visibility as string,
@@ -1704,7 +1717,8 @@ mastodon.post('/statuses/:id/bookmark', async (c) => {
     `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
      (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
      (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
-     (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count
+     (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count,
+     (SELECT COUNT(*) FROM likes WHERE target_type = 'bookmark' AND target_id = p.id) as bookmarks_count
      FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`,
     [resolved.realId]
   )
@@ -1715,7 +1729,7 @@ mastodon.post('/statuses/:id/bookmark', async (c) => {
   return c.json(toStatus({
     id: post.id as number, user_id: post.user_id as number, content: post.content as string,
     has_nsfw: !!post.has_nsfw, like_count: post.like_count as number, comment_count: post.comment_count as number,
-    reblogs_count: post.reblogs_count as number, created_at: post.created_at as string,
+    reblogs_count: post.reblogs_count as number, bookmarks_count: post.bookmarks_count as number, shares_count: 0, created_at: post.created_at as string,
     images: images.get(resolved.realId), bookmarked: true,
   }, account, { bookmarked: true }))
 })
@@ -1740,7 +1754,8 @@ mastodon.post('/statuses/:id/unbookmark', async (c) => {
     `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
      (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
      (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
-     (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count
+     (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count,
+     (SELECT COUNT(*) FROM likes WHERE target_type = 'bookmark' AND target_id = p.id) as bookmarks_count
      FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`,
     [resolved.realId]
   )
@@ -1751,7 +1766,7 @@ mastodon.post('/statuses/:id/unbookmark', async (c) => {
   return c.json(toStatus({
     id: post.id as number, user_id: post.user_id as number, content: post.content as string,
     has_nsfw: !!post.has_nsfw, like_count: post.like_count as number, comment_count: post.comment_count as number,
-    reblogs_count: post.reblogs_count as number, created_at: post.created_at as string,
+    reblogs_count: post.reblogs_count as number, bookmarks_count: post.bookmarks_count as number, shares_count: 0, created_at: post.created_at as string,
     images: images.get(resolved.realId), bookmarked: false,
   }, account, { bookmarked: false }))
 })
@@ -1803,7 +1818,8 @@ mastodon.get('/statuses/:id/context', async (c) => {
     `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
      (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
      (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
-     (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count
+     (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count,
+     (SELECT COUNT(*) FROM likes WHERE target_type = 'bookmark' AND target_id = p.id) as bookmarks_count
      FROM posts p JOIN users u ON p.user_id = u.id
      WHERE p.in_reply_to_id = ? ORDER BY p.created_at ASC`,
     [postId]
@@ -1821,7 +1837,7 @@ mastodon.get('/statuses/:id/context', async (c) => {
     return toStatus({
       id: r.id as number, user_id: r.user_id as number, content: r.content as string,
       diaper_id: r.diaper_id as number | null, like_count: r.like_count as number,
-      comment_count: r.comment_count as number, reblogs_count: r.reblogs_count as number,
+      comment_count: r.comment_count as number, reblogs_count: r.reblogs_count as number, bookmarks_count: r.bookmarks_count as number, shares_count: 0,
       has_nsfw: !!r.has_nsfw, created_at: r.created_at as string,
       images: replyImagesMap.get(r.id as number),
       spoiler_text: r.spoiler_text as string, visibility: r.visibility as string,
@@ -2224,7 +2240,8 @@ mastodon.get('/trends/statuses', async (c) => {
   let sql = `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
      (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
      (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
-     (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count
+     (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count,
+     (SELECT COUNT(*) FROM likes WHERE target_type = 'bookmark' AND target_id = p.id) as bookmarks_count
      FROM posts p JOIN users u ON p.user_id = u.id
      WHERE p.repost_id IS NULL AND p.in_reply_to_id IS NULL
      ORDER BY p.created_at DESC LIMIT ? OFFSET ?`
@@ -2263,7 +2280,7 @@ mastodon.get('/trends/statuses', async (c) => {
     return toStatus({
       id: r.id as number, user_id: r.user_id as number, content: r.content as string,
       like_count: r.like_count as number, comment_count: r.comment_count as number,
-      reblogs_count: r.reblogs_count as number,
+      reblogs_count: r.reblogs_count as number, bookmarks_count: r.bookmarks_count as number, shares_count: 0,
       has_nsfw: !!r.has_nsfw,
       created_at: r.created_at as string,
       images: imagesMap.get(r.id as number),
@@ -2457,7 +2474,8 @@ mastodon.put('/statuses/:id', async (c) => {
     `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
      (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
      (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
-     (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count
+     (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count,
+     (SELECT COUNT(*) FROM likes WHERE target_type = 'bookmark' AND target_id = p.id) as bookmarks_count
      FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`, [resolved.realId]
   )
   if (!updatedPost) return c.json({ error: 'Failed to update status' }, 500)

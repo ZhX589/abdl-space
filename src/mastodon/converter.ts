@@ -77,6 +77,8 @@ export function toStatus(post: {
   like_count?: number
   comment_count?: number
   reblogs_count?: number
+  bookmarks_count?: number
+  shares_count?: number
   has_liked?: boolean
   created_at: string
   images?: { image_url: string; is_nsfw?: boolean | number }[]
@@ -111,6 +113,8 @@ export function toStatus(post: {
     replies_count: post.comment_count ?? 0,
     reblogs_count: post.reblogs_count ?? 0,
     favourites_count: post.like_count ?? 0,
+    bookmarks_count: post.bookmarks_count ?? 0,
+    shares_count: post.shares_count ?? 0,
     favourited: opts?.favourited ?? false,
     reblogged: opts?.reblogged ?? false,
     muted: false,

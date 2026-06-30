@@ -40,6 +40,7 @@ version.get('/', async (c) => {
       downloadUrl: info.downloadUrl,
       changelog: info.changelog || '',
       releasedAt: info.releasedAt || '',
+      apkSize: info.apkSize || 0,
     })
   } catch {
     return c.json({ hasUpdate: false, message: '版本信息格式错误' })
@@ -55,13 +56,15 @@ version.get('/', async (c) => {
  * - changelog: string (optional)
  */
 version.post('/upload', async (c) => {
-
+  try {
   const db = c.env.abdl_space_db
 
   let versionName = ''
   let versionCode = 0
   let changelog = ''
   let apkUrl = ''
+  let apkSize = 0
+  let apk: File | null = null
 
   const contentType = c.req.header('Content-Type') || ''
 
@@ -100,11 +103,16 @@ version.post('/upload', async (c) => {
       if (!apkUrl) return c.json({ error: 'APK 上传返回为空' }, 500)
     }
   } else {
-    const body = await c.req.json()
-    versionName = body.versionName || ''
-    versionCode = body.versionCode || 0
-    changelog = body.changelog || ''
-    apkUrl = body.apkUrl || ''
+    try {
+      const body = await c.req.json()
+      versionName = body.versionName || ''
+      versionCode = body.versionCode || 0
+      changelog = body.changelog || ''
+      apkUrl = body.apkUrl || ''
+      apkSize = body.apkSize || 0
+    } catch (e) {
+      return c.json({ error: 'Invalid JSON body' }, 400)
+    }
   }
 
   if (!versionName || !versionCode) {
@@ -125,6 +133,7 @@ version.post('/upload', async (c) => {
     downloadUrl: apkUrl,
     changelog,
     releasedAt: new Date().toISOString(),
+    apkSize: apk ? apk.size : apkSize,
   })
 
   await run(db,
@@ -140,6 +149,9 @@ version.post('/upload', async (c) => {
     downloadUrl: apkUrl,
     message: '版本更新成功',
   })
+  } catch (e) {
+    return c.json({ error: String(e) }, 500)
+  }
 })
 
 export default version
