@@ -29,6 +29,7 @@ export interface MastodonAccount {
   roles: { id: string; name: string; color: string; permissions: string; highlighted: boolean }[]
   hide_collections: boolean
   noindex: boolean
+  source?: { note: string; fields: { name: string; value: string; verified_at: string | null }[]; privacy: string; sensitive: boolean; language: string }
 }
 
 export interface MastodonStatus {

@@ -62,6 +62,13 @@ export function toAccount(user: {
       : [],
     hide_collections: false,
     noindex: false,
+    source: {
+      note: user.bio ? `<p>${escapeHtml(user.bio)}</p>` : '',
+      fields: [],
+      privacy: 'public',
+      sensitive: false,
+      language: 'zh',
+    },
   }
 }
 
