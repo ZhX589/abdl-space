@@ -57,7 +57,7 @@ export function toAccount(user: {
     statuses_count: opts?.statuses_count ?? 0,
     last_status_at: opts?.last_status_at ?? null,
     emojis: [],
-    fields: [],
+    fields: (() => { try { return JSON.parse(user.profile_fields || '[]') } catch { return [] } })(),
     roles: user.role === 'admin'
       ? [{ id: '1', name: 'Admin', color: '#ff6b6b', permissions: '65536', highlighted: true }]
       : [],
