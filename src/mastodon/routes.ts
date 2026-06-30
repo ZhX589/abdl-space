@@ -1563,9 +1563,62 @@ mastodon.get('/favourites', async (c) => {
 mastodon.get('/bookmarks', async (c) => {
   const user = await mastodonAuth(c)
   if (!user) return c.json({ error: 'The access token is invalid' }, 401)
-  // Bookmarks are stored as likes on a special "bookmark" target type
-  // For now return empty until we implement full bookmark storage
-  return c.json([])
+
+  const limit = Math.min(40, Math.max(1, parseInt(c.req.query('limit') || '20')))
+  const maxId = c.req.query('max_id')
+
+  // Bookmarks are stored as likes with target_type 'bookmark'
+  let sql = `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
+    (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
+    (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) + (SELECT COUNT(*) FROM posts WHERE in_reply_to_id = p.id) as comment_count,
+    (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count
+    FROM posts p JOIN users u ON p.user_id = u.id
+    WHERE p.id IN (SELECT target_id FROM likes WHERE user_id = ? AND target_type = 'bookmark')`
+  const params: unknown[] = [user.sub]
+
+  if (maxId) { sql += ' AND p.id < ?'; params.push(parseMastoIdForCursor(maxId) ?? 0) }
+  sql += ' ORDER BY p.created_at DESC LIMIT ?'
+  params.push(limit)
+
+  const posts = await query<Record<string, unknown>>(c.env.abdl_space_db, sql, params)
+  const postIds = posts.map(r => r.id as number)
+
+  const likedSet = new Set<number>()
+  const bookmarkSet = new Set<number>()
+  if (postIds.length > 0) {
+    const liked = await query<{ target_id: number }>(
+      c.env.abdl_space_db,
+      `SELECT target_id FROM likes WHERE user_id = ? AND target_type = 'post' AND target_id IN (${postIds.map(() => '?').join(',')})`,
+      [user.sub, ...postIds]
+    )
+    for (const l of liked) likedSet.add(l.target_id)
+    for (const id of postIds) bookmarkSet.add(id) // all are bookmarked
+  }
+
+  const imagesMap = await loadPostImages(c.env.abdl_space_db, postIds)
+  const pollIds = posts.filter(r => r.poll_id).map(r => r.poll_id as number)
+  const pollMap = await loadPolls(c.env.abdl_space_db, pollIds)
+
+  const statuses = posts.map(r => {
+    const account = toAccount({
+      id: r.user_id as number, username: r.username as string, avatar: r.avatar as string | null,
+      role: r.role as string, bio: r.bio as string | null, created_at: r.user_created_at as string,
+    })
+    return toStatus({
+      id: r.id as number, user_id: r.user_id as number, content: r.content as string,
+      like_count: r.like_count as number, comment_count: r.comment_count as number,
+      reblogs_count: r.reblogs_count as number, has_nsfw: !!r.has_nsfw,
+      created_at: r.created_at as string,
+      images: imagesMap.get(r.id as number),
+      spoiler_text: r.spoiler_text as string, visibility: r.visibility as string,
+      language: r.language as string,
+      in_reply_to_id: r.in_reply_to_id as number | null,
+      in_reply_to_account_id: r.in_reply_to_account_id as number | null,
+      poll: r.poll_id ? pollMap.get(r.poll_id as number) ?? null : null,
+    }, account, { favourited: likedSet.has(r.id as number), bookmarked: true })
+  })
+
+  return c.json(statuses)
 })
 
 // ============================================================
