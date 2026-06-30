@@ -256,6 +256,7 @@ mastodon.get('/accounts/verify_credentials', async (c) => {
     avatar: dbUser.avatar as string | null,
     role: dbUser.role as string,
     bio: dbUser.bio as string | null,
+    profile_fields: dbUser.profile_fields as string | null,
     created_at: dbUser.created_at as string,
   }, {
     statuses_count: postCount?.cnt ?? 0,
@@ -442,6 +443,7 @@ mastodon.get('/accounts/:id', async (c) => {
     header: dbUser.header as string | null,
     role: dbUser.role as string,
     bio: dbUser.bio as string | null,
+    profile_fields: dbUser.profile_fields as string | null,
     created_at: dbUser.created_at as string,
   }, {
     statuses_count: postCount?.cnt ?? 0,
