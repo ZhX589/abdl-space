@@ -466,6 +466,7 @@ mastodon.get('/accounts/:id/statuses', async (c) => {
   // Check which posts the current user has liked
   const user = await mastodonAuth(c)
   const likedSet = new Set<number>()
+  const bookmarkSet = new Set<number>()
   if (user) {
     const postIds = posts.map(r => r.id as number)
     if (postIds.length > 0) {
@@ -475,6 +476,12 @@ mastodon.get('/accounts/:id/statuses', async (c) => {
         [user.sub, ...postIds]
       )
       for (const l of liked) likedSet.add(l.target_id)
+      const bookmarked = await query<{ target_id: number }>(
+        c.env.abdl_space_db,
+        `SELECT target_id FROM likes WHERE user_id = ? AND target_type = 'bookmark' AND target_id IN (${postIds.map(() => '?').join(',')})`,
+        [user.sub, ...postIds]
+      )
+      for (const b of bookmarked) bookmarkSet.add(b.target_id)
     }
   }
 
@@ -506,7 +513,7 @@ mastodon.get('/accounts/:id/statuses', async (c) => {
       in_reply_to_account_id: r.in_reply_to_account_id as number | null,
       poll: r.poll_id ? pollMap.get(r.poll_id as number) ?? null : null,
       linkCard: cardMap.get(r.id as number) ?? null,
-    }, account, { favourited: likedSet.has(r.id as number), reblog: r.repost_id ? reblogMap.get(r.repost_id as number) : undefined }))
+    }, account, { favourited: likedSet.has(r.id as number), bookmarked: bookmarkSet.has(r.id as number), reblog: r.repost_id ? reblogMap.get(r.repost_id as number) : undefined }))
   })()
 
   const link = buildLinkHeader(`/api/v1/accounts/${id}/statuses`, statuses, limit, { only_media: c.req.query('only_media') || '' })
@@ -1089,6 +1096,7 @@ mastodon.get('/timelines/home', async (c) => {
   // Check which posts the current user has liked
   const postIds = posts.map(r => r.id as number)
   const likedSet = new Set<number>()
+  const bookmarkSet = new Set<number>()
   if (postIds.length > 0) {
     const liked = await query<{ target_id: number }>(
       c.env.abdl_space_db,
@@ -1096,6 +1104,12 @@ mastodon.get('/timelines/home', async (c) => {
       [user.sub, ...postIds]
     )
     for (const l of liked) likedSet.add(l.target_id)
+    const bookmarked = await query<{ target_id: number }>(
+      c.env.abdl_space_db,
+      `SELECT target_id FROM likes WHERE user_id = ? AND target_type = 'bookmark' AND target_id IN (${postIds.map(() => '?').join(',')})`,
+      [user.sub, ...postIds]
+    )
+    for (const b of bookmarked) bookmarkSet.add(b.target_id)
   }
 
   const homeStatuses = await (async () => {
@@ -1123,7 +1137,7 @@ mastodon.get('/timelines/home', async (c) => {
         in_reply_to_account_id: r.in_reply_to_account_id as number | null,
         poll: r.poll_id ? pollMap.get(r.poll_id as number) ?? null : null,
         linkCard: cardMap.get(r.id as number) ?? null,
-      }, account, { favourited: likedSet.has(r.id as number), reblog: r.repost_id ? reblogMap.get(r.repost_id as number) : undefined })
+      }, account, { favourited: likedSet.has(r.id as number), bookmarked: bookmarkSet.has(r.id as number), reblog: r.repost_id ? reblogMap.get(r.repost_id as number) : undefined })
     })
   })()
 
@@ -1158,6 +1172,7 @@ mastodon.get('/timelines/public', async (c) => {
   // Check which posts the current user has liked (if authenticated)
   const user = await mastodonAuth(c)
   const likedSet = new Set<number>()
+  const bookmarkSet = new Set<number>()
   if (user) {
     const postIds = posts.map(r => r.id as number)
     if (postIds.length > 0) {
@@ -1167,6 +1182,12 @@ mastodon.get('/timelines/public', async (c) => {
         [user.sub, ...postIds]
       )
       for (const l of liked) likedSet.add(l.target_id)
+      const bookmarked = await query<{ target_id: number }>(
+        c.env.abdl_space_db,
+        `SELECT target_id FROM likes WHERE user_id = ? AND target_type = 'bookmark' AND target_id IN (${postIds.map(() => '?').join(',')})`,
+        [user.sub, ...postIds]
+      )
+      for (const b of bookmarked) bookmarkSet.add(b.target_id)
     }
   }
 
@@ -1196,7 +1217,7 @@ mastodon.get('/timelines/public', async (c) => {
         in_reply_to_account_id: r.in_reply_to_account_id as number | null,
         poll: r.poll_id ? pollMap.get(r.poll_id as number) ?? null : null,
         linkCard: cardMap.get(r.id as number) ?? null,
-      }, account, { favourited: likedSet.has(r.id as number), reblog: r.repost_id ? reblogMap.get(r.repost_id as number) : undefined })
+      }, account, { favourited: likedSet.has(r.id as number), bookmarked: bookmarkSet.has(r.id as number), reblog: r.repost_id ? reblogMap.get(r.repost_id as number) : undefined })
     })
   })()
 
@@ -2100,6 +2121,7 @@ mastodon.get('/trends/statuses', async (c) => {
   const user = await mastodonAuth(c)
   const postIds = posts.map(r => r.id as number)
   const likedSet = new Set<number>()
+  const bookmarkSet = new Set<number>()
   if (user && postIds.length > 0) {
     const liked = await query<{ target_id: number }>(
       c.env.abdl_space_db,
@@ -2107,6 +2129,12 @@ mastodon.get('/trends/statuses', async (c) => {
       [user.sub, ...postIds]
     )
     for (const l of liked) likedSet.add(l.target_id)
+    const bookmarked = await query<{ target_id: number }>(
+      c.env.abdl_space_db,
+      `SELECT target_id FROM likes WHERE user_id = ? AND target_type = 'bookmark' AND target_id IN (${postIds.map(() => '?').join(',')})`,
+      [user.sub, ...postIds]
+    )
+    for (const b of bookmarked) bookmarkSet.add(b.target_id)
   }
 
   const imagesMap = await loadPostImages(c.env.abdl_space_db, postIds)
@@ -2130,7 +2158,7 @@ mastodon.get('/trends/statuses', async (c) => {
       in_reply_to_id: r.in_reply_to_id as number | null,
       in_reply_to_account_id: r.in_reply_to_account_id as number | null,
       poll: r.poll_id ? pollMap.get(r.poll_id as number) ?? null : null,
-    }, account, { favourited: likedSet.has(r.id as number) })
+    }, account, { favourited: likedSet.has(r.id as number), bookmarked: bookmarkSet.has(r.id as number) })
   })
 
   const link = buildLinkHeader('/api/v1/trends/statuses', statuses, limit)
