@@ -64,7 +64,7 @@ export function toAccount(user: {
     noindex: false,
     source: {
       note: user.bio ? `<p>${escapeHtml(user.bio)}</p>` : '',
-      fields: [],
+      fields: (user as any).profile_fields ? JSON.parse((user as any).profile_fields || '[]') : [],
       privacy: 'public',
       sensitive: false,
       language: 'zh',

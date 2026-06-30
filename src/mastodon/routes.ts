@@ -235,7 +235,7 @@ mastodon.get('/accounts/verify_credentials', async (c) => {
 
   const dbUser = await queryOne<Record<string, unknown>>(
     c.env.abdl_space_db,
-    'SELECT id, username, avatar, header, role, bio, created_at FROM users WHERE id = ?',
+    'SELECT id, username, avatar, header, role, bio, profile_fields, created_at FROM users WHERE id = ?',
     [user.sub]
   )
   if (!dbUser) return c.json({ error: 'User not found' }, 404)
@@ -367,6 +367,18 @@ mastodon.patch('/accounts/update_credentials', async (c) => {
     }
   }
 
+  // Handle fields_attributes (profile fields)
+  const fieldsData: { name: string; value: string }[] = []
+  for (let i = 0; i < (body._fieldsCount as number || 0); i++) {
+    const name = String(body[`fields_attributes_${i}_name`] || '')
+    const value = String(body[`fields_attributes_${i}_value`] || '')
+    if (name || value) fieldsData.push({ name, value })
+  }
+  if (fieldsData.length > 0 || (body._fieldsCount as number) === 0) {
+    updates.push('profile_fields = ?')
+    params.push(JSON.stringify(fieldsData))
+  }
+
   if (updates.length > 0) {
     params.push(user.sub)
     await run(c.env.abdl_space_db, `UPDATE users SET ${updates.join(', ')} WHERE id = ?`, params)
@@ -375,7 +387,7 @@ mastodon.patch('/accounts/update_credentials', async (c) => {
   // Return updated account
   const dbUser = await queryOne<Record<string, unknown>>(
     c.env.abdl_space_db,
-    'SELECT id, username, avatar, header, role, bio, created_at FROM users WHERE id = ?',
+    'SELECT id, username, avatar, header, role, bio, profile_fields, created_at FROM users WHERE id = ?',
     [user.sub]
   )
   if (!dbUser) return c.json({ error: 'User not found' }, 404)
@@ -400,7 +412,7 @@ mastodon.get('/accounts/:id', async (c) => {
 
   const dbUser = await queryOne<Record<string, unknown>>(
     c.env.abdl_space_db,
-    'SELECT id, username, avatar, header, role, bio, created_at FROM users WHERE id = ?',
+    'SELECT id, username, avatar, header, role, bio, profile_fields, created_at FROM users WHERE id = ?',
     [id]
   )
   if (!dbUser) return c.json({ error: 'Record not found' }, 404)
@@ -444,7 +456,7 @@ mastodon.get('/accounts/:id/statuses', async (c) => {
   const excludeReplies = c.req.query('exclude_replies') === 'true'
 
   const dbUser = await queryOne<{ id: number; username: string; avatar: string | null; header: string | null; role: string; bio: string | null; created_at: string }>(
-    c.env.abdl_space_db, 'SELECT id, username, avatar, header, role, bio, created_at FROM users WHERE id = ?', [id]
+    c.env.abdl_space_db, 'SELECT id, username, avatar, header, role, bio, profile_fields, created_at FROM users WHERE id = ?', [id]
   )
   if (!dbUser) return c.json({ error: 'Record not found' }, 404)
 
@@ -1490,7 +1502,7 @@ mastodon.get('/search', async (c) => {
 
   const [users, posts] = await Promise.all([
     query<{ id: number; username: string; avatar: string | null; role: string; bio: string | null; created_at: string }>(
-      c.env.abdl_space_db, 'SELECT id, username, avatar, header, role, bio, created_at FROM users WHERE username LIKE ? LIMIT 10', [likePattern]
+      c.env.abdl_space_db, 'SELECT id, username, avatar, header, role, bio, profile_fields, created_at FROM users WHERE username LIKE ? LIMIT 10', [likePattern]
     ),
     query<Record<string, unknown>>(
       c.env.abdl_space_db,
