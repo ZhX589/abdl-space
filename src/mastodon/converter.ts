@@ -25,6 +25,7 @@ export function toAccount(user: {
   header?: string | null
   role: string
   bio?: string | null
+  profile_fields?: string | null
   created_at: string
 }, opts?: {
   statuses_count?: number
@@ -64,7 +65,7 @@ export function toAccount(user: {
     noindex: false,
     source: {
       note: user.bio ? `<p>${escapeHtml(user.bio)}</p>` : '',
-      fields: (user as any).profile_fields ? JSON.parse((user as any).profile_fields || '[]') : [],
+      fields: (() => { try { return JSON.parse(user.profile_fields || '[]') } catch { return [] } })(),
       privacy: 'public',
       sensitive: false,
       language: 'zh',
