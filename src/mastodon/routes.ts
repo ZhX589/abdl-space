@@ -368,16 +368,25 @@ mastodon.patch('/accounts/update_credentials', async (c) => {
   }
 
   // Handle fields_attributes (profile fields)
+  // Android sends: fields_attributes[0][name], fields_attributes[0][value]
   const fieldsData: { name: string; value: string }[] = []
-  for (let i = 0; i < (body._fieldsCount as number || 0); i++) {
-    const name = String(body[`fields_attributes_${i}_name`] || '')
-    const value = String(body[`fields_attributes_${i}_value`] || '')
-    if (name || value) fieldsData.push({ name, value })
+  const fieldsMap = new Map<number, { name: string; value: string }>()
+  for (const [key, value] of (formData as FormData).entries()) {
+    const match = key.match(/fields_attributes\[(\d+)\]\[(\w+)\]/)
+    if (match) {
+      const idx = parseInt(match[1])
+      const prop = match[2]
+      if (!fieldsMap.has(idx)) fieldsMap.set(idx, { name: '', value: '' })
+      const entry = fieldsMap.get(idx)!
+      if (prop === 'name') entry.name = String(value)
+      else if (prop === 'value') entry.value = String(value)
+    }
   }
-  if (fieldsData.length > 0 || (body._fieldsCount as number) === 0) {
-    updates.push('profile_fields = ?')
-    params.push(JSON.stringify(fieldsData))
+  for (const [, entry] of fieldsMap) {
+    if (entry.name || entry.value) fieldsData.push(entry)
   }
+  updates.push('profile_fields = ?')
+  params.push(JSON.stringify(fieldsData))
 
   if (updates.length > 0) {
     params.push(user.sub)
