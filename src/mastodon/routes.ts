@@ -288,13 +288,29 @@ mastodon.patch('/accounts/update_credentials', async (c) => {
   const contentType = c.req.header('Content-Type') || ''
 
   // P1#10: Support both JSON and multipart/form-data
+  let fieldsData: { name: string; value: string }[] = []
   if (contentType.includes('multipart/form-data') || contentType.includes('application/x-www-form-urlencoded')) {
     try {
       const formData = await c.req.formData()
       for (const [key, value] of formData.entries()) {
-        // Handle nested keys like fields_attributes[0][name]
         if (key.startsWith('fields_attributes')) continue
         body[key] = value
+      }
+      // Parse fields_attributes[N][name/value] from formData entries
+      const fieldsMap = new Map<number, { name: string; value: string }>()
+      for (const [key, value] of formData.entries()) {
+        const match = key.match(/fields_attributes\[(\d+)\]\[(\w+)\]/)
+        if (match) {
+          const idx = parseInt(match[1])
+          const prop = match[2]
+          if (!fieldsMap.has(idx)) fieldsMap.set(idx, { name: '', value: '' })
+          const entry = fieldsMap.get(idx)!
+          if (prop === 'name') entry.name = String(value)
+          else if (prop === 'value') entry.value = String(value)
+        }
+      }
+      for (const [, entry] of fieldsMap) {
+        if (entry.name || entry.value) fieldsData.push(entry)
       }
     } catch {}
   } else {
@@ -367,24 +383,7 @@ mastodon.patch('/accounts/update_credentials', async (c) => {
     }
   }
 
-  // Handle fields_attributes (profile fields)
-  // Android sends: fields_attributes[0][name], fields_attributes[0][value]
-  const fieldsData: { name: string; value: string }[] = []
-  const fieldsMap = new Map<number, { name: string; value: string }>()
-  for (const [key, value] of (formData as FormData).entries()) {
-    const match = key.match(/fields_attributes\[(\d+)\]\[(\w+)\]/)
-    if (match) {
-      const idx = parseInt(match[1])
-      const prop = match[2]
-      if (!fieldsMap.has(idx)) fieldsMap.set(idx, { name: '', value: '' })
-      const entry = fieldsMap.get(idx)!
-      if (prop === 'name') entry.name = String(value)
-      else if (prop === 'value') entry.value = String(value)
-    }
-  }
-  for (const [, entry] of fieldsMap) {
-    if (entry.name || entry.value) fieldsData.push(entry)
-  }
+  // Always update profile_fields (even if empty array)
   updates.push('profile_fields = ?')
   params.push(JSON.stringify(fieldsData))
 
