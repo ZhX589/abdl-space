@@ -450,17 +450,8 @@ nbw.get('/mobile-callback', async (c) => {
     return c.redirect(`abdl-space://callback?token=${encodeURIComponent(token)}`, 302)
   }
 
-  // 4. 未绑定 → 区分绑定流程和登录流程
-  console.log('mobile-callback data:', JSON.stringify(data))
-  const clientState = data.clientState || ''
-  const isBindFlow = clientState.includes('bind')
-  console.log('isBindFlow:', isBindFlow, 'clientState:', clientState)
-  if (isBindFlow) {
-    // 绑定流程 → 返回需要绑定的提示
-    return c.redirect(`abdl-space://callback?nbw_bind=need_bind&nbw_user=${encodeURIComponent(nbwUser.username || '')}`, 302)
-  }
-  // 登录流程 → 返回错误页
-  return c.html(errorPage('该宝宝新天地账号尚未绑定 ABDL Space 账号，请先在 ABDL Space 网页端完成绑定后再使用此登录方式。'), 200, { 'Content-Type': 'text/html; charset=utf-8' })
+  // 4. 未绑定 → 绑定流程：返回需要绑定的提示
+  return c.redirect(`abdl-space://callback?nbw_bind=need_bind&nbw_user=${encodeURIComponent(nbwUser.username || '')}`, 302)
   } catch (e) {
     console.error('mobile-callback unhandled error:', e)
     return c.html(errorPage('服务器内部错误，请稍后重试'), 200, { 'Content-Type': 'text/html; charset=utf-8' })
