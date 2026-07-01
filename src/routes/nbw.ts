@@ -352,6 +352,7 @@ nbw.get('/mobile-start', async (c) => {
  * 注意: 不设置 Set-Cookie（隔离网页端登录状态）
  */
 nbw.get('/mobile-callback', async (c) => {
+  try {
   const code = c.req.query('code')
   if (!code) {
     return c.html(errorPage('授权失败：缺少授权码'), 200, { 'Content-Type': 'text/html; charset=utf-8' })
@@ -395,7 +396,9 @@ nbw.get('/mobile-callback', async (c) => {
       }),
     })
     if (!tokenRes.ok) {
-      return c.html(errorPage('NBW 授权码无效，请重试'), 200, { 'Content-Type': 'text/html; charset=utf-8' })
+      const errText = await tokenRes.text().catch(() => '')
+      console.error('NBW token exchange failed:', tokenRes.status, errText)
+      return c.html(errorPage(`NBW 授权码无效 (${tokenRes.status})，请重试`), 200, { 'Content-Type': 'text/html; charset=utf-8' })
     }
     tokenData = await tokenRes.json()
   } catch {
@@ -454,6 +457,10 @@ nbw.get('/mobile-callback', async (c) => {
   }
   // 登录流程 → 返回错误页
   return c.html(errorPage('该宝宝新天地账号尚未绑定 ABDL Space 账号，请先在 ABDL Space 网页端完成绑定后再使用此登录方式。'), 200, { 'Content-Type': 'text/html; charset=utf-8' })
+  } catch (e) {
+    console.error('mobile-callback unhandled error:', e)
+    return c.html(errorPage('服务器内部错误，请稍后重试'), 200, { 'Content-Type': 'text/html; charset=utf-8' })
+  }
 })
 
 function errorPage(message: string): string {
