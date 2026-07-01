@@ -363,8 +363,9 @@ nbw.get('/mobile-callback', async (c) => {
   if (!state) {
     return c.html(errorPage('授权验证失败：缺少 state'), 200, { 'Content-Type': 'text/html; charset=utf-8' })
   }
+  let data: any = {}
   try {
-    const data = JSON.parse(atob(state))
+    data = JSON.parse(atob(state))
     if (!data.ts || Date.now() - data.ts > 10 * 60 * 1000) {
       return c.html(errorPage('授权已过期，请重试'), 200, { 'Content-Type': 'text/html; charset=utf-8' })
     }
