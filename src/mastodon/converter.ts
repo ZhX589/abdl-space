@@ -26,6 +26,7 @@ export function toAccount(user: {
   role: string
   bio?: string | null
   profile_fields?: string | null
+  nbw_username?: string | null
   created_at: string
 }, opts?: {
   statuses_count?: number
@@ -70,6 +71,7 @@ export function toAccount(user: {
       sensitive: false,
       language: 'zh',
     },
+    nbw_username: user.nbw_username || null,
   }
 }
 

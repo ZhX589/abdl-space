@@ -430,9 +430,15 @@ nbw.get('/mobile-callback', async (c) => {
   } catch {}
 
   if (existing) {
-    // 已绑定 → 签发 JWT → 302 回 App
+    // 已绑定 → 判断来源：如果是绑定流程，返回 nbw_bind；如果是登录流程，返回 token
+    const referer = c.req.header('Referer') || ''
+    const isFromBind = state && state.includes('bind')
+    if (isFromBind) {
+      // 绑定流程 → 返回绑定成功
+      return c.redirect(`abdl-space://callback?nbw_bind=success&nbw_user=${encodeURIComponent(existing.username)}`, 302)
+    }
+    // 登录流程 → 签发 JWT
     const token = await signJWT({ sub: existing.id, username: existing.username, email: existing.email, role: existing.role }, c.env.JWT_SECRET)
-    // 标记用户使用过 App
     try {
       await db.prepare('UPDATE users SET has_app = 1 WHERE id = ? AND has_app = 0').bind(existing.id).run()
     } catch {}
