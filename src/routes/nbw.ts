@@ -451,7 +451,10 @@ nbw.get('/mobile-callback', async (c) => {
   }
 
   // 4. 未绑定 → 区分绑定流程和登录流程
-  const isBindFlow = data.clientState && data.clientState.includes('bind')
+  console.log('mobile-callback data:', JSON.stringify(data))
+  const clientState = data.clientState || ''
+  const isBindFlow = clientState.includes('bind')
+  console.log('isBindFlow:', isBindFlow, 'clientState:', clientState)
   if (isBindFlow) {
     // 绑定流程 → 返回需要绑定的提示
     return c.redirect(`abdl-space://callback?nbw_bind=need_bind&nbw_user=${encodeURIComponent(nbwUser.username || '')}`, 302)
