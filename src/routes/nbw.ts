@@ -329,8 +329,9 @@ nbw.get('/mobile-start', async (c) => {
   const { clientId, redirectUri } = getAppNBWConfig(c.env)
   if (!clientId) return c.text('NBW OAuth 未配置', 500)
 
-  // 签名 state：编码时间戳 + 随机数，回调时验证时效性
-  const stateData = { ts: Date.now(), nonce: crypto.randomUUID() }
+  // 保留 App 传来的 state 中的 action 信息
+  const clientState = c.req.query('state') || ''
+  const stateData = { ts: Date.now(), nonce: crypto.randomUUID(), clientState }
   const signedState = btoa(JSON.stringify(stateData)).replace(/=/g, '')
 
   const url = new URL('https://www.newbabyworld.top/oauth/authorize.php')
@@ -446,7 +447,7 @@ nbw.get('/mobile-callback', async (c) => {
   }
 
   // 4. 未绑定 → 区分绑定流程和登录流程
-  const isBindFlow = state && state.includes('bind')
+  const isBindFlow = data.clientState && data.clientState.includes('bind')
   if (isBindFlow) {
     // 绑定流程 → 返回需要绑定的提示
     return c.redirect(`abdl-space://callback?nbw_bind=need_bind&nbw_user=${encodeURIComponent(nbwUser.username || '')}`, 302)
