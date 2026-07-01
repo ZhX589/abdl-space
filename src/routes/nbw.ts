@@ -450,8 +450,10 @@ nbw.get('/mobile-callback', async (c) => {
     return c.redirect(`abdl-space://callback?token=${encodeURIComponent(token)}`, 302)
   }
 
-  // 4. 未绑定 → 绑定流程：返回 need_bind + NBW access_token
-  return c.redirect(`abdl-space://callback?nbw_bind=need_bind&nbw_user=${encodeURIComponent(nbwUser.username || '')}&nbw_token=${encodeURIComponent(tokenData.access_token || '')}`, 302)
+  // 4. 未绑定 → 返回 need_bind + NBW access_token + 原始 flow 标识
+  const isBindFlow = data.clientState && data.clientState.includes('bind')
+  const bindParam = isBindFlow ? 'bind' : 'login'
+  return c.redirect(`abdl-space://callback?nbw_bind=need_bind&nbw_user=${encodeURIComponent(nbwUser.username || '')}&nbw_token=${encodeURIComponent(tokenData.access_token || '')}&nbw_flow=${bindParam}`, 302)
   } catch (e) {
     console.error('mobile-callback unhandled error:', e)
     return c.html(errorPage('服务器内部错误，请稍后重试'), 200, { 'Content-Type': 'text/html; charset=utf-8' })
