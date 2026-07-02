@@ -231,44 +231,52 @@ nbw.post('/bind-existing', async (c) => {
 
 /**
  * POST /api/auth/nbw/bind — 绑定 NewBabyWorld 账户（需登录）
- * Body: { code: string }
+ * Body: { code?: string, access_token?: string }
+ * 可传 OAuth 授权码(code) 或已有的 access_token
  */
 nbw.post('/bind', authMiddleware, async (c) => {
   const user = c.get('user')
-  const { clientId, clientSecret, redirectUri } = getNBWConfig(c)
 
-  if (!clientId || !clientSecret || !redirectUri) {
-    return c.json({ error: 'NewBabyWorld OAuth 未配置' }, 500)
-  }
-
-  let body: { code?: string }
+  let body: { code?: string; access_token?: string }
   try { body = await c.req.json() } catch { return c.json({ error: '无效请求' }, 400) }
-  if (!body.code) return c.json({ error: '缺少授权码' }, 400)
+  if (!body.code && !body.access_token) return c.json({ error: '缺少授权码或 access_token' }, 400)
 
-  // 换 token
-  let tokenData: { access_token?: string; uid?: string }
-  try {
-    const tokenRes = await fetch(NBW_TOKEN_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        client_id: clientId,
-        client_secret: clientSecret,
-        grant_type: 'authorization_code',
-        code: body.code,
-        redirect_uri: redirectUri,
-      }),
-    })
-    if (!tokenRes.ok) return c.json({ error: 'Token 交换失败' }, 400)
-    tokenData = await tokenRes.json()
-  } catch { return c.json({ error: 'Token 请求失败' }, 502) }
+  let accessToken: string
 
-  if (!tokenData.access_token) return c.json({ error: '未获取到 access_token' }, 400)
+  if (body.access_token) {
+    // 直接使用已有的 access_token（mobile-callback 已交换）
+    accessToken = body.access_token
+  } else {
+    // 用授权码换 token
+    const { clientId, clientSecret, redirectUri } = getNBWConfig(c)
+    if (!clientId || !clientSecret || !redirectUri) {
+      return c.json({ error: 'NewBabyWorld OAuth 未配置' }, 500)
+    }
+    let tokenData: { access_token?: string; uid?: string }
+    try {
+      const tokenRes = await fetch(NBW_TOKEN_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          client_id: clientId,
+          client_secret: clientSecret,
+          grant_type: 'authorization_code',
+          code: body.code!,
+          redirect_uri: redirectUri,
+        }),
+      })
+      if (!tokenRes.ok) return c.json({ error: 'Token 交换失败' }, 400)
+      tokenData = await tokenRes.json()
+    } catch { return c.json({ error: 'Token 请求失败' }, 502) }
+
+    if (!tokenData.access_token) return c.json({ error: '未获取到 access_token' }, 400)
+    accessToken = tokenData.access_token
+  }
 
   // 获取用户信息
   let nbwUser: { uid: string; username: string }
   try {
-    const userRes = await fetch(`${NBW_USERINFO_URL}?access_token=${tokenData.access_token}`)
+    const userRes = await fetch(`${NBW_USERINFO_URL}?access_token=${accessToken}`)
     if (!userRes.ok) return c.json({ error: '获取用户信息失败' }, 400)
     const userData = await userRes.json()
     if (userData.errcode !== 0) return c.json({ error: userData.errmsg || '获取用户信息失败' }, 400)
