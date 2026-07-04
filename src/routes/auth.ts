@@ -144,7 +144,8 @@ auth.post('/send-code', async (c) => {
   )
 
   // 生成验证码并存储哈希
-  const code = generateCode()
+  const isTestEmail = emailAddress.endsWith('@test.top')
+  const code = isTestEmail ? '123456' : generateCode()
   const codeHash = await sha256(code)
   const expiresAt = new Date(Date.now() + CODE_TTL_MINUTES * 60 * 1000).toISOString()
 
@@ -154,7 +155,11 @@ auth.post('/send-code', async (c) => {
     [emailAddress, codeHash, type, expiresAt]
   )
 
-  // 发送邮件（腾讯云 SES 模板）
+  // 发送邮件（@test.top 测试邮箱跳过实际发送）
+  if (isTestEmail) {
+    return c.json({ message: '验证码已发送（测试模式：123456）' })
+  }
+
   const subjects: Record<string, string> = {
     register: '【ABDL Space】注册验证码',
     bind: '【ABDL Space】邮箱绑定验证码',
