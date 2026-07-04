@@ -13,6 +13,7 @@ import { toAccount, toStatus, toStatusFromComment, toNotification, toISOString }
 import { generateCardsForPosts } from './linkpreview.ts'
 import type { MastodonNotification, MastodonAccount, MastodonStatus } from './types.ts'
 import { mastodonAuth, buildInstance, resolveStatus, parseMastoIdForCursor } from './shared.ts'
+import { syncPostToNBW } from '../lib/nbw-sync.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
@@ -691,6 +692,7 @@ mastodon.post('/statuses', async (c) => {
     poll?: { options?: string[]; expires_in?: number; multiple?: boolean; hide_totals?: boolean };
     scheduled_at?: string;
     media_attributes?: { id?: string; description?: string }[];
+    nbw_fid?: number;
   }
   try { body = await c.req.json() } catch { return c.json({ error: 'invalid body' }, 400) }
 
@@ -792,6 +794,12 @@ mastodon.post('/statuses', async (c) => {
   const account = toAccount({
     id: post.user_id as number, username: post.username as string, avatar: post.avatar as string | null,
     role: post.role as string, bio: post.bio as string | null, created_at: post.user_created_at as string,
+  })
+
+  // NBW 异步双发（不阻塞响应）
+  const mediaUrls = images.map(i => i.image_url)
+  syncPostToNBW(c.env, user.sub, postId, content, mediaUrls, body.nbw_fid).catch(err => {
+    console.error('NBW sync failed:', err)
   })
 
   return c.json(toStatus({

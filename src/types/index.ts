@@ -287,6 +287,7 @@ export interface CreatePostRequest {
   diaper_id?: number
   repost_id?: number
   is_announcement?: boolean
+  nbw_fid?: number
 }
 
 /** 创建帖子评论请求体 */
@@ -353,6 +354,8 @@ export interface Env {
   SES_FROM_EMAIL: string
   SES_TEMPLATE_ID: string
   SES_REGION?: string
+  // NBW S2S
+  NBW_API_KEY?: string
   // NBW OAuth
   NBW_CLIENT_ID?: string
   NBW_CLIENT_SECRET?: string

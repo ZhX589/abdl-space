@@ -4,6 +4,7 @@ import type { Env, JWTPayload, CreatePostRequest } from '../types/index.ts'
 import { query, queryOne, run } from '../lib/db.ts'
 import { authMiddleware } from '../middleware/auth.ts'
 import { rateLimit } from '../lib/rate-limit.ts'
+import { syncPostToNBW } from '../lib/nbw-sync.ts'
 
 const IMGBED_URL = 'https://img.abdl-space.top'
 
@@ -435,6 +436,12 @@ posts.post('/', authMiddleware, async (c) => {
   )
 
   const postId = result.meta.last_row_id
+
+  // NBW 异步双发（不阻塞响应）
+  const mediaUrls = (images || []).map(img => typeof img === 'string' ? img : img.url).filter(Boolean)
+  syncPostToNBW(c.env, user.sub, postId, content.trim(), mediaUrls, body.nbw_fid).catch(err => {
+    console.error('NBW sync failed:', err)
+  })
 
   // 保存图片
   let postHasNsfw = false

@@ -5,7 +5,7 @@ import { queryOne, run } from '../lib/db.ts'
 import { signJWT } from '../lib/auth.ts'
 import { hashPassword } from '../lib/auth.ts'
 import { authMiddleware } from '../middleware/auth.ts'
-import { getNBWConfig, getAppNBWConfig } from '../lib/nbw.ts'
+import { getNBWConfig, getAppNBWConfig, nbwS2SRequest } from '../lib/nbw.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
@@ -478,5 +478,149 @@ function errorPage(message: string): string {
 <p style="color:#666;margin:0;">${safe}</p>
 </div></body></html>`
 }
+
+// ============================================================
+// NBW S2S 接口代理（一键注册流程）
+// ============================================================
+
+/**
+ * POST /api/auth/nbw/get-register-url — 获取 NBW 官方注册引导链接
+ * Body: { email: string }
+ * 需要登录
+ */
+nbw.post('/get-register-url', authMiddleware, async (c) => {
+  const body = await c.req.json<{ email?: string }>()
+  if (!body.email) return c.json({ error: 'email is required' }, 400)
+
+  const result = await nbwS2SRequest(c.env, 'get_register_url', {
+    email: body.email,
+    clientip: c.req.header('CF-Connecting-IP') || '',
+  })
+  return c.json(result)
+})
+
+/**
+ * POST /api/auth/nbw/check-register — 检查 NBW 注册是否完成
+ * Body: { email: string }
+ * 需要登录
+ */
+nbw.post('/check-register', authMiddleware, async (c) => {
+  const body = await c.req.json<{ email?: string }>()
+  if (!body.email) return c.json({ error: 'email is required' }, 400)
+
+  const result = await nbwS2SRequest(c.env, 'search_user', { email: body.email })
+  if (result.code === 200 && result.data) {
+    const data = result.data as { uid: number; username: string }
+    return c.json({
+      registered: true,
+      nbw_uid: String(data.uid),
+      nbw_username: data.username,
+    })
+  }
+  return c.json({ registered: false })
+})
+
+/**
+ * POST /api/auth/nbw/bind-by-email — 通过邮箱直接绑定 NBW（无需 OAuth）
+ * Body: { email: string }
+ * 需要登录
+ */
+nbw.post('/bind-by-email', authMiddleware, async (c) => {
+  const payload = c.get('user')
+  const body = await c.req.json<{ email?: string }>()
+  if (!body.email) return c.json({ error: 'email is required' }, 400)
+
+  // 1. search_user 获取 nbw_uid + nbw_username
+  const result = await nbwS2SRequest(c.env, 'search_user', { email: body.email })
+  if (result.code !== 200 || !result.data) {
+    return c.json({ error: 'NBW 用户未找到' }, 404)
+  }
+  const data = result.data as { uid: number; username: string }
+  const nbw_uid = String(data.uid)
+  const nbw_username = data.username
+
+  // 2. 检查 nbw_uid 是否已被其他用户绑定
+  const db = c.env.abdl_space_db
+  const existing = await queryOne<{ id: number }>(
+    db, 'SELECT id FROM users WHERE nbw_uid = ? AND id != ?', [nbw_uid, payload.sub]
+  )
+  if (existing) {
+    return c.json({ error: '该 NBW 账户已绑定其他用户' }, 409)
+  }
+
+  // 3. 绑定
+  await run(db,
+    'UPDATE users SET nbw_uid = ?, nbw_username = ? WHERE id = ?',
+    [nbw_uid, nbw_username, payload.sub]
+  )
+
+  return c.json({ nbw_uid, nbw_username })
+})
+
+/**
+ * POST /api/auth/nbw/recommend-fid — AI 推荐 NBW 版块
+ * Body: { content: string }
+ * 需要登录
+ */
+nbw.post('/recommend-fid', authMiddleware, async (c) => {
+  const body = await c.req.json<{ content?: string }>()
+  if (!body.content) return c.json({ error: 'content is required' }, 400)
+
+  const apiKey = c.env.DEEPSEEK_API_KEY
+  if (!apiKey) {
+    // 无 API Key 时返回默认推荐
+    return c.json({ fid: 27, forum_name: '分享', confidence: 0.5 })
+  }
+
+  const prompt = `你是 ABDL Space 帖子分类助手。根据以下帖子内容，从 NBW 版块列表中选择最合适的版块。
+
+版块列表（仅限以下4个）：
+- fid:28 自拍（用户自拍照片、生活照）
+- fid:27 分享（分享内容、经验、资源、好物推荐）
+- fid:26 小说/漫画（文学作品、同人小说、漫画）
+- fid:3 交友（找朋友、社交、认识新朋友）
+
+帖子内容：${body.content.substring(0, 500)}
+
+只返回一个 JSON 对象，不要包含其他内容：{"fid": 推荐的fid, "forum_name": "版块名", "confidence": 0.0-1.0}`
+
+  try {
+    const response = await fetch('https://api.deepseek.com/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: 'deepseek-chat',
+        messages: [{ role: 'user', content: prompt }],
+        max_tokens: 100,
+        temperature: 0.3,
+      }),
+    })
+
+    if (!response.ok) {
+      return c.json({ fid: 27, forum_name: '分享', confidence: 0.5 })
+    }
+
+    const data = await response.json() as { choices: { message: { content: string } }[] }
+    const content = data.choices[0]?.message?.content ?? ''
+
+    // 解析 JSON 响应
+    const jsonMatch = content.match(/\{[^}]+\}/)
+    if (jsonMatch) {
+      const parsed = JSON.parse(jsonMatch[0])
+      // 校验 fid 是否在允许范围内
+      const allowedFids = [28, 27, 26, 3]
+      if (allowedFids.includes(parsed.fid)) {
+        return c.json(parsed)
+      }
+    }
+
+    return c.json({ fid: 27, forum_name: '分享', confidence: 0.5 })
+  } catch {
+    return c.json({ fid: 27, forum_name: '分享', confidence: 0.5 })
+  }
+})
 
 export default nbw
