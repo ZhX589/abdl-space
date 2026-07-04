@@ -91,29 +91,57 @@ admin.delete('/users/:id', adminMiddleware, async (c) => {
 
   const db = c.env.abdl_space_db
 
-  // 级联删除所有关联数据
+  // 级联删除所有关联数据（按依赖顺序）
+  // 评论图片（依赖 post_comments）
+  await run(db, 'DELETE FROM comment_images WHERE comment_id IN (SELECT id FROM post_comments WHERE user_id = ?)', [id])
   await run(db, 'DELETE FROM post_comments WHERE user_id = ?', [id])
-  await run(db, 'DELETE FROM likes WHERE user_id = ?', [id])
-  await run(db, 'DELETE FROM ratings WHERE user_id = ?', [id])
-  await run(db, 'DELETE FROM feelings WHERE user_id = ?', [id])
-  await run(db, 'DELETE FROM notifications WHERE user_id = ?', [id])
-  await run(db, 'DELETE FROM messages WHERE sender_id = ? OR receiver_id = ?', [id, id])
-  await run(db, 'DELETE FROM follows WHERE follower_id = ? OR following_id = ?', [id, id])
-  await run(db, 'DELETE FROM user_settings WHERE user_id = ?', [id])
-  await run(db, 'DELETE FROM experience WHERE user_id = ?', [id])
-  await run(db, 'DELETE FROM reports WHERE user_id = ? OR reporter_id = ?', [id, id])
-  // 删除 OAuth tokens 和 clients
-  await run(db, 'DELETE FROM oauth_tokens WHERE user_id = ?', [id])
-  await run(db, 'DELETE FROM oauth_clients WHERE owner_id = ?', [id])
-  // 删除用户帖子的图片
+  // 帖子图片（依赖 posts）
   const userPosts = await query<{ id: number }>(db, 'SELECT id FROM posts WHERE user_id = ?', [id])
   for (const post of userPosts) {
     await run(db, 'DELETE FROM post_images WHERE post_id = ?', [post.id])
+    await run(db, 'DELETE FROM poll_votes WHERE post_id = ?', [post.id])
   }
+  await run(db, 'DELETE FROM polls WHERE status_id IN (SELECT id FROM posts WHERE user_id = ?)', [id])
   await run(db, 'DELETE FROM posts WHERE user_id = ?', [id])
-  // 删除验证码记录
+  // 点赞/收藏/评分/感受
+  await run(db, 'DELETE FROM likes WHERE user_id = ?', [id])
+  await run(db, 'DELETE FROM ratings WHERE user_id = ?', [id])
+  await run(db, 'DELETE FROM feelings WHERE user_id = ?', [id])
+  // 通知/消息/关注
+  await run(db, 'DELETE FROM notifications WHERE user_id = ? OR actor_id = ?', [id, id])
+  await run(db, 'DELETE FROM messages WHERE sender_id = ? OR receiver_id = ?', [id, id])
+  await run(db, 'DELETE FROM follows WHERE follower_id = ? OR following_id = ?', [id, id])
+  // 积分/经验
+  await run(db, 'DELETE FROM points WHERE user_id = ?', [id])
+  await run(db, 'DELETE FROM exp_logs WHERE user_id = ?', [id])
+  await run(db, 'DELETE FROM point_logs WHERE user_id = ?', [id])
+  await run(db, 'DELETE FROM experience WHERE user_id = ?', [id])
+  await run(db, 'DELETE FROM daily_checkins WHERE user_id = ?', [id])
+  // 用户设置/徽章/签到
+  await run(db, 'DELETE FROM user_settings WHERE user_id = ?', [id])
+  await run(db, 'DELETE FROM user_badges WHERE user_id = ?', [id])
+  await run(db, 'DELETE FROM markers WHERE user_id = ?', [id])
+  // OAuth / API keys
+  await run(db, 'DELETE FROM oauth_tokens WHERE user_id = ?', [id])
+  await run(db, 'DELETE FROM oauth_clients WHERE owner_id = ?', [id])
+  await run(db, 'DELETE FROM oauth_codes WHERE user_id = ?', [id])
+  await run(db, 'DELETE FROM api_keys WHERE owner_id = ?', [id])
+  await run(db, 'DELETE FROM content_api_keys WHERE owner_id = ?', [id])
+  await run(db, 'DELETE FROM captcha_api_keys WHERE owner_id = ?', [id])
+  // 举报（含举报者）
+  await run(db, 'DELETE FROM reports WHERE user_id = ? OR reporter_id = ?', [id, id])
+  // 邀请码/安全日志/JPush/QR登录/公告互动
+  await run(db, 'DELETE FROM invite_codes WHERE creator_id = ? OR used_by = ?', [id, id])
+  await run(db, 'DELETE FROM security_logs WHERE user_id = ?', [id])
+  await run(db, 'DELETE FROM jpush_registrations WHERE user_id = ?', [id])
+  await run(db, 'DELETE FROM qr_login_sessions WHERE user_id = ?', [id])
+  await run(db, 'DELETE FROM announcement_reactions WHERE user_id = ?', [id])
+  await run(db, 'DELETE FROM announcement_read_status WHERE user_id = ?', [id])
+  await run(db, 'DELETE FROM lan_heartbeats WHERE user_id = ?', [id])
+  await run(db, 'DELETE FROM wiki_inline_comments WHERE author_id = ?', [id])
+  // 验证码记录
   await run(db, 'DELETE FROM email_verifications WHERE user_id = ?', [id])
-  // 删除用户
+  // 最后删除用户
   await run(db, 'DELETE FROM users WHERE id = ?', [id])
   return c.json({ message: '已删除' })
 })
