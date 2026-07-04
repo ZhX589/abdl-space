@@ -99,7 +99,6 @@ admin.delete('/users/:id', adminMiddleware, async (c) => {
   const userPosts = await query<{ id: number }>(db, 'SELECT id FROM posts WHERE user_id = ?', [id])
   for (const post of userPosts) {
     await run(db, 'DELETE FROM post_images WHERE post_id = ?', [post.id])
-    await run(db, 'DELETE FROM poll_votes WHERE post_id = ?', [post.id])
   }
   await run(db, 'DELETE FROM polls WHERE status_id IN (SELECT id FROM posts WHERE user_id = ?)', [id])
   await run(db, 'DELETE FROM posts WHERE user_id = ?', [id])
@@ -107,6 +106,8 @@ admin.delete('/users/:id', adminMiddleware, async (c) => {
   await run(db, 'DELETE FROM likes WHERE user_id = ?', [id])
   await run(db, 'DELETE FROM ratings WHERE user_id = ?', [id])
   await run(db, 'DELETE FROM feelings WHERE user_id = ?', [id])
+  // 投票记录
+  await run(db, 'DELETE FROM poll_votes WHERE user_id = ?', [id])
   // 通知/消息/关注
   await run(db, 'DELETE FROM notifications WHERE user_id = ? OR actor_id = ?', [id, id])
   await run(db, 'DELETE FROM messages WHERE sender_id = ? OR receiver_id = ?', [id, id])
@@ -117,27 +118,28 @@ admin.delete('/users/:id', adminMiddleware, async (c) => {
   await run(db, 'DELETE FROM point_logs WHERE user_id = ?', [id])
   await run(db, 'DELETE FROM experience WHERE user_id = ?', [id])
   await run(db, 'DELETE FROM daily_checkins WHERE user_id = ?', [id])
-  // 用户设置/徽章/签到
+  // 用户设置/徽章
   await run(db, 'DELETE FROM user_settings WHERE user_id = ?', [id])
   await run(db, 'DELETE FROM user_badges WHERE user_id = ?', [id])
-  await run(db, 'DELETE FROM markers WHERE user_id = ?', [id])
-  // OAuth / API keys
+  // OAuth
   await run(db, 'DELETE FROM oauth_tokens WHERE user_id = ?', [id])
   await run(db, 'DELETE FROM oauth_clients WHERE owner_id = ?', [id])
   await run(db, 'DELETE FROM oauth_codes WHERE user_id = ?', [id])
-  await run(db, 'DELETE FROM api_keys WHERE owner_id = ?', [id])
+  // API keys（仅用户级）
   await run(db, 'DELETE FROM content_api_keys WHERE owner_id = ?', [id])
   await run(db, 'DELETE FROM captcha_api_keys WHERE owner_id = ?', [id])
+  await run(db, 'DELETE FROM ks_channels WHERE owner_id = ?', [id])
+  await run(db, 'DELETE FROM ks_sub_keys WHERE owner_id = ?', [id])
   // 举报（含举报者）
   await run(db, 'DELETE FROM reports WHERE user_id = ? OR reporter_id = ?', [id, id])
-  // 邀请码/安全日志/JPush/QR登录/公告互动
+  // 邀请码/JPush/QR登录/公告互动/心跳/里程碑/Wiki评论
   await run(db, 'DELETE FROM invite_codes WHERE creator_id = ? OR used_by = ?', [id, id])
-  await run(db, 'DELETE FROM security_logs WHERE user_id = ?', [id])
   await run(db, 'DELETE FROM jpush_registrations WHERE user_id = ?', [id])
   await run(db, 'DELETE FROM qr_login_sessions WHERE user_id = ?', [id])
   await run(db, 'DELETE FROM announcement_reactions WHERE user_id = ?', [id])
   await run(db, 'DELETE FROM announcement_read_status WHERE user_id = ?', [id])
   await run(db, 'DELETE FROM lan_heartbeats WHERE user_id = ?', [id])
+  await run(db, 'DELETE FROM markers WHERE user_id = ?', [id])
   await run(db, 'DELETE FROM wiki_inline_comments WHERE author_id = ?', [id])
   // 验证码记录
   await run(db, 'DELETE FROM email_verifications WHERE user_id = ?', [id])
