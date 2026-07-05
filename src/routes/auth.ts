@@ -449,6 +449,65 @@ auth.post('/login', async (c) => {
 })
 
 // ============================================================
+// POST /api/auth/login-by-code — 邮箱验证码登录
+// ============================================================
+auth.post('/login-by-code', async (c) => {
+  const db = c.env.abdl_space_db
+  const ip = c.req.header('CF-Connecting-IP') || c.req.header('X-Forwarded-For')?.split(',')[0]?.trim() || 'unknown'
+
+  const ipLimit = await checkD1RateLimit(db, `ip:login:${ip}`, RATE_LIMIT_WINDOW, RATE_LIMIT_MAX)
+  if (!ipLimit.allowed) {
+    return c.json({ error: '操作太频繁，请稍后再试' }, 429)
+  }
+
+  const body = await c.req.json<{ email?: string; code?: string }>()
+  const { email: emailAddress, code } = body
+
+  if (!emailAddress || !code) {
+    return c.json({ error: 'email and code are required' }, 400)
+  }
+  if (!EMAIL_REGEX.test(emailAddress)) {
+    return c.json({ error: '请输入有效的邮箱地址' }, 400)
+  }
+
+  // 验证码校验
+  const result = await verifyCode(db, emailAddress, code, 'register')
+  if (!result.valid) {
+    return c.json({ error: result.error }, 400)
+  }
+  await run(db, 'UPDATE email_verifications SET used = 1 WHERE id = ?', [result.recordId])
+
+  // 查用户是否存在
+  const user = await queryOne<User>(
+    db,
+    'SELECT id, email, username, password_hash, avatar, role FROM users WHERE email = ?',
+    [emailAddress]
+  )
+
+  if (user) {
+    // 已注册 → 签发 token，登录
+    const token = await signJWT(
+      { sub: user.id, username: user.username, email: user.email, role: user.role },
+      c.env.JWT_SECRET
+    )
+    c.header('Set-Cookie', `token=${token}; ${tokenCookieOptions}`)
+
+    try {
+      await db.prepare('UPDATE users SET has_app = 1 WHERE id = ? AND has_app = 0').bind(user.id).run()
+    } catch {}
+
+    return c.json({
+      action: 'login',
+      token,
+      user: { id: user.id, email: user.email, username: user.username, avatar: user.avatar ?? DEFAULT_AVATAR, role: user.role }
+    })
+  } else {
+    // 未注册 → 让 App 进入注册流程
+    return c.json({ action: 'register', email: emailAddress })
+  }
+})
+
+// ============================================================
 // POST /api/auth/reset-password — 找回密码
 // ============================================================
 auth.post('/reset-password', async (c) => {
