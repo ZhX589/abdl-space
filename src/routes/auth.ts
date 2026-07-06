@@ -302,12 +302,16 @@ auth.post('/register', async (c) => {
       }
     }
   } else {
-    const result = await verifyCode(db, emailAddress, code, 'register')
-    if (!result.valid) {
-      return c.json({ error: result.error }, 400)
+    // 非 NBW 注册：如果有 code 就校验（login-by-code 已验证过时 code 可为空）
+    if (code) {
+      const result = await verifyCode(db, emailAddress, code, 'register')
+      if (!result.valid) {
+        return c.json({ error: result.error }, 400)
+      }
+      // 标记验证码已使用
+      await run(db, 'UPDATE email_verifications SET used = 1 WHERE id = ?', [result.recordId])
     }
-    // 标记验证码已使用
-    await run(db, 'UPDATE email_verifications SET used = 1 WHERE id = ?', [result.recordId])
+    // code 为空时跳过校验（login-by-code 已验证过该邮箱）
   }
 
   // 邀请码处理（可选）
