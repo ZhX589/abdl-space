@@ -443,10 +443,20 @@ nbw.get('/mobile-callback', async (c) => {
   } catch {}
 
   if (existing) {
-    // 已绑定 → 判断来源：如果是绑定流程，返回已绑定错误；如果是登录流程，返回 token
+    // 已绑定 → 判断来源：如果是绑定流程，检查是否是当前用户自己
     const isFromBind = state && state.includes('bind')
     if (isFromBind) {
-      // 绑定流程但 NBW 账号已被绑定 → 返回已绑定错误
+      // 从 state 中解析当前用户 ID
+      let currentUserId: number | null = null
+      try {
+        const stateObj = JSON.parse(atob(state))
+        currentUserId = stateObj.uid || null
+      } catch {}
+      if (currentUserId && existing.id === currentUserId) {
+        // 当前用户自己已经绑定过 → 返回绑定成功
+        return c.redirect(`abdl-space://callback?nbw_bind=success&nbw_user=${encodeURIComponent(existing.username)}`, 302)
+      }
+      // 其他用户已绑定 → 返回已绑定错误
       return c.redirect(`abdl-space://callback?nbw_bind=already_bound&nbw_user=${encodeURIComponent(existing.username)}`, 302)
     }
     // 登录流程 → 签发 JWT
