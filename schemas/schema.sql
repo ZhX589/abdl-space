@@ -385,3 +385,16 @@ CREATE TABLE IF NOT EXISTS announcement_read_status (
   FOREIGN KEY (announcement_id) REFERENCES announcements(id) ON DELETE CASCADE,
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
+
+-- 极光推送注册表
+CREATE TABLE IF NOT EXISTS jpush_registrations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL,
+  reg_id TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  last_active_at INTEGER,
+  UNIQUE(user_id, reg_id),
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_jpush_user_id ON jpush_registrations(user_id);
+CREATE INDEX IF NOT EXISTS idx_jpush_reg_id ON jpush_registrations(reg_id);
