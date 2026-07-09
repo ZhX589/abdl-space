@@ -444,7 +444,9 @@ nbw.get('/mobile-callback', async (c) => {
 
   if (existing) {
     // 已绑定 → 判断来源：如果是绑定流程，检查是否是当前用户自己
-    const isFromBind = state && state.includes('bind')
+    let decodedClient: any = {}
+    try { decodedClient = JSON.parse(atob(data.clientState)) } catch {}
+    const isFromBind = decodedClient.action === 'bind'
     if (isFromBind) {
       // 从 state 中解析当前用户 ID
       let currentUserId: number | null = null
@@ -468,7 +470,7 @@ nbw.get('/mobile-callback', async (c) => {
   }
 
   // 4. 未绑定 → 返回 need_bind + NBW access_token + 原始 flow 标识
-  const isBindFlow = data.clientState && data.clientState.includes('bind')
+  const isBindFlow = decodedClient.action === 'bind'
   const bindParam = isBindFlow ? 'bind' : 'login'
   return c.redirect(`abdl-space://callback?nbw_bind=need_bind&nbw_user=${encodeURIComponent(nbwUser.username || '')}&nbw_token=${encodeURIComponent(tokenData.access_token || '')}&nbw_flow=${bindParam}`, 302)
   } catch (e) {
