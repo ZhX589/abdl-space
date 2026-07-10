@@ -443,36 +443,23 @@ nbw.get('/mobile-callback', async (c) => {
   } catch {}
 
   if (existing) {
-    // 已绑定 → 判断来源：如果是绑定流程，检查是否是当前用户自己
-    let decodedClient: any = {}
-    try { decodedClient = JSON.parse(atob(data.clientState)) } catch {}
-    const isFromBind = decodedClient.action === 'bind'
-    if (isFromBind) {
-      // 从 state 中解析当前用户 ID
-      let currentUserId: number | null = null
-      try {
-        const stateObj = JSON.parse(atob(state))
-        currentUserId = stateObj.uid || null
-      } catch {}
-      if (currentUserId && existing.id === currentUserId) {
-        // 当前用户自己已经绑定过 → 返回绑定成功
-        return c.redirect(`abdl-space://callback?nbw_bind=success&nbw_user=${encodeURIComponent(existing.username)}`, 302)
-      }
-      // 其他用户已绑定 → 返回已绑定错误
-      return c.redirect(`abdl-space://callback?nbw_bind=already_bound&nbw_user=${encodeURIComponent(existing.username)}`, 302)
-    }
-    // 登录流程 → 签发 JWT
-    const token = await signJWT({ sub: existing.id, username: existing.username, email: existing.email, role: existing.role }, c.env.JWT_SECRET)
+    // 已绑定 → 检查是否是当前用户自己
+    let currentUserId: number | null = null
     try {
-      await db.prepare('UPDATE users SET has_app = 1 WHERE id = ? AND has_app = 0').bind(existing.id).run()
+      const stateObj = JSON.parse(atob(state))
+      currentUserId = stateObj.uid || null
     } catch {}
-    return c.redirect(`abdl-space://callback?token=${encodeURIComponent(token)}`, 302)
+    if (currentUserId && existing.id === currentUserId) {
+      // 当前用户自己已经绑定过 → 返回绑定成功
+      return c.redirect(`abdl-space://callback?nbw_bind=success&nbw_user=${encodeURIComponent(existing.username)}`, 302)
+    }
+    // 其他用户已绑定 → 返回已绑定错误（不返回JWT，防止误登录）
+    return c.redirect(`abdl-space://callback?nbw_bind=already_bound&nbw_user=${encodeURIComponent(existing.username)}`, 302)
   }
 
-  // 4. 未绑定 → 返回 need_bind + NBW access_token + 原始 flow 标识
-  const isBindFlow = decodedClient.action === 'bind'
-  const bindParam = isBindFlow ? 'bind' : 'login'
-  return c.redirect(`abdl-space://callback?nbw_bind=need_bind&nbw_user=${encodeURIComponent(nbwUser.username || '')}&nbw_token=${encodeURIComponent(tokenData.access_token || '')}&nbw_flow=${bindParam}`, 302)
+  // 4. 未绑定 → 返回 need_bind + NBW access_token
+  // bind/login 区分由 Android 端 SharedPreferences 处理
+  return c.redirect(`abdl-space://callback?nbw_bind=need_bind&nbw_user=${encodeURIComponent(nbwUser.username || '')}&nbw_token=${encodeURIComponent(tokenData.access_token || '')}`, 302)
   } catch (e) {
     console.error('mobile-callback unhandled error:', e)
     return c.html(errorPage('服务器内部错误，请稍后重试'), 200, { 'Content-Type': 'text/html; charset=utf-8' })
