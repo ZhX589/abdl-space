@@ -443,18 +443,31 @@ nbw.get('/mobile-callback', async (c) => {
   } catch {}
 
   if (existing) {
-    // 已绑定 → 检查是否是当前用户自己
+    // 已绑定 → 从 clientState 提取原始 app state 中的 uid 和 action
     let currentUserId: number | null = null
+    let isFromBind = false
     try {
-      const stateObj = JSON.parse(atob(state))
-      currentUserId = stateObj.uid || null
+      const clientStateData = JSON.parse(atob(data.clientState))
+      currentUserId = clientStateData.uid || null
+      isFromBind = clientStateData.action === 'bind'
     } catch {}
-    if (currentUserId && existing.id === currentUserId) {
-      // 当前用户自己已经绑定过 → 返回绑定成功
-      return c.redirect(`abdl-space://callback?nbw_bind=success&nbw_user=${encodeURIComponent(existing.username)}`, 302)
+
+    if (isFromBind) {
+      // 绑定流程
+      if (currentUserId && existing.id === currentUserId) {
+        // 当前用户自己已经绑定过 → 返回绑定成功
+        return c.redirect(`abdl-space://callback?nbw_bind=success&nbw_user=${encodeURIComponent(existing.username)}`, 302)
+      }
+      // 其他用户已绑定 → 返回已绑定错误
+      return c.redirect(`abdl-space://callback?nbw_bind=already_bound&nbw_user=${encodeURIComponent(existing.username)}`, 302)
     }
-    // 其他用户已绑定 → 返回已绑定错误（不返回JWT，防止误登录）
-    return c.redirect(`abdl-space://callback?nbw_bind=already_bound&nbw_user=${encodeURIComponent(existing.username)}`, 302)
+
+    // 登录流程 → 签发 JWT
+    const token = await signJWT({ sub: existing.id, username: existing.username, email: existing.email, role: existing.role }, c.env.JWT_SECRET)
+    try {
+      await db.prepare('UPDATE users SET has_app = 1 WHERE id = ? AND has_app = 0').bind(existing.id).run()
+    } catch {}
+    return c.redirect(`abdl-space://callback?token=${encodeURIComponent(token)}`, 302)
   }
 
   // 4. 未绑定 → 返回 need_bind + NBW access_token
