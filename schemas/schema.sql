@@ -104,6 +104,7 @@ CREATE TABLE IF NOT EXISTS posts (
   visibility TEXT DEFAULT 'public',       -- public/unlisted/private/direct
   language TEXT DEFAULT 'zh',             -- 语言标签
   in_reply_to_id INTEGER,               -- 回复的帖子/评论ID
+  in_reply_to_type TEXT,                 -- 'post' 或 'comment'
   in_reply_to_account_id INTEGER,        -- 回复目标的用户ID
   poll_id INTEGER,                       -- 关联的投票ID
   edited_at DATETIME,                    -- 编辑时间

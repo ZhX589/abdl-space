@@ -97,6 +97,7 @@ export function toStatus(post: {
   visibility?: string
   language?: string
   in_reply_to_id?: string | number | null
+  in_reply_to_type?: string | null
   in_reply_to_account_id?: string | number | null
   edited_at?: string | null
   poll?: MastodonPoll | null
@@ -112,7 +113,7 @@ export function toStatus(post: {
   return {
     id: toMastoId('post', post.id),
     created_at: toISOString(post.created_at),
-    in_reply_to_id: post.in_reply_to_id ? String(post.in_reply_to_id) : null,
+    in_reply_to_id: post.in_reply_to_id ? toMastoId((post.in_reply_to_type || 'post') as 'post' | 'comment', post.in_reply_to_id) : null,
     in_reply_to_account_id: post.in_reply_to_account_id ? String(post.in_reply_to_account_id) : null,
     sensitive: !!post.has_nsfw,
     spoiler_text: post.spoiler_text || '',

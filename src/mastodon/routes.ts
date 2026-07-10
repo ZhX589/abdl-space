@@ -536,6 +536,7 @@ mastodon.get('/accounts/:id/statuses', async (c) => {
       spoiler_text: r.spoiler_text as string, visibility: r.visibility as string,
       language: r.language as string,
       in_reply_to_id: r.in_reply_to_id as number | null,
+      in_reply_to_type: r.in_reply_to_type as string | null,
       in_reply_to_account_id: r.in_reply_to_account_id as number | null,
       poll: r.poll_id ? pollMap.get(r.poll_id as number) ?? null : null,
       linkCard: cardMap.get(r.id as number) ?? null,
@@ -705,10 +706,12 @@ mastodon.post('/statuses', async (c) => {
   // Resolve in_reply_to_id (could be p_123 or c_123 format)
   let inReplyToId: number | null = null
   let inReplyToAccountId: number | null = null
+  let inReplyToType: string | null = null
   if (body.in_reply_to_id) {
     const resolved = await resolveStatus(c.env.abdl_space_db, body.in_reply_to_id)
     if (resolved) {
       inReplyToId = resolved.realId
+      inReplyToType = resolved.kind
       // Find the account of the replied-to post/comment
       if (resolved.kind === 'post') {
         const repliedPost = await queryOne<{ user_id: number }>(c.env.abdl_space_db, 'SELECT user_id FROM posts WHERE id = ?', [resolved.realId])
@@ -722,9 +725,9 @@ mastodon.post('/statuses', async (c) => {
 
   const result = await run(
     c.env.abdl_space_db,
-    `INSERT INTO posts (user_id, content, has_nsfw, spoiler_text, visibility, language, in_reply_to_id, in_reply_to_account_id, poll_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [user.sub, content, hasNsfw, spoilerText, visibility, language, inReplyToId, inReplyToAccountId, null]
+    `INSERT INTO posts (user_id, content, has_nsfw, spoiler_text, visibility, language, in_reply_to_id, in_reply_to_type, in_reply_to_account_id, poll_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [user.sub, content, hasNsfw, spoilerText, visibility, language, inReplyToId, inReplyToType, inReplyToAccountId, null]
   )
   const postId = result.meta.last_row_id as number
 
@@ -810,6 +813,7 @@ mastodon.post('/statuses', async (c) => {
     spoiler_text: post.spoiler_text as string, visibility: post.visibility as string,
     language: post.language as string,
     in_reply_to_id: post.in_reply_to_id as number | null,
+    in_reply_to_type: post.in_reply_to_type as string | null,
     in_reply_to_account_id: post.in_reply_to_account_id as number | null,
     poll: poll as any,
   }, account))
@@ -895,6 +899,7 @@ mastodon.get('/statuses/:id', async (c) => {
     language: post.language as string,
     edited_at: post.edited_at as string | null,
     in_reply_to_id: post.in_reply_to_id as number | null,
+    in_reply_to_type: post.in_reply_to_type as string | null,
     in_reply_to_account_id: post.in_reply_to_account_id as number | null,
     poll: poll as any,
     linkCard,
@@ -1173,6 +1178,7 @@ mastodon.get('/timelines/home', async (c) => {
         spoiler_text: r.spoiler_text as string, visibility: r.visibility as string,
         language: r.language as string,
         in_reply_to_id: r.in_reply_to_id as number | null,
+        in_reply_to_type: r.in_reply_to_type as string | null,
         in_reply_to_account_id: r.in_reply_to_account_id as number | null,
         poll: r.poll_id ? pollMap.get(r.poll_id as number) ?? null : null,
         linkCard: cardMap.get(r.id as number) ?? null,
@@ -1254,6 +1260,7 @@ mastodon.get('/timelines/public', async (c) => {
         spoiler_text: r.spoiler_text as string, visibility: r.visibility as string,
         language: r.language as string,
         in_reply_to_id: r.in_reply_to_id as number | null,
+        in_reply_to_type: r.in_reply_to_type as string | null,
         in_reply_to_account_id: r.in_reply_to_account_id as number | null,
         poll: r.poll_id ? pollMap.get(r.poll_id as number) ?? null : null,
         linkCard: cardMap.get(r.id as number) ?? null,
@@ -1308,6 +1315,7 @@ mastodon.get('/timelines/tag/:hashtag', async (c) => {
         spoiler_text: r.spoiler_text as string, visibility: r.visibility as string,
         language: r.language as string,
         in_reply_to_id: r.in_reply_to_id as number | null,
+        in_reply_to_type: r.in_reply_to_type as string | null,
         in_reply_to_account_id: r.in_reply_to_account_id as number | null,
         poll: r.poll_id ? pollMap.get(r.poll_id as number) ?? null : null,
         linkCard: cardMap.get(r.id as number) ?? null,
@@ -1559,6 +1567,7 @@ mastodon.get('/search', async (c) => {
         spoiler_text: r.spoiler_text as string, visibility: r.visibility as string,
         language: r.language as string,
         in_reply_to_id: r.in_reply_to_id as number | null,
+        in_reply_to_type: r.in_reply_to_type as string | null,
         in_reply_to_account_id: r.in_reply_to_account_id as number | null,
         poll: r.poll_id ? pollMap.get(r.poll_id as number) ?? null : null,
       }, account, { reblog: r.repost_id ? reblogMap.get(r.repost_id as number) : undefined })
@@ -1653,6 +1662,7 @@ mastodon.get('/favourites', async (c) => {
       spoiler_text: r.spoiler_text as string, visibility: r.visibility as string,
       language: r.language as string,
       in_reply_to_id: r.in_reply_to_id as number | null,
+      in_reply_to_type: r.in_reply_to_type as string | null,
       in_reply_to_account_id: r.in_reply_to_account_id as number | null,
       poll: r.poll_id ? pollMap.get(r.poll_id as number) ?? null : null,
     }, account, { favourited: likedSet.has(r.id as number), bookmarked: bookmarkSet.has(r.id as number) })
@@ -1718,6 +1728,7 @@ mastodon.get('/bookmarks', async (c) => {
       spoiler_text: r.spoiler_text as string, visibility: r.visibility as string,
       language: r.language as string,
       in_reply_to_id: r.in_reply_to_id as number | null,
+      in_reply_to_type: r.in_reply_to_type as string | null,
       in_reply_to_account_id: r.in_reply_to_account_id as number | null,
       poll: r.poll_id ? pollMap.get(r.poll_id as number) ?? null : null,
     }, account, { favourited: likedSet.has(r.id as number), bookmarked: true })
@@ -1843,24 +1854,32 @@ mastodon.get('/statuses/:id/context', async (c) => {
     }, account)
   })
 
-  // Also get posts that reply to this post (in_reply_to_id = postId)
-  const replyPosts = await query<Record<string, unknown>>(
-    c.env.abdl_space_db,
-    `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
-     (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
-     (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) + (SELECT COUNT(*) FROM posts WHERE in_reply_to_id = p.id) as comment_count,
-     (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count,
-     (SELECT COUNT(*) FROM likes WHERE target_type = 'bookmark' AND target_id = p.id) as bookmarks_count
-     FROM posts p JOIN users u ON p.user_id = u.id
-     WHERE p.in_reply_to_id = ? ORDER BY p.created_at ASC`,
-    [postId]
-  )
+  // Also get posts that reply to this post (recursively, all levels)
+  const allReplyPosts: Record<string, unknown>[] = []
+  let currentReplyIds = [postId]
+  while (currentReplyIds.length > 0) {
+    const children = await query<Record<string, unknown>>(
+      c.env.abdl_space_db,
+      `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
+       (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
+       (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) + (SELECT COUNT(*) FROM posts WHERE in_reply_to_id = p.id) as comment_count,
+       (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count,
+       (SELECT COUNT(*) FROM likes WHERE target_type = 'bookmark' AND target_id = p.id) as bookmarks_count
+       FROM posts p JOIN users u ON p.user_id = u.id
+       WHERE p.in_reply_to_id IN (${currentReplyIds.map(() => '?').join(',')})
+       ORDER BY p.created_at ASC`,
+      currentReplyIds
+    )
+    if (children.length === 0) break
+    allReplyPosts.push(...children)
+    currentReplyIds = children.map(c => c.id as number)
+  }
 
-  const replyPostIds = replyPosts.map(r => r.id as number)
+  const replyPostIds = allReplyPosts.map(r => r.id as number)
   const replyImagesMap = replyPostIds.length > 0 ? await loadPostImages(c.env.abdl_space_db, replyPostIds) : new Map()
-  const replyCardMap = replyPostIds.length > 0 ? await generateCardsForPosts(replyPosts.map(r => ({ id: r.id as number, content: r.content as string, diaper_id: r.diaper_id as number | null }))) : new Map()
+  const replyCardMap = replyPostIds.length > 0 ? await generateCardsForPosts(allReplyPosts.map(r => ({ id: r.id as number, content: r.content as string, diaper_id: r.diaper_id as number | null }))) : new Map()
 
-  const postDescendants = replyPosts.map(r => {
+  const postDescendants = allReplyPosts.map(r => {
     const account = toAccount({
       id: r.user_id as number, username: r.username as string, avatar: r.avatar as string | null,
       role: r.role as string, bio: r.bio as string | null, created_at: r.user_created_at as string,
@@ -1874,12 +1893,55 @@ mastodon.get('/statuses/:id/context', async (c) => {
       spoiler_text: r.spoiler_text as string, visibility: r.visibility as string,
       language: r.language as string,
       in_reply_to_id: r.in_reply_to_id as number | null,
+      in_reply_to_type: r.in_reply_to_type as string | null,
       in_reply_to_account_id: r.in_reply_to_account_id as number | null,
       poll: null, linkCard: replyCardMap.get(r.id as number) ?? null,
     }, account)
   })
 
+  // Trace ancestors: follow in_reply_to_id chain up to the root
   const ancestors: MastodonStatus[] = []
+  if (resolved.kind === 'post') {
+    const currentPost = await queryOne<{ id: number; user_id: number; in_reply_to_id: number | null; in_reply_to_type: string | null; in_reply_to_account_id: number | null }>(
+      c.env.abdl_space_db, 'SELECT id, user_id, in_reply_to_id, in_reply_to_type, in_reply_to_account_id FROM posts WHERE id = ?', [resolved.realId]
+    )
+    if (currentPost?.in_reply_to_id) {
+      let parentId = currentPost.in_reply_to_id
+      let parentType = currentPost.in_reply_to_type || 'post'
+      while (parentId) {
+        const parent = await queryOne<Record<string, unknown>>(
+          c.env.abdl_space_db,
+          `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
+           (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
+           (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) + (SELECT COUNT(*) FROM posts WHERE in_reply_to_id = p.id) as comment_count,
+           (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count,
+           (SELECT COUNT(*) FROM likes WHERE target_type = 'bookmark' AND target_id = p.id) as bookmarks_count
+           FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`,
+          [parentId]
+        )
+        if (!parent) break
+        const parentAccount = toAccount({
+          id: parent.user_id as number, username: parent.username as string, avatar: parent.avatar as string | null,
+          role: parent.role as string, bio: parent.bio as string | null, created_at: parent.user_created_at as string,
+        })
+        ancestors.unshift(toStatus({
+          id: parent.id as number, user_id: parent.user_id as number, content: parent.content as string,
+          diaper_id: parent.diaper_id as number | null, like_count: parent.like_count as number,
+          comment_count: parent.comment_count as number, reblogs_count: parent.reblogs_count as number, bookmarks_count: parent.bookmarks_count as number, shares_count: 0,
+          has_nsfw: !!parent.has_nsfw, created_at: parent.created_at as string,
+          images: undefined,
+          spoiler_text: parent.spoiler_text as string, visibility: parent.visibility as string,
+          language: parent.language as string,
+          in_reply_to_id: parent.in_reply_to_id as number | null,
+          in_reply_to_type: parent.in_reply_to_type as string | null,
+          in_reply_to_account_id: parent.in_reply_to_account_id as number | null,
+          poll: null, linkCard: null,
+        }, parentAccount))
+        parentId = parent.in_reply_to_id as number
+        parentType = (parent.in_reply_to_type as string) || 'post'
+      }
+    }
+  }
   const descendants = [...commentDescendants, ...postDescendants].sort((a, b) =>
     new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
   )
@@ -2318,6 +2380,7 @@ mastodon.get('/trends/statuses', async (c) => {
       spoiler_text: r.spoiler_text as string, visibility: r.visibility as string,
       language: r.language as string,
       in_reply_to_id: r.in_reply_to_id as number | null,
+      in_reply_to_type: r.in_reply_to_type as string | null,
       in_reply_to_account_id: r.in_reply_to_account_id as number | null,
       poll: r.poll_id ? pollMap.get(r.poll_id as number) ?? null : null,
     }, account, { favourited: likedSet.has(r.id as number), bookmarked: bookmarkSet.has(r.id as number) })
@@ -2525,6 +2588,7 @@ mastodon.put('/statuses/:id', async (c) => {
     language: updatedPost.language as string,
     edited_at: updatedPost.edited_at as string | null,
     in_reply_to_id: updatedPost.in_reply_to_id as number | null,
+    in_reply_to_type: updatedPost.in_reply_to_type as string | null,
     in_reply_to_account_id: updatedPost.in_reply_to_account_id as number | null,
     poll: poll as any,
   }, toAccount({
