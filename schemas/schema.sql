@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS users (
   email TEXT UNIQUE NOT NULL,
   password_hash TEXT NOT NULL,           -- PBKDF2: iterations$salt$derivedKey
   username TEXT UNIQUE NOT NULL,         -- 3–30 字符
+  display_name TEXT,                     -- 显示名称，最长 50
   role TEXT NOT NULL DEFAULT 'user',     -- 'user' | 'admin'
   avatar TEXT,                           -- URL, 最长 2048
   age INTEGER,                           -- 1–150

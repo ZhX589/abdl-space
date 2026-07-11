@@ -324,7 +324,8 @@ mastodon.patch('/accounts/update_credentials', async (c) => {
   const params: unknown[] = []
 
   if (body.display_name !== undefined) {
-    // Store display_name as part of bio header or ignore gracefully
+    updates.push('display_name = ?')
+    params.push(String(body.display_name).substring(0, 50))
   }
   if (body.note !== undefined) {
     updates.push('bio = ?')
@@ -406,10 +407,12 @@ mastodon.patch('/accounts/update_credentials', async (c) => {
   return c.json(toAccount({
     id: dbUser.id as number,
     username: dbUser.username as string,
+    display_name: dbUser.display_name as string | null,
     avatar: dbUser.avatar as string | null,
     header: dbUser.header as string | null,
     role: dbUser.role as string,
     bio: dbUser.bio as string | null,
+    profile_fields: dbUser.profile_fields as string | null,
     created_at: dbUser.created_at as string,
   }))
 })
@@ -441,6 +444,7 @@ mastodon.get('/accounts/:id', async (c) => {
   return c.json(toAccount({
     id: dbUser.id as number,
     username: dbUser.username as string,
+    display_name: dbUser.display_name as string | null,
     avatar: dbUser.avatar as string | null,
     header: dbUser.header as string | null,
     role: dbUser.role as string,
@@ -636,12 +640,16 @@ mastodon.post('/accounts/:id/follow', async (c) => {
   }
 
   // Return relationship
+  const followBack = await queryOne<{ count: number }>(
+    c.env.abdl_space_db, 'SELECT COUNT(*) as count FROM follows WHERE follower_id = ? AND following_id = ?',
+    [targetId, user.sub]
+  )
   return c.json({
     id: String(targetId),
     following: true,
     showing_reblogs: true,
     notifying: false,
-    followed_by: false,
+    followed_by: (followBack?.count ?? 0) > 0,
     blocking: false,
     blocked_by: false,
     muting: false,
@@ -663,12 +671,16 @@ mastodon.post('/accounts/:id/unfollow', async (c) => {
   const targetId = parseInt(c.req.param('id'))
   await run(c.env.abdl_space_db, 'DELETE FROM follows WHERE follower_id = ? AND following_id = ?', [user.sub, targetId])
 
+  const followBack = await queryOne<{ count: number }>(
+    c.env.abdl_space_db, 'SELECT COUNT(*) as count FROM follows WHERE follower_id = ? AND following_id = ?',
+    [targetId, user.sub]
+  )
   return c.json({
     id: String(targetId),
     following: false,
     showing_reblogs: true,
     notifying: false,
-    followed_by: false,
+    followed_by: (followBack?.count ?? 0) > 0,
     blocking: false,
     blocked_by: false,
     muting: false,
@@ -1942,11 +1954,31 @@ mastodon.get('/statuses/:id/context', async (c) => {
       }
     }
   }
-  const descendants = [...commentDescendants, ...postDescendants].sort((a, b) =>
-    new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
-  )
 
-  return c.json({ ancestors, descendants })
+  // Topological sort: parent before child, siblings by created_at
+  const allDescendants = [...commentDescendants, ...postDescendants]
+  const idToItem = new Map(allDescendants.map(d => [d.id, d]))
+  const visited = new Set<string>()
+  const sorted: typeof allDescendants = []
+
+  function visit(item: typeof allDescendants[0]) {
+    if (visited.has(item.id)) return
+    visited.add(item.id)
+    // Visit parent first
+    if (item.in_reply_to_id) {
+      const parent = idToItem.get(item.in_reply_to_id)
+      if (parent) visit(parent)
+    }
+    sorted.push(item)
+  }
+
+  // Sort by created_at first, then topological
+  allDescendants.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
+  for (const item of allDescendants) {
+    visit(item)
+  }
+
+  return c.json({ ancestors, descendants: sorted })
 })
 
 // ============================================================
@@ -2595,6 +2627,48 @@ mastodon.put('/statuses/:id', async (c) => {
     id: updatedPost.user_id as number, username: updatedPost.username as string, avatar: updatedPost.avatar as string | null,
     role: updatedPost.role as string, bio: updatedPost.bio as string | null, created_at: updatedPost.user_created_at as string,
   })))
+})
+
+// ============================================================
+// POST /api/v1/statuses/:id/pin — Pin a status
+// ============================================================
+mastodon.post('/statuses/:id/pin', async (c) => {
+  const user = await mastodonAuth(c)
+  if (!user) return c.json({ error: 'The access token is invalid' }, 401)
+
+  const rawId = c.req.param('id')
+  const resolved = await resolveStatus(c.env.abdl_space_db, rawId)
+  if (!resolved || resolved.kind !== 'post') return c.json({ error: 'Record not found' }, 404)
+
+  const post = await queryOne<{ user_id: number }>(c.env.abdl_space_db, 'SELECT user_id FROM posts WHERE id = ?', [resolved.realId])
+  if (!post) return c.json({ error: 'Record not found' }, 404)
+  if (post.user_id !== user.sub) return c.json({ error: 'Forbidden' }, 403)
+
+  // Check pin limit (Mastodon allows 5 pinned posts)
+  const pinCount = await queryOne<{ count: number }>(c.env.abdl_space_db, 'SELECT COUNT(*) as count FROM posts WHERE user_id = ? AND pinned = 1', [user.sub])
+  if (pinCount && pinCount.count >= 5) return c.json({ error: 'You have reached the maximum number of pinned posts' }, 422)
+
+  await run(c.env.abdl_space_db, 'UPDATE posts SET pinned = 1 WHERE id = ?', [resolved.realId])
+  return c.json({ pinned: true })
+})
+
+// ============================================================
+// POST /api/v1/statuses/:id/unpin — Unpin a status
+// ============================================================
+mastodon.post('/statuses/:id/unpin', async (c) => {
+  const user = await mastodonAuth(c)
+  if (!user) return c.json({ error: 'The access token is invalid' }, 401)
+
+  const rawId = c.req.param('id')
+  const resolved = await resolveStatus(c.env.abdl_space_db, rawId)
+  if (!resolved || resolved.kind !== 'post') return c.json({ error: 'Record not found' }, 404)
+
+  const post = await queryOne<{ user_id: number }>(c.env.abdl_space_db, 'SELECT user_id FROM posts WHERE id = ?', [resolved.realId])
+  if (!post) return c.json({ error: 'Record not found' }, 404)
+  if (post.user_id !== user.sub) return c.json({ error: 'Forbidden' }, 403)
+
+  await run(c.env.abdl_space_db, 'UPDATE posts SET pinned = 0 WHERE id = ?', [resolved.realId])
+  return c.json({ pinned: false })
 })
 
 // ============================================================

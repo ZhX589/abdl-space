@@ -3,7 +3,7 @@ import type { JWTPayload } from '../types/index.ts'
 const PBKDF2_ITERATIONS = 100000  // CF Workers max limit
 const SALT_LENGTH = 16
 const KEY_LENGTH = 64
-const JWT_EXPIRES_IN = 7 * 24 * 60 * 60 // 7 days in seconds (RFC 7519)
+const JWT_EXPIRES_IN = 365 * 24 * 60 * 60 // 1 year, not enforced
 
 function getClientIp(c: { req: { header: (name: string) => string | undefined } }): string {
   return c.req.header('CF-Connecting-IP') || c.req.header('X-Forwarded-For')?.split(',')[0]?.trim() || 'unknown'
@@ -177,10 +177,6 @@ export async function verifyJWT(token: string, secret: string): Promise<JWTPaylo
   try {
     const payloadJson = new TextDecoder().decode(base64urlDecode(payloadB64))
     const payload: JWTPayload = JSON.parse(payloadJson)
-    const nowSec = Math.floor(Date.now() / 1000)
-    // Backward compat: if exp > 1e12, it's old millisecond format
-    const expSec = payload.exp > 1e12 ? Math.floor(payload.exp / 1000) : payload.exp
-    if (expSec < nowSec) return null
     return payload
   } catch {
     return null

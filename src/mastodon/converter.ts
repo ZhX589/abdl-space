@@ -21,6 +21,7 @@ export function toISOString(dateStr: string): string {
 export function toAccount(user: {
   id: number
   username: string
+  display_name?: string | null
   avatar: string | null
   header?: string | null
   role: string
@@ -40,7 +41,7 @@ export function toAccount(user: {
     id: String(user.id),
     username: user.username,
     acct: user.username,
-    display_name: user.username,
+    display_name: user.display_name || user.username,
     locked: false,
     bot: false,
     discoverable: true,
