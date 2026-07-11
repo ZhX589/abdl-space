@@ -236,7 +236,7 @@ mastodon.get('/accounts/verify_credentials', async (c) => {
 
   const dbUser = await queryOne<Record<string, unknown>>(
     c.env.abdl_space_db,
-    'SELECT id, username, avatar, header, role, bio, profile_fields, nbw_username, created_at FROM users WHERE id = ?',
+    'SELECT id, username, display_name, avatar, header, role, bio, profile_fields, nbw_username, created_at FROM users WHERE id = ?',
     [user.sub]
   )
   if (!dbUser) return c.json({ error: 'User not found' }, 404)
@@ -399,7 +399,7 @@ mastodon.patch('/accounts/update_credentials', async (c) => {
   // Return updated account
   const dbUser = await queryOne<Record<string, unknown>>(
     c.env.abdl_space_db,
-    'SELECT id, username, avatar, header, role, bio, profile_fields, nbw_username, created_at FROM users WHERE id = ?',
+    'SELECT id, username, display_name, avatar, header, role, bio, profile_fields, nbw_username, created_at FROM users WHERE id = ?',
     [user.sub]
   )
   if (!dbUser) return c.json({ error: 'User not found' }, 404)
@@ -466,7 +466,7 @@ mastodon.get('/accounts/:id', async (c) => {
 
   const dbUser = await queryOne<Record<string, unknown>>(
     c.env.abdl_space_db,
-    'SELECT id, username, avatar, header, role, bio, profile_fields, nbw_username, created_at FROM users WHERE id = ?',
+    'SELECT id, username, display_name, avatar, header, role, bio, profile_fields, nbw_username, created_at FROM users WHERE id = ?',
     [id]
   )
   if (!dbUser) return c.json({ error: 'Record not found' }, 404)
@@ -512,7 +512,7 @@ mastodon.get('/accounts/:id/statuses', async (c) => {
   const excludeReplies = c.req.query('exclude_replies') === 'true'
 
   const dbUser = await queryOne<{ id: number; username: string; avatar: string | null; header: string | null; role: string; bio: string | null; created_at: string }>(
-    c.env.abdl_space_db, 'SELECT id, username, avatar, header, role, bio, profile_fields, nbw_username, created_at FROM users WHERE id = ?', [id]
+    c.env.abdl_space_db, 'SELECT id, username, display_name, avatar, header, role, bio, profile_fields, nbw_username, created_at FROM users WHERE id = ?', [id]
   )
   if (!dbUser) return c.json({ error: 'Record not found' }, 404)
 
@@ -956,6 +956,26 @@ mastodon.get('/statuses/:id', async (c) => {
     poll: poll as any,
     linkCard,
   }, account, { reblog }))
+})
+
+// ============================================================
+// GET /api/v1/statuses/:id/source — Get source text for editing
+// ============================================================
+mastodon.get('/statuses/:id/source', async (c) => {
+  const user = await mastodonAuth(c)
+  if (!user) return c.json({ error: 'The access token is invalid' }, 401)
+
+  const rawId = c.req.param('id')
+  const resolved = await resolveStatus(c.env.abdl_space_db, rawId)
+  if (!resolved || resolved.kind !== 'post') return c.json({ error: 'Record not found' }, 404)
+
+  const post = await queryOne<{ user_id: number; content: string; spoiler_text: string | null }>(
+    c.env.abdl_space_db, 'SELECT user_id, content, spoiler_text FROM posts WHERE id = ?', [resolved.realId]
+  )
+  if (!post) return c.json({ error: 'Record not found' }, 404)
+  if (post.user_id !== user.sub) return c.json({ error: 'Forbidden' }, 403)
+
+  return c.json({ id: rawId, text: post.content, spoilerText: post.spoiler_text || '' })
 })
 
 // ============================================================
@@ -1409,7 +1429,7 @@ mastodon.get('/notifications', async (c) => {
   const userMap = new Map<number, { id: number; username: string; avatar: string | null; role: string; created_at: string }>()
   if (actorIds.length > 0) {
     const users = await query<{ id: number; username: string; avatar: string | null; role: string; created_at: string }>(
-      c.env.abdl_space_db, `SELECT id, username, avatar, header, role, created_at FROM users WHERE id IN (${actorIds.map(() => '?').join(',')})`, actorIds
+      c.env.abdl_space_db, `SELECT id, username, display_name, avatar, header, role, created_at FROM users WHERE id IN (${actorIds.map(() => '?').join(',')})`, actorIds
     )
     for (const u of users) userMap.set(u.id, u)
   }
@@ -1581,7 +1601,7 @@ mastodon.get('/search', async (c) => {
 
   const [users, posts] = await Promise.all([
     query<{ id: number; username: string; avatar: string | null; role: string; bio: string | null; created_at: string }>(
-      c.env.abdl_space_db, 'SELECT id, username, avatar, header, role, bio, profile_fields, nbw_username, created_at FROM users WHERE username LIKE ? LIMIT 10', [likePattern]
+      c.env.abdl_space_db, 'SELECT id, username, display_name, avatar, header, role, bio, profile_fields, nbw_username, created_at FROM users WHERE username LIKE ? LIMIT 10', [likePattern]
     ),
     query<Record<string, unknown>>(
       c.env.abdl_space_db,
@@ -2275,7 +2295,7 @@ mastodon.get('/notifications/:id', async (c) => {
 
   if (r.type === 'follow') {
     const src = await queryOne<{ id: number; username: string; avatar: string | null; role: string; created_at: string }>(
-      c.env.abdl_space_db, 'SELECT id, username, avatar, header, role, created_at FROM users WHERE id = ?', [r.related_id]
+      c.env.abdl_space_db, 'SELECT id, username, display_name, avatar, header, role, created_at FROM users WHERE id = ?', [r.related_id]
     )
     if (src) sourceAccount = toAccount(src)
   } else {
