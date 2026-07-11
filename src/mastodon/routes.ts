@@ -323,12 +323,12 @@ mastodon.patch('/accounts/update_credentials', async (c) => {
   const updates: string[] = []
   const params: unknown[] = []
 
-  if (body.display_name !== undefined) {
-    const newName = String(body.display_name).substring(0, 30).trim()
+  if (body.display_name !== undefined || body.username !== undefined) {
+    const newName = String(body.username || body.display_name || '').substring(0, 30).trim()
     if (newName) {
       updates.push('display_name = ?')
       params.push(newName)
-      // display_name 始终同步到 username
+      // 同步更新 username
       const nameTaken = await queryOne<{ id: number }>(
         c.env.abdl_space_db, 'SELECT id FROM users WHERE username = ? AND id != ?', [newName, user.sub]
       )
