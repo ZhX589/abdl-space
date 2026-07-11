@@ -43,6 +43,7 @@ import invite from './routes/invite.ts'
 import badges from './routes/badges.ts'
 import sync from './routes/sync.ts'
 import jpush from './routes/jpush.ts'
+import push from './routes/push.ts'
 import mastodon from './mastodon/routes.ts'
 import mastodonV2 from './mastodon/v2.ts'
 import mastodonPush from './mastodon/push.ts'
@@ -260,6 +261,7 @@ app.route('/api/checkin', checkin)
 app.route('/api/users', points)
 app.route('/api/invite', invite)
 app.route('/api/jpush', jpush)
+app.route('/api/push', push)
 // badges: 用户徽章路由挂载到 /api/users（/:id/badges 等）
 app.route('/api/users', badges)
 // 公开端点：所有徽章定义
