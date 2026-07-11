@@ -235,59 +235,7 @@ friendRequests.post('/create', authMiddleware, async (c) => {
     fields?: { field_key: string; field_value: string; is_primary?: number }[]
   }>()
 
-  if (!body.title?.trim()) return c.json({ error: '标题为必填' }, 400)
-  if (!body.looking_for?.trim()) return c.json({ error: '找的类型为必填' }, 400)
-  if (body.title.length > 100) return c.json({ error: '标题不能超过100字' }, 400)
-  if (body.description && body.description.length > 2000) return c.json({ error: '描述不能超过2000字' }, 400)
-
-  const db = c.env.abdl_space_db
-
-  const result = await run(
-    db,
-    'INSERT INTO friend_requests (user_id, title, looking_for, description) VALUES (?, ?, ?, ?)',
-    [user.sub, body.title.trim(), body.looking_for.trim(), body.description?.trim() || null]
-  )
-  const requestId = result.meta.last_row_id as number
-
-  // 插入自定义字段
-  if (body.fields && body.fields.length > 0) {
-    for (let i = 0; i < body.fields.length; i++) {
-      const f = body.fields[i]
-      if (f.field_key?.trim() && f.field_value?.trim()) {
-        await run(
-          db,
-          'INSERT INTO friend_request_fields (request_id, field_key, field_value, is_primary, sort_order) VALUES (?, ?, ?, ?, ?)',
-          [requestId, f.field_key.trim(), f.field_value.trim(), f.is_primary || 0, i]
-        )
-      }
-    }
-  }
-
-  return c.json({ id: requestId, message: '创建成功' }, 201)
-})
-
-/**
- * PATCH /api/friend-request/:id — 修改交友请求（仅自己+active状态）
- */
-friendRequests.patch('/:id', authMiddleware, async (c) => {
-  const user = c.get('user')
-  const id = parseInt(c.req.param('id') || '0')
-  const db = c.env.abdl_space_db
-
-  const existing = await queryOne<{ id: number; user_id: number; status: string }>(
-    db, 'SELECT id, user_id, status FROM friend_requests WHERE id = ?', [id]
-  )
-  if (!existing) return c.json({ error: '交友请求不存在' }, 404)
-  if (existing.user_id !== user.sub) return c.json({ error: '无权修改' }, 403)
-  if (existing.status !== 'active') return c.json({ error: '该请求已被举报或删除，无法修改' }, 400)
-
-  const body = await c.req.json<{
-    title?: string
-    looking_for?: string
-    description?: string
-    fields?: { id?: number; field_key: string; field_value: string; is_primary?: number }[]
-  }>()
-
+  if (!body.looking_for?.trim()) return c.json({ error: '交友类型为必填' }, 400)
   if (body.title && body.title.length > 100) return c.json({ error: '标题不能超过100字' }, 400)
   if (body.description && body.description.length > 2000) return c.json({ error: '描述不能超过2000字' }, 400)
 
