@@ -418,6 +418,46 @@ mastodon.patch('/accounts/update_credentials', async (c) => {
 })
 
 // ============================================================
+// GET /api/v1/accounts/relationships
+// ============================================================
+mastodon.get('/accounts/relationships', async (c) => {
+  const user = await mastodonAuth(c)
+  if (!user) return c.json({ error: 'The access token is invalid' }, 401)
+
+  const ids = c.req.query('id[]')
+  if (!ids) return c.json([])
+
+  const idList = Array.isArray(ids) ? ids.map(Number) : [Number(ids)]
+  const relationships = []
+
+  for (const targetId of idList) {
+    if (isNaN(targetId)) continue
+    const [following, follower] = await Promise.all([
+      queryOne<{ id: number }>(c.env.abdl_space_db, 'SELECT id FROM follows WHERE follower_id = ? AND following_id = ?', [user.sub, targetId]),
+      queryOne<{ id: number }>(c.env.abdl_space_db, 'SELECT id FROM follows WHERE follower_id = ? AND following_id = ?', [targetId, user.sub]),
+    ])
+
+    relationships.push({
+      id: String(targetId),
+      following: !!following,
+      showing_reblogs: true,
+      notifying: false,
+      followed_by: !!follower,
+      blocking: false,
+      blocked_by: false,
+      muting: false,
+      muting_notifications: false,
+      requested: false,
+      domain_blocking: false,
+      endorsed: false,
+      note: '',
+    })
+  }
+
+  return c.json(relationships)
+})
+
+// ============================================================
 // GET /api/v1/accounts/:id
 // ============================================================
 mastodon.get('/accounts/:id', async (c) => {
@@ -1979,46 +2019,6 @@ mastodon.get('/statuses/:id/context', async (c) => {
   }
 
   return c.json({ ancestors, descendants: sorted })
-})
-
-// ============================================================
-// GET /api/v1/accounts/relationships
-// ============================================================
-mastodon.get('/accounts/relationships', async (c) => {
-  const user = await mastodonAuth(c)
-  if (!user) return c.json({ error: 'The access token is invalid' }, 401)
-
-  const ids = c.req.query('id[]')
-  if (!ids) return c.json([])
-
-  const idList = Array.isArray(ids) ? ids.map(Number) : [Number(ids)]
-  const relationships = []
-
-  for (const targetId of idList) {
-    if (isNaN(targetId)) continue
-    const [following, follower] = await Promise.all([
-      queryOne<{ id: number }>(c.env.abdl_space_db, 'SELECT id FROM follows WHERE follower_id = ? AND following_id = ?', [user.sub, targetId]),
-      queryOne<{ id: number }>(c.env.abdl_space_db, 'SELECT id FROM follows WHERE follower_id = ? AND following_id = ?', [targetId, user.sub]),
-    ])
-
-    relationships.push({
-      id: String(targetId),
-      following: !!following,
-      showing_reblogs: true,
-      notifying: false,
-      followed_by: !!follower,
-      blocking: false,
-      blocked_by: false,
-      muting: false,
-      muting_notifications: false,
-      requested: false,
-      domain_blocking: false,
-      endorsed: false,
-      note: '',
-    })
-  }
-
-  return c.json(relationships)
 })
 
 // ============================================================
