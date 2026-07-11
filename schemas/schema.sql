@@ -400,3 +400,80 @@ CREATE TABLE IF NOT EXISTS jpush_registrations (
 );
 CREATE INDEX IF NOT EXISTS idx_jpush_user_id ON jpush_registrations(user_id);
 CREATE INDEX IF NOT EXISTS idx_jpush_reg_id ON jpush_registrations(reg_id);
+
+-- ============================================================
+-- 交友请求系统
+-- ============================================================
+
+-- 交友请求主表
+CREATE TABLE IF NOT EXISTS friend_requests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL,
+  title TEXT NOT NULL,
+  looking_for TEXT NOT NULL,
+  description TEXT,
+  status TEXT DEFAULT 'active',
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+-- 交友请求自定义信息字段
+CREATE TABLE IF NOT EXISTS friend_request_fields (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  request_id INTEGER NOT NULL,
+  field_key TEXT NOT NULL,
+  field_value TEXT NOT NULL,
+  is_primary INTEGER DEFAULT 0,
+  sort_order INTEGER DEFAULT 0,
+  FOREIGN KEY (request_id) REFERENCES friend_requests(id) ON DELETE CASCADE
+);
+
+-- 交友请求独立评论表
+CREATE TABLE IF NOT EXISTS friend_request_comments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  request_id INTEGER NOT NULL,
+  user_id INTEGER NOT NULL,
+  parent_id INTEGER,
+  content TEXT NOT NULL,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (request_id) REFERENCES friend_requests(id) ON DELETE CASCADE,
+  FOREIGN KEY (user_id) REFERENCES users(id),
+  FOREIGN KEY (parent_id) REFERENCES friend_request_comments(id)
+);
+
+-- 交友请求举报表
+CREATE TABLE IF NOT EXISTS friend_request_reports (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  request_id INTEGER NOT NULL,
+  reporter_id INTEGER NOT NULL,
+  reason TEXT NOT NULL,
+  evidence_urls TEXT,
+  status TEXT DEFAULT 'pending',
+  resolved_by INTEGER,
+  admin_reply TEXT,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  resolved_at DATETIME,
+  FOREIGN KEY (request_id) REFERENCES friend_requests(id),
+  FOREIGN KEY (reporter_id) REFERENCES users(id),
+  FOREIGN KEY (resolved_by) REFERENCES users(id)
+);
+
+-- 交友请求快照表（永久保存）
+CREATE TABLE IF NOT EXISTS friend_request_snapshots (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  original_id INTEGER NOT NULL,
+  user_id INTEGER NOT NULL,
+  data TEXT NOT NULL,
+  snapshot_type TEXT NOT NULL,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 交友请求索引
+CREATE INDEX IF NOT EXISTS idx_friend_requests_user ON friend_requests(user_id);
+CREATE INDEX IF NOT EXISTS idx_friend_requests_status ON friend_requests(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_friend_request_fields_request ON friend_request_fields(request_id);
+CREATE INDEX IF NOT EXISTS idx_friend_request_comments_request ON friend_request_comments(request_id);
+CREATE INDEX IF NOT EXISTS idx_friend_request_reports_request ON friend_request_reports(request_id);
+CREATE INDEX IF NOT EXISTS idx_friend_request_reports_status ON friend_request_reports(status);
+CREATE INDEX IF NOT EXISTS idx_friend_request_snapshots_original ON friend_request_snapshots(original_id);
