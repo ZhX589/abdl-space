@@ -242,12 +242,18 @@ friendRequests.post('/create', authMiddleware, async (c) => {
   const db = c.env.abdl_space_db
 
   // 插入新记录
-  const result = await run(
-    db,
-    'INSERT INTO friend_requests (user_id, title, looking_for, description) VALUES (?, ?, ?, ?)',
-    [user.sub, body.title?.trim() || null, body.looking_for.trim(), body.description?.trim() || null]
-  )
-  const requestId = result.meta.last_row_id as number
+  let requestId: number
+  try {
+    const result = await run(
+      db,
+      'INSERT INTO friend_requests (user_id, title, looking_for, description) VALUES (?, ?, ?, ?)',
+      [user.sub, body.title?.trim() || null, body.looking_for.trim(), body.description?.trim() || null]
+    )
+    requestId = result.meta.last_row_id as number
+  } catch (e) {
+    console.error('Create friend request error:', e)
+    return c.json({ error: '创建失败: ' + (e as Error).message }, 500)
+  }
 
   // 插入自定义字段
   if (body.fields && body.fields.length > 0) {
