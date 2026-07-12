@@ -273,6 +273,58 @@ friendRequests.post('/create', authMiddleware, async (c) => {
 })
 
 /**
+ * PATCH /api/friend-request/:id — 编辑交友请求（仅自己+active状态）
+ */
+friendRequests.patch('/:id', authMiddleware, async (c) => {
+  const user = c.get('user')
+  const id = parseInt(c.req.param('id') || '0')
+  const body = await c.req.json<{
+    title?: string
+    looking_for?: string
+    description?: string
+    fields?: { field_key: string; field_value: string; is_primary?: number }[]
+  }>()
+  const db = c.env.abdl_space_db
+
+  const existing = await queryOne<{ id: number; user_id: number; status: string }>(
+    db, 'SELECT id, user_id, status FROM friend_requests WHERE id = ?', [id]
+  )
+  if (!existing) return c.json({ error: '交友请求不存在' }, 404)
+  if (existing.user_id !== user.sub) return c.json({ error: '无权修改' }, 403)
+  if (existing.status !== 'active') return c.json({ error: '该请求已被举报或删除，无法修改' }, 400)
+
+  // 更新基本字段
+  const fields: string[] = []
+  const values: any[] = []
+  if (body.title !== undefined) { fields.push('title = ?'); values.push(body.title.trim() || body.looking_for?.trim() || '') }
+  if (body.looking_for !== undefined) { fields.push('looking_for = ?'); values.push(body.looking_for.trim()) }
+  if (body.description !== undefined) { fields.push('description = ?'); values.push(body.description?.trim() || null) }
+
+  if (fields.length > 0) {
+    fields.push("updated_at = datetime('now')")
+    values.push(id)
+    await run(db, `UPDATE friend_requests SET ${fields.join(', ')} WHERE id = ?`, values)
+  }
+
+  // 更新字段（删除旧的，插入新的）
+  if (body.fields !== undefined) {
+    await run(db, 'DELETE FROM friend_request_fields WHERE request_id = ?', [id])
+    for (let i = 0; i < body.fields.length; i++) {
+      const f = body.fields[i]
+      if (f.field_key?.trim() && f.field_value?.trim()) {
+        await run(
+          db,
+          'INSERT INTO friend_request_fields (request_id, field_key, field_value, is_primary, sort_order) VALUES (?, ?, ?, ?, ?)',
+          [id, f.field_key.trim(), f.field_value.trim(), f.is_primary || 0, i]
+        )
+      }
+    }
+  }
+
+  return c.json({ message: '更新成功' })
+})
+
+/**
  * DELETE /api/friend-request/:id — 删除交友请求（创建快照，status=deleted）
  */
 friendRequests.delete('/:id', authMiddleware, async (c) => {
