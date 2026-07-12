@@ -241,13 +241,13 @@ friendRequests.post('/create', authMiddleware, async (c) => {
 
   const db = c.env.abdl_space_db
 
-  // 插入新记录
+  // 插入新记录（title 字段在数据库中是 NOT NULL，需要提供默认值）
   let requestId: number
   try {
     const result = await run(
       db,
       'INSERT INTO friend_requests (user_id, title, looking_for, description) VALUES (?, ?, ?, ?)',
-      [user.sub, body.title?.trim() || null, body.looking_for.trim(), body.description?.trim() || null]
+      [user.sub, body.title?.trim() || body.looking_for.trim(), body.looking_for.trim(), body.description?.trim() || null]
     )
     requestId = result.meta.last_row_id as number
   } catch (e) {
