@@ -229,7 +229,7 @@ friendRequests.get('/:id', async (c) => {
 friendRequests.post('/create', authMiddleware, async (c) => {
   const user = c.get('user')
   const body = await c.req.json<{
-    title: string
+    title?: string
     looking_for: string
     description?: string
     fields?: { field_key: string; field_value: string; is_primary?: number }[]
@@ -239,35 +239,31 @@ friendRequests.post('/create', authMiddleware, async (c) => {
   if (body.title && body.title.length > 100) return c.json({ error: '标题不能超过100字' }, 400)
   if (body.description && body.description.length > 2000) return c.json({ error: '描述不能超过2000字' }, 400)
 
-  // 更新基本字段
-  const fields: string[] = []
-  const values: any[] = []
-  if (body.title !== undefined) { fields.push('title = ?'); values.push(body.title.trim()) }
-  if (body.looking_for !== undefined) { fields.push('looking_for = ?'); values.push(body.looking_for.trim()) }
-  if (body.description !== undefined) { fields.push('description = ?'); values.push(body.description?.trim() || null) }
+  const db = c.env.abdl_space_db
 
-  if (fields.length > 0) {
-    fields.push("updated_at = datetime('now')")
-    values.push(id)
-    await run(db, `UPDATE friend_requests SET ${fields.join(', ')} WHERE id = ?`, values)
-  }
+  // 插入新记录
+  const result = await run(
+    db,
+    'INSERT INTO friend_requests (user_id, title, looking_for, description) VALUES (?, ?, ?, ?)',
+    [user.sub, body.title?.trim() || null, body.looking_for.trim(), body.description?.trim() || null]
+  )
+  const requestId = result.meta.last_row_id as number
 
-  // 更新字段（删除旧的，插入新的）
-  if (body.fields !== undefined) {
-    await run(db, 'DELETE FROM friend_request_fields WHERE request_id = ?', [id])
+  // 插入自定义字段
+  if (body.fields && body.fields.length > 0) {
     for (let i = 0; i < body.fields.length; i++) {
       const f = body.fields[i]
       if (f.field_key?.trim() && f.field_value?.trim()) {
         await run(
           db,
           'INSERT INTO friend_request_fields (request_id, field_key, field_value, is_primary, sort_order) VALUES (?, ?, ?, ?, ?)',
-          [id, f.field_key.trim(), f.field_value.trim(), f.is_primary || 0, i]
+          [requestId, f.field_key.trim(), f.field_value.trim(), f.is_primary || 0, i]
         )
       }
     }
   }
 
-  return c.json({ message: '更新成功' })
+  return c.json({ id: requestId, message: '创建成功' }, 201)
 })
 
 /**
