@@ -284,16 +284,25 @@ admin.delete('/diapers/:id', adminMiddleware, async (c) => {
 })
 
 /**
- * GET /api/admin/diapers — 纸尿裤列表（管理用）
+ * GET /api/admin/diapers — 纸尿裤列表（管理用，分页）
  */
 admin.get('/diapers', adminMiddleware, async (c) => {
+  const page = Math.max(1, parseInt(c.req.query('page') || '1'))
+  const limit = Math.min(100, Math.max(1, parseInt(c.req.query('limit') || '100')))
+  const offset = (page - 1) * limit
+
+  const countResult = await query<{ total: number }>(c.env.abdl_space_db, 'SELECT COUNT(*) as total FROM diapers')
+  const total = countResult[0]?.total || 0
+
   const rows = await query<Record<string, unknown>>(
     c.env.abdl_space_db,
     `SELECT d.*, GROUP_CONCAT(di.image_url) as image_urls
      FROM diapers d
      LEFT JOIN diaper_images di ON di.diaper_id = d.id
      GROUP BY d.id
-     ORDER BY d.created_at DESC`
+     ORDER BY d.created_at DESC
+     LIMIT ? OFFSET ?`,
+    [limit, offset]
   )
   const ids = rows.map(r => r.id as number)
   const sizesMap = new Map<number, { label: string; waist_min: number; waist_max: number; hip_min: number; hip_max: number }[]>()
@@ -313,7 +322,7 @@ admin.get('/diapers', adminMiddleware, async (c) => {
     sizes: sizesMap.get(r.id as number) || [],
     image_urls: undefined,
   }))
-  return c.json({ diapers })
+  return c.json({ diapers, pagination: { page, limit, total, totalPages: Math.ceil(total / limit) } })
 })
 
 /**
