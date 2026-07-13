@@ -3,6 +3,7 @@ import type { Env, JWTPayload, LikeRequest } from '../types/index.ts'
 import { queryOne, query, run } from '../lib/db.ts'
 import { authMiddleware } from '../middleware/auth.ts'
 import { getBeijingDate } from '../shared/time.ts'
+import { sendJPushNotification } from '../lib/jpush.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
@@ -154,6 +155,15 @@ likes.post('/', authMiddleware, async (c) => {
       c.env.abdl_space_db,
       'INSERT INTO notifications (user_id, type, message, related_id, actor_id) VALUES (?, ?, ?, ?, ?)',
       [contentAuthorId, 'like', `${user.username} 赞了你的${target_type === 'post' ? '帖子' : '评论'}`, notificationRelatedId, user.sub]
+    )
+
+    // 发送极光推送通知
+    sendJPushNotification(
+      c.env.abdl_space_db,
+      contentAuthorId,
+      '收到点赞',
+      `${user.username} 赞了你的${target_type === 'post' ? '帖子' : '评论'}`,
+      { url: `/forum/${notificationRelatedId}` }
     )
 
     // 点赞奖励：经验 +3，积分 +3（每日上限 30 经验 = 10 个赞）

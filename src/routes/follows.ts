@@ -2,6 +2,7 @@ import { Hono } from 'hono'
 import type { Env, JWTPayload } from '../types/index.ts'
 import { query, queryOne, run } from '../lib/db.ts'
 import { authMiddleware } from '../middleware/auth.ts'
+import { sendJPushNotification } from '../lib/jpush.ts'
 
 const DEFAULT_AVATAR = 'https://img.abdl-space.top/file/system/1781439303787_play_store_512.png'
 
@@ -52,6 +53,8 @@ follows.post('/:userId', authMiddleware, async (c) => {
     'INSERT INTO notifications (user_id, type, message, related_id, actor_id) VALUES (?, ?, ?, ?, ?)',
     [targetId, 'follow', `${sender?.username || '用户'} 关注了你`, user.sub, user.sub]
   )
+  // 极光推送
+  sendJPushNotification(c.env.abdl_space_db, targetId, '新粉丝', `${sender?.username || '用户'} 关注了你`, { url: `/profile/${user.sub}` })
 
   // 检查是否互相关注（成为好友）
   const mutual = await queryOne<{ id: number }>(

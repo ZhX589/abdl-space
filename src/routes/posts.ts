@@ -5,6 +5,7 @@ import { query, queryOne, run } from '../lib/db.ts'
 import { authMiddleware } from '../middleware/auth.ts'
 import { rateLimit } from '../lib/rate-limit.ts'
 import { syncPostToNBW } from '../lib/nbw-sync.ts'
+import { sendJPushNotification } from '../lib/jpush.ts'
 
 const IMGBED_URL = 'https://img.abdl-space.top'
 
@@ -485,6 +486,8 @@ posts.post('/', authMiddleware, async (c) => {
         'INSERT INTO notifications (user_id, type, message, related_id, actor_id) VALUES (?, ?, ?, ?, ?)',
         [origPost.user_id, 'repost', `${user.username} 转发了你的帖子`, repost_id, user.sub]
       )
+      // 极光推送
+      sendJPushNotification(c.env.abdl_space_db, origPost.user_id, '帖子被转发', `${user.username} 转发了你的帖子`, { url: `/forum/${repost_id}` })
     }
   }
 
@@ -755,6 +758,8 @@ posts.post('/:id/comments', authMiddleware, async (c) => {
       'INSERT INTO notifications (user_id, type, message, related_id, actor_id) VALUES (?, ?, ?, ?, ?)',
       [post.user_id, 'comment', `${user.username} 评论了你的帖子`, postId, user.sub]
     )
+    // 极光推送
+    sendJPushNotification(c.env.abdl_space_db, post.user_id, '新评论', `${user.username} 评论了你的帖子`, { url: `/forum/${postId}` })
   }
 
   // 如果是回复评论，给被回复者发通知
@@ -770,6 +775,8 @@ posts.post('/:id/comments', authMiddleware, async (c) => {
         'INSERT INTO notifications (user_id, type, message, related_id, actor_id) VALUES (?, ?, ?, ?, ?)',
         [parentComment.user_id, 'reply', `${user.username} 回复了你的评论`, postId, user.sub]
       )
+      // 极光推送
+      sendJPushNotification(c.env.abdl_space_db, parentComment.user_id, '新回复', `${user.username} 回复了你的评论`, { url: `/forum/${postId}` })
     }
   }
 
