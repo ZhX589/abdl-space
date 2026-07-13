@@ -40,9 +40,16 @@ export async function sendJPushNotification(
         audience: { registration_id: regIds },
         notification: {
           alert: content,
-          title,
-          android: { extras },
-          ios: { extras }
+          android: {
+            alert: content,
+            title,
+            extras
+          },
+          ios: {
+            alert: { title, body: content },
+            sound: 'default',
+            extras
+          }
         }
       })
     })

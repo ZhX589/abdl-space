@@ -108,10 +108,16 @@ jpush.post('/send', async (c) => {
     audience: { registration_id: regIds },
     notification: {
       alert: body.content,
-      title: body.title,
       android: {
-        extras: body.extras || {},
-        notification_channel: 'abdl-space'
+        alert: body.content,
+        title: body.title,
+        channel_id: 'abdl-space',
+        extras: body.extras || {}
+      },
+      ios: {
+        alert: { title: body.title, body: body.content },
+        sound: 'default',
+        extras: body.extras || {}
       }
     }
   }
