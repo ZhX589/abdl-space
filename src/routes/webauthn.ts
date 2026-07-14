@@ -16,7 +16,7 @@ const webauthn = new Hono<AppType>()
 
 const rpName = 'ABDL Space'
 const rpID = 'abdl-space.top'
-const expectedOrigin = 'https://abdl-space.top'
+const expectedOrigins = ['https://abdl-space.top', 'https://m.abdl-space.top']
 
 const tokenCookieOptions = 'HttpOnly; Secure; SameSite=None; Domain=.abdl-space.top; Path=/; Max-Age=604800'
 
@@ -124,7 +124,7 @@ webauthn.post('/register/verify', authMiddleware, async (c) => {
     verification = await verifyRegistrationResponse({
       response: body,
       expectedChallenge,
-      expectedOrigin,
+      expectedOrigin: expectedOrigins,
       expectedRPID: rpID,
     })
   } catch (error) {
@@ -221,7 +221,7 @@ webauthn.post('/authenticate/verify', async (c) => {
     verification = await verifyAuthenticationResponse({
       response: body,
       expectedChallenge,
-      expectedOrigin,
+      expectedOrigin: expectedOrigins,
       expectedRPID: rpID,
       credential: {
         id: credential.id,
