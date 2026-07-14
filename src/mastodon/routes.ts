@@ -1554,9 +1554,12 @@ mastodon.post('/media', async (c) => {
   const url = data[0]?.src
   if (!url) return c.json({ error: 'Upload failed' }, 500)
 
+  const mimeType = file.type || 'application/octet-stream'
+  const mediaType = mimeType.startsWith('video/') ? 'video' : 'image'
+
   return c.json({
     id: url,
-    type: 'image',
+    type: mediaType,
     url,
     preview_url: url,
     remote_url: null,
