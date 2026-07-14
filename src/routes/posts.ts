@@ -93,7 +93,7 @@ posts.get('/', async (c) => {
     }
   }
 
-  const conditions: string[] = []
+  const conditions: string[] = ['p.in_reply_to_id IS NULL']
   const params: unknown[] = []
 
   // filter=following: 只看关注的人的帖子
