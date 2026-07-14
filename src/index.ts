@@ -102,6 +102,7 @@ const ALLOWED_ORIGINS = [
   'https://wiki.abdl-space.top',
   'https://www.abdl-space.top',
   'https://abdl-space.top',
+  'https://m.abdl-space.top',
   'https://img.abdl-space.top',
   'https://open.abdl-space.top',
   'https://abdl-space-mobile.pages.dev',
@@ -110,7 +111,6 @@ const ALLOWED_ORIGINS = [
 async function corsWithOrigin(c: Context<AppType>, next: Next) {
   const incomingOrigin = c.req.header('origin') || ''
   const allowed = ALLOWED_ORIGINS.includes(incomingOrigin)
-    || incomingOrigin.endsWith('.abdl-space.top')
     ? incomingOrigin
     : ALLOWED_ORIGINS[0]
   return cors({

@@ -76,6 +76,7 @@ async function assertSessionNotStale(payload: JWTPayload, db: D1Database): Promi
     'SELECT password_changed_at FROM users WHERE id = ?',
     [payload.sub]
   )
+  if (!user) return 'Session expired, please login again'
   if (user?.password_changed_at) {
     const pwdChangedSec = Math.floor(new Date(user.password_changed_at).getTime() / 1000)
     const tokenIat = payload.iat > 1e12 ? Math.floor(payload.iat / 1000) : payload.iat
@@ -101,7 +102,16 @@ export async function authMiddleware(c: Context<AppType>, next: Next): Promise<R
     return c.json({ error: staleError }, 401)
   }
 
-  c.set('user', payload)
+  const currentUser = await queryOne<{ role: string }>(
+    c.env.abdl_space_db,
+    'SELECT role FROM users WHERE id = ?',
+    [payload.sub]
+  )
+  if (!currentUser) {
+    return c.json({ error: 'Authentication required' }, 401)
+  }
+
+  c.set('user', { ...payload, role: currentUser.role })
   await next()
 }
 
@@ -120,7 +130,12 @@ export async function adminMiddleware(c: Context<AppType>, next: Next): Promise<
     return c.json({ error: staleError }, 401)
   }
 
-  if (payload.role !== 'admin') {
+  const currentUser = await queryOne<{ role: string }>(
+    c.env.abdl_space_db,
+    'SELECT role FROM users WHERE id = ?',
+    [payload.sub]
+  )
+  if (currentUser?.role !== 'admin') {
     return c.json({ error: 'Admin access required' }, 403)
   }
 

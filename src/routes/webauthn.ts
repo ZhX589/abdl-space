@@ -9,6 +9,7 @@ import type { Env, JWTPayload } from '../types/index.ts'
 import { query, queryOne, run } from '../lib/db.ts'
 import { authMiddleware } from '../middleware/auth.ts'
 import { signJWT } from '../lib/auth.ts'
+import { rateLimit } from '../lib/rate-limit.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
@@ -22,6 +23,9 @@ const tokenCookieOptions = 'HttpOnly; Secure; SameSite=None; Domain=.abdl-space.
 
 // 挑战过期时间：5 分钟
 const CHALLENGE_TTL = 5 * 60
+
+webauthn.use('/authenticate/options', rateLimit('webauthn-options', 60_000, 20))
+webauthn.use('/authenticate/verify', rateLimit('webauthn-verify', 60_000, 30))
 
 // ============================================================
 // 生成随机挑战 ID
@@ -44,10 +48,12 @@ async function saveChallenge(
   const id = generateChallengeId()
   const expiresAt = Math.floor(Date.now() / 1000) + CHALLENGE_TTL
 
-  await run(db,
-    'INSERT INTO webauthn_challenges (id, challenge, user_id, type, expires_at) VALUES (?, ?, ?, ?, ?)',
-    [id, challenge, userId, type, expiresAt]
-  )
+  await db.batch([
+    db.prepare('DELETE FROM webauthn_challenges WHERE expires_at <= unixepoch()'),
+    db.prepare(
+      'INSERT INTO webauthn_challenges (id, challenge, user_id, type, expires_at) VALUES (?, ?, ?, ?, ?)'
+    ).bind(id, challenge, userId, type, expiresAt),
+  ])
 
   return id
 }
@@ -55,21 +61,34 @@ async function saveChallenge(
 // ============================================================
 // 获取并删除挑战
 // ============================================================
-async function consumeChallenge(
+export async function consumeChallenge(
   db: D1Database,
-  challengeId: string
+  challengeId: string,
+  type: 'register' | 'authenticate',
+  userId: number | null
 ): Promise<string | null> {
-  const row = await queryOne<{ challenge: string }>(
-    db, 'SELECT challenge FROM webauthn_challenges WHERE id = ? AND expires_at > unixepoch()',
-    [challengeId]
-  )
+  if (!challengeId) return null
+  const result = await db.prepare(
+    `DELETE FROM webauthn_challenges
+     WHERE id = ? AND type = ? AND user_id IS ? AND expires_at > unixepoch()
+     RETURNING challenge`
+  ).bind(challengeId, type, userId).all<{ challenge: string }>()
 
-  if (!row) return null
+  return result.results[0]?.challenge || null
+}
 
-  // 删除已使用的挑战（防止重放）
-  await run(db, 'DELETE FROM webauthn_challenges WHERE id = ?', [challengeId])
+export function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  return Uint8Array.from(bytes).buffer
+}
 
-  return row.challenge
+function decodeUserHandle(value: string): string | null {
+  try {
+    const base64 = value.replace(/-/g, '+').replace(/_/g, '/')
+    const padded = base64 + '='.repeat((4 - base64.length % 4) % 4)
+    return new TextDecoder().decode(Uint8Array.from(atob(padded), char => char.charCodeAt(0)))
+  } catch {
+    return null
+  }
 }
 
 // ============================================================
@@ -86,6 +105,7 @@ webauthn.post('/register/options', authMiddleware, async (c) => {
   const options = await generateRegistrationOptions({
     rpName,
     rpID,
+    userID: new Uint8Array(toArrayBuffer(new TextEncoder().encode(String(user.sub)))),
     userName: user.username,
     attestationType: 'none',
     excludeCredentials: existingCredentials.map(cred => ({
@@ -94,7 +114,8 @@ webauthn.post('/register/options', authMiddleware, async (c) => {
     })),
     authenticatorSelection: {
       authenticatorAttachment: 'platform',
-      residentKey: 'preferred',
+      residentKey: 'required',
+      requireResidentKey: true,
       userVerification: 'required',
     },
   })
@@ -114,7 +135,7 @@ webauthn.post('/register/verify', authMiddleware, async (c) => {
   const db = c.env.abdl_space_db
 
   // 从 D1 获取原始挑战
-  const expectedChallenge = await consumeChallenge(db, body.challengeId)
+  const expectedChallenge = await consumeChallenge(db, body.challengeId, 'register', user.sub)
   if (!expectedChallenge) {
     return c.json({ verified: false, error: '挑战已过期或无效，请重试' }, 400)
   }
@@ -127,8 +148,8 @@ webauthn.post('/register/verify', authMiddleware, async (c) => {
       expectedOrigin: expectedOrigins,
       expectedRPID: rpID,
     })
-  } catch (error) {
-    return c.json({ verified: false, error: (error as Error).message }, 400)
+  } catch {
+    return c.json({ verified: false, error: '安全识别注册验证失败' }, 400)
   }
 
   if (!verification.verified || !verification.registrationInfo) {
@@ -137,20 +158,24 @@ webauthn.post('/register/verify', authMiddleware, async (c) => {
 
   const { credential, credentialDeviceType, credentialBackedUp } = verification.registrationInfo
 
-  await run(db,
-    `INSERT INTO passkeys (id, user_id, public_key, counter, device_type, backed_up, transports, nickname, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, unixepoch())`,
-    [
-      credential.id,
-      user.sub,
-      Buffer.from(credential.publicKey),
-      credential.counter,
-      credentialDeviceType,
-      credentialBackedUp ? 1 : 0,
-      JSON.stringify(credential.transports || []),
-      body.nickname || null,
-    ]
-  )
+  try {
+    await run(db,
+      `INSERT INTO passkeys (id, user_id, public_key, counter, device_type, backed_up, transports, nickname, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, unixepoch())`,
+      [
+        credential.id,
+        user.sub,
+        toArrayBuffer(credential.publicKey),
+        credential.counter,
+        credentialDeviceType,
+        credentialBackedUp ? 1 : 0,
+        JSON.stringify(credential.transports || []),
+        body.nickname || null,
+      ]
+    )
+  } catch {
+    return c.json({ verified: false, error: '该安全识别已注册' }, 409)
+  }
 
   return c.json({ verified: true })
 })
@@ -159,36 +184,17 @@ webauthn.post('/register/verify', authMiddleware, async (c) => {
 // POST /authenticate/options — 生成认证选项（无需登录）
 // ============================================================
 webauthn.post('/authenticate/options', async (c) => {
-  const body = await c.req.json<{ username?: string }>()
+  await c.req.json().catch(() => ({}))
   const db = c.env.abdl_space_db
-
-  let allowCredentials: { id: string; transports?: string[] }[] = []
-  let userId: number | null = null
-
-  if (body.username) {
-    const user = await queryOne<{ id: number }>(
-      db, 'SELECT id FROM users WHERE username = ? OR email = ?', [body.username, body.username]
-    )
-    if (user) {
-      userId = user.id
-      const credentials = await query<{ id: string; transports: string }>(
-        db, 'SELECT id, transports FROM passkeys WHERE user_id = ?', [user.id]
-      )
-      allowCredentials = credentials.map(cred => ({
-        id: cred.id,
-        transports: cred.transports ? JSON.parse(cred.transports) : undefined,
-      }))
-    }
-  }
 
   const options = await generateAuthenticationOptions({
     rpID,
-    allowCredentials,
+    allowCredentials: [],
     userVerification: 'required',
   })
 
   // 保存挑战到 D1
-  const challengeId = await saveChallenge(db, options.challenge, userId, 'authenticate')
+  const challengeId = await saveChallenge(db, options.challenge, null, 'authenticate')
 
   return c.json({ ...options, challengeId })
 })
@@ -200,20 +206,25 @@ webauthn.post('/authenticate/verify', async (c) => {
   const body = await c.req.json()
   const db = c.env.abdl_space_db
 
-  // 从 D1 获取原始挑战
-  const expectedChallenge = await consumeChallenge(db, body.challengeId)
-  if (!expectedChallenge) {
-    return c.json({ verified: false, error: '挑战已过期或无效，请重试' }, 401)
-  }
-
   const credential = await queryOne<{
-    id: string; user_id: number; public_key: Uint8Array; counter: number; transports: string
+    id: string; user_id: number; public_key: ArrayBuffer; counter: number; transports: string
   }>(
     db, 'SELECT * FROM passkeys WHERE id = ?', [body.id]
   )
 
   if (!credential) {
     return c.json({ verified: false, error: '验证失败' }, 401)
+  }
+  const userHandle = body.response?.userHandle
+  if (!userHandle || decodeUserHandle(userHandle) !== String(credential.user_id)) {
+    return c.json({ verified: false, error: '验证失败' }, 401)
+  }
+
+  const expectedChallenge = await consumeChallenge(
+    db, body.challengeId, 'authenticate', null
+  )
+  if (!expectedChallenge) {
+    return c.json({ verified: false, error: '挑战已过期或与账户不匹配，请重试' }, 401)
   }
 
   let verification
@@ -230,7 +241,7 @@ webauthn.post('/authenticate/verify', async (c) => {
         transports: credential.transports ? JSON.parse(credential.transports) : undefined,
       },
     })
-  } catch (error) {
+  } catch {
     return c.json({ verified: false, error: '验证失败' }, 401)
   }
 
@@ -239,9 +250,14 @@ webauthn.post('/authenticate/verify', async (c) => {
   }
 
   // 更新 counter
-  await run(db, 'UPDATE passkeys SET counter = ?, last_used_at = unixepoch() WHERE id = ?',
-    [verification.authenticationInfo.newCounter, credential.id]
+  const counterUpdate = await run(
+    db,
+    'UPDATE passkeys SET counter = ?, last_used_at = unixepoch() WHERE id = ? AND counter = ?',
+    [verification.authenticationInfo.newCounter, credential.id, credential.counter]
   )
+  if ((counterUpdate.meta.changes || 0) !== 1) {
+    return c.json({ verified: false, error: '凭证已被使用，请重试' }, 409)
+  }
 
   // 获取用户信息并签发 JWT
   const user = await queryOne<{ id: number; email: string; username: string; avatar: string; role: string }>(
@@ -291,7 +307,10 @@ webauthn.delete('/credentials/:id', authMiddleware, async (c) => {
   const id = c.req.param('id')
   const db = c.env.abdl_space_db
 
-  await run(db, 'DELETE FROM passkeys WHERE id = ? AND user_id = ?', [id, user.sub])
+  const result = await run(db, 'DELETE FROM passkeys WHERE id = ? AND user_id = ?', [id, user.sub])
+  if ((result.meta.changes || 0) !== 1) {
+    return c.json({ success: false, error: '安全识别不存在' }, 404)
+  }
   return c.json({ success: true })
 })
 

@@ -8,6 +8,7 @@
     "deploy": "wrangler deploy",
     "deploy:api": "wrangler deploy",
     "lint": "eslint .",
+    "test": "node --experimental-strip-types --test src/lib/auth.test.ts src/middleware/auth.test.ts src/routes/webauthn.test.ts",
     "cf-typegen": "wrangler types"
   },
   "dependencies": {

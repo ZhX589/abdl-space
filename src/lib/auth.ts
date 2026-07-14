@@ -3,7 +3,7 @@ import type { JWTPayload } from '../types/index.ts'
 const PBKDF2_ITERATIONS = 100000  // CF Workers max limit
 const SALT_LENGTH = 16
 const KEY_LENGTH = 64
-const JWT_EXPIRES_IN = 365 * 24 * 60 * 60 // 1 year, not enforced
+const JWT_EXPIRES_IN = 7 * 24 * 60 * 60
 
 function getClientIp(c: { req: { header: (name: string) => string | undefined } }): string {
   return c.req.header('CF-Connecting-IP') || c.req.header('X-Forwarded-For')?.split(',')[0]?.trim() || 'unknown'
@@ -156,31 +156,52 @@ export async function signJWT(payload: Omit<JWTPayload, 'iat' | 'exp'>, secret: 
  * @returns 解码后的 payload 或 null（验证失败时）
  */
 export async function verifyJWT(token: string, secret: string): Promise<JWTPayload | null> {
-  const parts = token.split('.')
-  if (parts.length !== 3) return null
-
-  const [, payloadB64, signatureB64] = parts
-  const encoder = new TextEncoder()
-  const signInput = `${parts[0]}.${payloadB64}`
-
-  const key = await crypto.subtle.importKey(
-    'raw',
-    encoder.encode(secret),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['verify']
-  )
-  const signature = base64urlDecode(signatureB64)
-  const valid = await crypto.subtle.verify('HMAC', key, signature, encoder.encode(signInput))
-  if (!valid) return null
-
   try {
+    const parts = token.split('.')
+    if (parts.length !== 3) return null
+
+    const [headerB64, payloadB64, signatureB64] = parts
+    const header = JSON.parse(new TextDecoder().decode(base64urlDecode(headerB64)))
+    if (header?.alg !== 'HS256' || header?.typ !== 'JWT') return null
+
+    const encoder = new TextEncoder()
+    const key = await crypto.subtle.importKey(
+      'raw',
+      encoder.encode(secret),
+      { name: 'HMAC', hash: 'SHA-256' },
+      false,
+      ['verify']
+    )
+    const signature = base64urlDecode(signatureB64)
+    const valid = await crypto.subtle.verify(
+      'HMAC', key, signature, encoder.encode(`${headerB64}.${payloadB64}`)
+    )
+    if (!valid) return null
+
     const payloadJson = new TextDecoder().decode(base64urlDecode(payloadB64))
-    const payload: JWTPayload = JSON.parse(payloadJson)
+    const payload: unknown = JSON.parse(payloadJson)
+    if (!isValidJWTPayload(payload)) return null
+    const now = Math.floor(Date.now() / 1000)
+    if (payload.exp <= now || payload.iat > now + 60) return null
+    if (payload.exp - payload.iat > JWT_EXPIRES_IN) return null
     return payload
   } catch {
     return null
   }
+}
+
+export function isValidJWTPayload(payload: unknown): payload is JWTPayload {
+  if (!payload || typeof payload !== 'object') return false
+  const value = payload as Record<string, unknown>
+  return Number.isInteger(value.sub)
+    && typeof value.username === 'string'
+    && typeof value.email === 'string'
+    && typeof value.role === 'string'
+    && Number.isFinite(value.iat)
+    && Number.isFinite(value.exp)
+    && (value.iat as number) >= 0
+    && (value.exp as number) > (value.iat as number)
+    && (value.exp as number) - (value.iat as number) <= JWT_EXPIRES_IN
 }
 
 export { getClientIp }
