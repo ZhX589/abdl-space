@@ -38,7 +38,7 @@ async function lookupOAuthToken(db: D1Database, token: string): Promise<JWTPaylo
  * Extract and verify JWT or OAuth token from Authorization header or Cookie
  * Returns payload or null
  */
-async function extractUser(c: Context<AppType>): Promise<JWTPayload | null> {
+export async function extractUser(c: Context<AppType>): Promise<JWTPayload | null> {
   // Try Authorization header first
   const authHeader = c.req.header('Authorization')
   if (authHeader && authHeader.startsWith('Bearer ')) {

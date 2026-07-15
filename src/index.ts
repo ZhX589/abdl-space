@@ -277,6 +277,34 @@ app.get('/api/badges', async (c) => {
 })
 app.route('/api/sync', sync)
 
+// WebSocket 实时连接 — 复用完整 JWT + OAuth 鉴权
+app.get('/api/ws', async (c) => {
+  const upgrade = c.req.header('Upgrade')
+  if (upgrade !== 'websocket') {
+    return c.json({ error: 'expected websocket upgrade' }, 426)
+  }
+
+  // 复用 REST 鉴权逻辑
+  const { extractUser } = await import('./middleware/auth.ts')
+  const payload = await extractUser(c)
+  if (!payload) {
+    return c.json({ error: 'authentication required' }, 401)
+  }
+
+  const accountId = `abdl-space.top_${payload.sub}`
+  const stub = c.env.USER_PRESENCE.getByName(`user:${payload.sub}`)
+
+  // 转发请求到 DO，附带已验证的 account_id
+  const headers = new Headers(c.req.raw.headers)
+  headers.set('X-Verified-Account-Id', accountId)
+  headers.set('X-Device-Id', c.req.header('X-Device-Id') ?? 'unknown')
+
+  return stub.fetch(new Request(c.req.url, {
+    method: 'GET',
+    headers,
+  }))
+})
+
 /**
  * POST /api/admin/reset/password — admin 只能改自己的密码（需鉴权）
  */

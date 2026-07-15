@@ -348,6 +348,10 @@ export interface Env {
   abdl_space_db: D1Database
   JWT_SECRET: string
   FRONTEND_ORIGIN?: string
+  // Durable Objects
+  USER_PRESENCE: DurableObjectNamespace
+  // Queues
+  MESSAGE_OUTBOX_QUEUE: Queue
   // 腾讯云 SES
   TENCENT_SECRET_ID: string
   TENCENT_SECRET_KEY: string

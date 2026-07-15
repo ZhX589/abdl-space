@@ -236,11 +236,21 @@ messages.post('/', authMiddleware, async (c) => {
   // Step 4: 写事件和 outbox
   await writeMessageEvents(db, messageRow.id, user.sub, receiver_id, messageRow)
 
-  // Step 5: 获取最新 event_id
+  // Step 5: 获取最新 event_id 并入队 outbox
   const latestEvent = await queryOne<{ id: number }>(db,
     'SELECT MAX(id) as id FROM message_events WHERE message_id = ?',
     [messageRow.id],
   )
+
+  // 异步入队 outbox（不阻塞响应）
+  try {
+    if (c.env.MESSAGE_OUTBOX_QUEUE && latestEvent?.id) {
+      await c.env.MESSAGE_OUTBOX_QUEUE.send({ eventId: latestEvent.id })
+    }
+  } catch (e) {
+    console.error('Failed to enqueue outbox:', e)
+    // 不阻塞响应 — cron 扫尾会补
+  }
 
   return c.json({
     event_id: latestEvent?.id || 0,
@@ -299,6 +309,21 @@ messages.post('/:userId/read', authMiddleware, async (c) => {
      AND id NOT IN (SELECT event_id FROM message_outbox)`,
     [readUpToId, otherId],
   )
+
+  // 异步入队 outbox
+  try {
+    if (c.env.MESSAGE_OUTBOX_QUEUE) {
+      const readEvents = await query<{ id: number }>(db,
+        'SELECT id FROM message_events WHERE event_type = \'message.read\' AND read_up_to_id = ? AND peer_id = ?',
+        [readUpToId, otherId],
+      )
+      for (const ev of readEvents) {
+        await c.env.MESSAGE_OUTBOX_QUEUE.send({ eventId: ev.id })
+      }
+    }
+  } catch (e) {
+    console.error('Failed to enqueue read outbox:', e)
+  }
 
   return c.json({ message: '已标为已读' })
 })

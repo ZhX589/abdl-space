@@ -24,5 +24,39 @@
 			"database_name": "abdl-space-db",
 			"database_id": "159f81ba-ea32-4667-a3ce-d72cb1659d93"
 		}
-	]
+	],
+	"durable_objects": {
+		"bindings": [
+			{
+				"name": "USER_PRESENCE",
+				"class_name": "UserPresence"
+			}
+		]
+	},
+	"migrations": [
+		{
+			"tag": "v1-user-presence",
+			"new_sqlite_classes": ["UserPresence"]
+		}
+	],
+	"queues": {
+		"producers": [
+			{
+				"binding": "MESSAGE_OUTBOX_QUEUE",
+				"queue": "message-outbox"
+			}
+		],
+		"consumers": [
+			{
+				"queue": "message-outbox",
+				"max_batch_size": 10,
+				"max_batch_timeout": 5,
+				"max_retries": 5,
+				"dead_letter_queue": "message-outbox-dlq"
+			}
+		]
+	},
+	"triggers": {
+		"crons": ["* * * * *"]
+	}
 }
