@@ -582,6 +582,7 @@ brands (独立表, 关联 diapers.brand)
 | page | integer | 1 | |
 | limit | integer | 20 | ≤100 |
 | search | string | — | 搜索 content |
+| filter | string | — | `following`（仅关注的人，需登录）/ `announcements`（仅公告） |
 
 - **响应 200**：
 ```json
@@ -589,21 +590,20 @@ brands (独立表, 关联 diapers.brand)
   "posts": [
     {
       "id": 1,
-      "user": { "id": 1, "username": "ZhX", "avatar": "...", "role": "admin" },
+      "user": { "id": 1, "username": "ZhX", "avatar": "...", "role": "admin", "is_beta_user": false },
       "content": "今天试了 Little Kings，吸水量惊人！",
-      "diaper_id": 1, "pinned": false, "has_nsfw": false,
+      "diaper_id": 1, "pinned": false, "is_announcement": false,
+      "repost_id": null, "repost": null,
       "like_count": 5, "has_liked": true,
       "comment_count": 3, "created_at": "...",
-      "images": [ { "image_url": "https://...", "is_nsfw": false } ],
-      "repost": null,
-      "is_announcement": 0
+      "images": [ { "image_url": "https://...", "is_nsfw": false } ]
     }
   ],
   "pagination": { "page": 1, "limit": 20, "total": 42, "totalPages": 3 }
 }
 ```
 
-排序：置顶优先 → `created_at` 降序。
+排序：公告优先 → 置顶 → `created_at` 降序。`repost` 非空时含原帖信息（id/user/content/images/created_at）。
 
 #### GET /api/posts/announcements/latest
 
@@ -620,20 +620,29 @@ brands (独立表, 关联 diapers.brand)
 - **响应 200**：
 ```json
 {
-  "post": { /* 同列表中单条 */ },
+  "post": {
+    "id": 1,
+    "user": { "id": 1, "username": "ZhX", "avatar": "...", "role": "admin", "is_beta_user": false },
+    "content": "今天试了 Little Kings，吸水量惊人！",
+    "diaper_id": 1, "pinned": false, "is_announcement": false,
+    "repost_id": null, "repost": null,
+    "like_count": 5, "has_liked": true,
+    "comment_count": 3, "created_at": "...",
+    "images": [ { "image_url": "https://...", "is_nsfw": false } ]
+  },
   "comments": [
     {
       "id": 1, "post_id": 1,
-      "user": { "id": 2, "username": "userB", "avatar": "...", "role": "user" },
+      "user": { "id": 2, "username": "userB", "avatar": "...", "role": "user", "is_beta_user": false },
       "parent_id": null, "content": "同感！",
-      "like_count": 0, "has_liked": false, "created_at": "...",
-      "images": [ { "image_url": "https://...", "is_nsfw": false } ]
+      "images": [ { "image_url": "https://...", "is_nsfw": false } ],
+      "like_count": 0, "has_liked": false, "created_at": "..."
     }
   ]
 }
 ```
 
-`comments` 按 `created_at` 升序；`parent_id` 非空表示回复（仅一层嵌套）。
+`comments` 按 `created_at` 升序；`parent_id` 非空表示回复（仅一层嵌套）。评论含 `like_count`/`has_liked`/`images`。原帖已删除时 `repost_id` 置 null。
 
 #### POST /api/posts
 
@@ -646,9 +655,10 @@ brands (独立表, 关联 diapers.brand)
 |------|------|------|------|
 | content | string | 是 | 1–5000 字符，不能纯空格 |
 | diaper_id | integer | 否 | 关联纸尿裤 id |
-| images | array | 否 | 图片数组 `[{ "url": "...", "is_nsfw": false }]` |
+| images | array | 否 | 图片数组 `[{ "url": "...", "is_nsfw": false }]` 或字符串 URL |
 | repost_id | integer | 否 | 转发的原帖 id |
 | is_announcement | boolean | 否 | 仅管理员可设为 true |
+| nbw_fid | integer | 否 | NBW 目标版块 ID（不传默认 27=分享），触发异步双发 |
 
 - **响应 201**：
 ```json
@@ -657,7 +667,9 @@ brands (独立表, 关联 diapers.brand)
   "rewards": { "total_exp": 10, "total_points": 3 }
 }
 ```
-- **错误**：400（content 为空或超限）
+- **错误**：400（content 为空或超限、图片 URL 不合法）、404（repost 目标不存在）
+
+> **NBW 双发**：用户已绑定 `nbw_uid` 时，异步将帖子推送到 NBW（上传图片→组 BBCode→`create_thread`），失败仅 console.error 不阻塞响应。成功后 `posts.nbw_tid`/`nbw_pid` 记录 NBW 侧 ID。
 
 #### PATCH /api/posts/:id
 
@@ -690,7 +702,7 @@ brands (独立表, 关联 diapers.brand)
 |------|------|------|------|
 | content | string | 是 | 1–2000 字符 |
 | parent_id | integer | 否 | 回复的评论 id，null 为顶级评论 |
-| images | array | 否 | 图片数组 `["https://..."]` |
+| images | array | 否 | 图片数组 `["https://..."]` 或 `[{ "url": "...", "is_nsfw": false }]` |
 
 - **响应 201**：
 ```json
@@ -699,7 +711,9 @@ brands (独立表, 关联 diapers.brand)
   "rewards": { "total_exp": 5, "total_points": 2 }
 }
 ```
-- **错误**：404（帖子不存在）、400（content 空/超限/parent_id 不合法）
+- **错误**：404（帖子不存在）、400（content 空/超限/parent_id 不合法、图片 URL 不合法）
+
+> 评论成功后给帖子作者发通知+极光推送；回复评论时给被回复者也发通知+推送（不给自己发）。
 
 #### DELETE /api/posts/:postId/comments/:commentId
 
@@ -1867,6 +1881,60 @@ NBW OAuth 回调。
 - **响应 200**：`{ "message": "已解绑宝宝新天地账户" }`
 - **错误**：400（未绑定 / 未设置密码且未验证邮箱）
 
+#### GET /api/auth/nbw/mobile-start
+
+App NBW 登录入口，302 重定向到 NBW 授权页。
+
+- **鉴权**：否
+- **请求 query**：`state`（CSRF / 客户端状态）
+
+#### GET /api/auth/nbw/mobile-callback
+
+App NBW OAuth 回调。已绑定 → `abdl-space://callback?token=...`；未绑定 → `nbw_bind=need_bind`。
+
+- **鉴权**：否
+- **请求 query**：`code`、`state`
+
+#### POST /api/auth/nbw/get-register-url
+
+获取 NBW 官方免验证注册引导链接（S2S 代理 `get_register_url`）。
+
+- **鉴权**：是
+- **请求 body**：`{ "email": "..." }`
+- **响应**：透传 NBW 返回（含 `register_url`）
+
+#### POST /api/auth/nbw/check-register
+
+检查邮箱是否已在 NBW 注册（S2S 代理 `search_user`）。
+
+- **鉴权**：是
+- **请求 body**：`{ "email": "..." }`
+- **响应 200**：
+```json
+{ "registered": true, "nbw_uid": "4", "nbw_username": "日九baby" }
+```
+或 `{ "registered": false }`
+
+#### POST /api/auth/nbw/bind-by-email
+
+通过邮箱直接绑定 NBW（无需 OAuth，S2S `search_user` 查 UID）。
+
+- **鉴权**：是
+- **请求 body**：`{ "email": "..." }`
+- **响应 200**：`{ "nbw_uid": "4", "nbw_username": "..." }`
+- **错误**：404（NBW 用户未找到）、409（该 NBW 账户已绑定其他用户）
+
+#### POST /api/auth/nbw/recommend-fid
+
+AI 推荐 NBW 发帖版块（DeepSeek）。
+
+- **鉴权**：是
+- **请求 body**：`{ "content": "帖子内容" }`
+- **响应 200**：`{ "fid": 27, "forum_name": "分享", "confidence": 0.9 }`
+- **可选版块**：`28` 自拍 / `27` 分享 / `26` 小说漫画 / `3` 交友（无 API Key 时默认 27）
+
+> **NBW 双发**：`POST /api/posts` 在用户已绑定 `nbw_uid` 时异步调用 `src/lib/nbw-sync.ts`，将帖子推送到 NBW（`upload_image` + `create_thread`），成功后写入 `posts.nbw_tid` / `nbw_pid`。
+
 ---
 
 ### 5.28 Captcha（验证码）
@@ -2418,7 +2486,7 @@ Mastodon scope 映射：`follow`/`push` → `write`，`read`/`write`/`profile`/`
 |------|------|
 | `GET /api/v1/accounts/verify_credentials` | 当前用户（含 source） |
 | `PATCH /api/v1/accounts/update_credentials` | 编辑资料（支持 JSON + multipart） |
-| `GET /api/v1/accounts/:id` | 用户信息 |
+| `GET /api/v1/accounts/:id` | 用户信息（本地数字 ID；或 `nbw_<uid>` 远程 NBW 账号，代理 `get_user_info`） |
 | `GET /api/v1/accounts/:id/statuses` | 用户帖子 |
 | `GET /api/v1/accounts/:id/followers` | 粉丝 |
 | `GET /api/v1/accounts/:id/following` | 关注 |
@@ -2431,16 +2499,24 @@ Mastodon scope 映射：`follow`/`push` → `write`，`read`/`write`/`profile`/`
 
 | 端点 | 说明 |
 |------|------|
-| `POST /api/v1/statuses` | 发帖（支持 media_ids） |
+| `POST /api/v1/statuses` | 发帖（支持 media_ids、in_reply_to_id、poll、spoiler_text、visibility、sensitive） |
 | `GET /api/v1/statuses/:id` | 帖子/评论详情 |
+| `PUT /api/v1/statuses/:id` | 编辑帖子（支持 media_ids、poll） |
 | `DELETE /api/v1/statuses/:id` | 删帖/删评论 |
+| `GET /api/v1/statuses/:id/source` | 帖子原始内容（纯文本） |
+| `GET /api/v1/statuses/:id/context` | 评论上下文（ancestors + descendants） |
 | `POST /api/v1/statuses/:id/favourite` | 点赞 |
 | `POST /api/v1/statuses/:id/unfavourite` | 取消赞 |
-| `POST /api/v1/statuses/:id/reblog` | 转发（no-op） |
+| `POST /api/v1/statuses/:id/reblog` | 转发 |
 | `POST /api/v1/statuses/:id/unreblog` | 取消转发 |
-| `GET /api/v1/statuses/:id/context` | 评论上下文 |
+| `POST /api/v1/statuses/:id/bookmark` | 收藏 |
+| `POST /api/v1/statuses/:id/unbookmark` | 取消收藏 |
+| `POST /api/v1/statuses/:id/pin` | 置顶（自己主页） |
+| `POST /api/v1/statuses/:id/unpin` | 取消置顶 |
 | `GET /api/v1/statuses/:id/favourited_by` | 点赞用户列表 |
 | `GET /api/v1/statuses/:id/reblogged_by` | 空数组 |
+| `GET /api/v1/favourites` | 当前用户点赞过的帖子 |
+| `GET /api/v1/bookmarks` | 当前用户收藏的帖子 |
 
 #### Timelines
 
@@ -2466,8 +2542,16 @@ Mastodon scope 映射：`follow`/`push` → `write`，`read`/`write`/`profile`/`
 | 端点 | 说明 |
 |------|------|
 | `POST /api/v1/media` | 上传图片（代理到图床，返回 URL 作为 id） |
+| `PUT /api/v1/media/:id` | 更新媒体信息（如 description/alt_text） |
 | `GET /api/v1/search` | 搜索（用户 + 帖子 + 标签） |
 | `GET /api/v2/search` | 搜索（v2） |
+
+#### Polls
+
+| 端点 | 说明 |
+|------|------|
+| `GET /api/v1/polls/:id` | 投票详情 |
+| `POST /api/v1/polls/:id/votes` | 投票 |
 
 #### Push 推送
 
@@ -2577,6 +2661,44 @@ Mastodon scope 映射：`follow`/`push` → `write`，`read`/`write`/`profile`/`
 | `GET /api/v1/abdl/users/:id` | 用户公开 ABDL 档案 |
 | `GET /api/v1/abdl/users/:id/worn` | 穿过的纸尿裤（评过分的） |
 
+**NBW 帖子**：
+
+| 端点 | 说明 | 参数 |
+|------|------|------|
+| `GET /api/v1/abdl/nbw/sync-threads` | 拉取 NBW 待同步外发帖子并转为 Mastodon Status[]（同 `/timelines/home` 格式） | `limit`/`perpage`(≤40)、`fid`、`orderby`(dateline/lastpost)、`cursor`/`max_id` |
+
+响应：`MastodonStatus[]`（直接数组，非包裹对象）
+
+```json
+[
+  {
+    "id": "nbw_10099",
+    "created_at": "2023-09-23T04:20:34.000Z",
+    "content": "<p>标题</p><p>摘要...</p>",
+    "url": "https://www.newbabyworld.top/forum.php?mod=viewthread&tid=10099",
+    "uri": "https://www.newbabyworld.top/forum.php?mod=viewthread&tid=10099",
+    "replies_count": 0,
+    "favourites_count": 0,
+    "account": {
+      "id": "nbw_4",
+      "username": "日九baby",
+      "acct": "日九baby@newbabyworld.top",
+      "display_name": "日九baby",
+      "avatar": "https://www.newbabyworld.top/uc_server/avatar.php?uid=4&size=middle"
+    },
+    "media_attachments": [
+      { "id": "0", "type": "image", "url": "https://...", "preview_url": "https://..." }
+    ],
+    "application": { "name": "宝宝新天地", "website": "https://www.newbabyworld.top" },
+    "card": { "url": "...", "title": "...", "provider_name": "宝宝新天地" }
+  }
+]
+```
+
+分页：有更多时返回 `Link: </api/v1/abdl/nbw/sync-threads?max_id=...&limit=20>; rel="next"`（`max_id` 为 NBW 的 `next_cursor`）。
+
+> S2S 代理 `get_sync_threads`，仅 `abdl_space_status=2`；**不入库**。Status ID 格式 `nbw_<tid>`，Account ID 格式 `nbw_<authorid>`。未配置 `NBW_API_KEY` 返回 503。
+
 `/abdl/me` 响应：
 ```json
 {
@@ -2604,8 +2726,8 @@ src/mastodon/
 
 - 无 Streaming API（`configuration.urls.streaming: null`，Moshidon 回退轮询）
 - 无 ActivityPub 联邦（纯本地实例）
-- reblog 为 no-op
 - conversations 返回空数组
+- filters / lists / mutes / blocks / follow_requests / domain_blocks 等返回空数组或 stub
 - WebPush 实际推送需要配置 VAPID 密钥对
 
 ---
@@ -2671,3 +2793,6 @@ src/mastodon/
 | 2026-06-15 | 新增 Mastodon 兼容 API 层（/api/v1/* + /api/v2/*），支持 Moshidon 等 Mastodon 客户端连接；Status ID 使用 p_/c_ 前缀格式；支持 OAuth + JWT 双模认证；实现 28+ 端点 + 15 个 stub 端点 |
 | 2026-06-15 | 新增 WebPush 推送订阅（/api/v1/push/subscription）；新增 ABDL 自定义端点（/api/v1/abdl/*），包含纸尿裤、评分、感受、排行榜、术语、用户档案等 13 个端点 |
 | 2026-06-25 | 新增版本管理 API（/api/v1/version）：GET 查询最新版本、POST 上传 APK 并更新版本配置 |
+| 2026-07-15 | 对照源码校正帖子相关 API：`GET /api/posts` 补充 filter；`POST /api/posts` 补充 nbw_fid + NBW 异步双发；评论支持 images；Mastodon Statuses 补全 bookmark/unbookmark/pin/unpin/PUT/source/polls/favourites/bookmarks；NBW 补全 mobile 回调与 S2S 代理（get-register-url/check-register/bind-by-email/recommend-fid） |
+| 2026-07-15 | 新增 `GET /api/v1/abdl/nbw/sync-threads`：代理 NBW `get_sync_threads`，转为 Mastodon Status[]（`toStatusFromNBW`，同 timelines/home 格式，ID=`nbw_<tid>`） |
+| 2026-07-15 | `GET /api/v1/accounts/:id` 支持 `nbw_<uid>`：代理 `get_user_info` → `toAccountFromNBW`（公开字段白名单，不暴露 email/手机/QQ） |

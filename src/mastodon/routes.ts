@@ -9,11 +9,12 @@
 import { Hono } from 'hono'
 import type { Env, JWTPayload } from '../types/index.ts'
 import { query, queryOne, run } from '../lib/db.ts'
-import { toAccount, toStatus, toStatusFromComment, toNotification, toISOString } from './converter.ts'
+import { toAccount, toAccountFromNBW, toStatus, toStatusFromComment, toNotification, toISOString } from './converter.ts'
 import { generateCardsForPosts } from './linkpreview.ts'
 import type { MastodonNotification, MastodonAccount, MastodonStatus } from './types.ts'
 import { mastodonAuth, buildInstance, resolveStatus, parseMastoIdForCursor } from './shared.ts'
 import { syncPostToNBW } from '../lib/nbw-sync.ts'
+import { nbwS2SRequest } from '../lib/nbw.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
@@ -470,9 +471,44 @@ mastodon.get('/accounts/relationships', async (c) => {
 
 // ============================================================
 // GET /api/v1/accounts/:id
+// 支持本地数字 ID 与远程 NBW 账号 ID（nbw_<uid>）
 // ============================================================
 mastodon.get('/accounts/:id', async (c) => {
-  const id = parseInt(c.req.param('id'))
+  const rawId = c.req.param('id')
+
+  // 远程 NBW 账号：id = nbw_<uid>
+  if (rawId.startsWith('nbw_')) {
+    if (!c.env.NBW_API_KEY) return c.json({ error: 'NBW API 未配置' }, 503)
+    const nbwUid = rawId.slice(4)
+    if (!/^\d+$/.test(nbwUid)) return c.json({ error: 'Invalid id' }, 400)
+
+    try {
+      const result = await nbwS2SRequest(c.env, 'get_user_info', { query: nbwUid })
+      if (result.code === 404) return c.json({ error: 'Record not found' }, 404)
+      if (result.code !== 200 || !result.data) {
+        const status = result.code === 401 || result.code === 403 ? result.code as 401 | 403 : 502
+        return c.json({ error: result.msg || 'NBW 请求失败', code: result.code }, status)
+      }
+      return c.json(toAccountFromNBW(result.data as {
+        uid: number
+        username?: string
+        avatar?: string
+        groupid?: number
+        groupname?: string
+        credits?: number
+        regdate?: string
+        profile?: Record<string, string>
+        posts?: number
+        threads?: number
+        lastactivity?: string
+      }))
+    } catch (e) {
+      console.error('NBW get_user_info failed:', e)
+      return c.json({ error: 'NBW 服务请求失败' }, 502)
+    }
+  }
+
+  const id = parseInt(rawId)
   if (!id) return c.json({ error: 'Invalid id' }, 400)
 
   const dbUser = await queryOne<Record<string, unknown>>(

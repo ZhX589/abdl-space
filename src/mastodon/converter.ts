@@ -208,7 +208,7 @@ export function toStatusFromComment(comment: {
 }
 
 /** Image URL → Mastodon MediaAttachment */
-function toMediaAttachment(id: number, url: string, description?: string | null): MastodonMediaAttachment {
+function toMediaAttachment(id: number, url: string, description?: string | null, width?: number): MastodonMediaAttachment {
   return {
     id: String(id),
     type: 'image',
@@ -216,10 +216,235 @@ function toMediaAttachment(id: number, url: string, description?: string | null)
     preview_url: url,
     remote_url: null,
     text_url: null,
-    meta: {},
+    meta: width ? {
+      original: { width, height: 0, size: `${width}x0`, aspect: 0 },
+    } : {},
     description: description || null,
     blurhash: null,
   }
+}
+
+/** NBW get_user_info → Mastodon Account（远程账号，不入库；不暴露 email/手机/QQ） */
+export function toAccountFromNBW(user: {
+  uid: number
+  username?: string
+  email?: string
+  avatar?: string
+  groupid?: number
+  groupname?: string
+  credits?: number
+  regdate?: string
+  profile?: Record<string, string>
+  extcredits?: Record<string, number>
+  posts?: number
+  threads?: number
+  lastactivity?: string
+}): MastodonAccount {
+  const uid = Number(user.uid)
+  const username = user.username || `nbw_${uid}`
+  const avatar = user.avatar || DEFAULT_AVATAR
+  const profile = user.profile || {}
+  const bio = stripHtml(String(profile['自我介绍'] || '')).trim()
+  const createdAt = parseNBWDate(user.regdate)
+  const lastActivity = parseNBWLastActivity(user.lastactivity)
+
+  // 公开 fields 白名单（绝不暴露 email/手机/QQ）
+  const fieldKeys = ['ABDL属性', '小朋友/家长', '生理性别', '心理性别', '兴趣爱好', '个人主页'] as const
+  const fields: MastodonAccount['fields'] = []
+  if (user.groupname) fields.push({ name: '用户组', value: escapeHtml(user.groupname), verified_at: null })
+  if (user.credits != null) fields.push({ name: '积分', value: String(user.credits), verified_at: null })
+  for (const key of fieldKeys) {
+    const val = String(profile[key] || '').trim()
+    if (val) fields.push({ name: key, value: escapeHtml(val), verified_at: null })
+  }
+
+  return {
+    id: `nbw_${uid}`,
+    username,
+    acct: `${username}@newbabyworld.top`,
+    display_name: username,
+    locked: false,
+    bot: false,
+    discoverable: true,
+    group: false,
+    created_at: createdAt,
+    note: bio ? `<p>${escapeHtml(bio)}</p>` : '',
+    url: `https://www.newbabyworld.top/home.php?mod=space&uid=${uid}`,
+    uri: `https://www.newbabyworld.top/home.php?mod=space&uid=${uid}`,
+    avatar,
+    avatar_static: avatar,
+    header: DEFAULT_HEADER,
+    header_static: DEFAULT_HEADER,
+    followers_count: 0,
+    following_count: 0,
+    statuses_count: Number(user.threads ?? user.posts ?? 0),
+    last_status_at: lastActivity,
+    emojis: [],
+    fields,
+    roles: user.groupid === 1
+      ? [{ id: 'nbw-admin', name: user.groupname || '管理员', color: '#ff6b6b', permissions: '0', highlighted: true }]
+      : [],
+    hide_collections: false,
+    noindex: false,
+  }
+}
+
+/** NBW sync thread → Mastodon Status（远程帖，不入库） */
+export function toStatusFromNBW(thread: {
+  tid: number
+  fid?: number
+  forum_name?: string
+  subject?: string
+  abstract?: string
+  author?: string
+  authorid?: number
+  avatar?: string
+  dateline?: number | string
+  lastpost?: number | string
+  views?: number
+  replies?: number
+  has_image?: number
+  image_list?: Array<string | { url: string; width?: number }>
+}): MastodonStatus {
+  const tid = Number(thread.tid)
+  const authorId = Number(thread.authorid || 0)
+  const username = thread.author || `nbw_${authorId}`
+  const avatar = thread.avatar || DEFAULT_AVATAR
+  const createdAt = unixToISO(thread.dateline)
+
+  const account: MastodonAccount = {
+    id: `nbw_${authorId}`,
+    username,
+    acct: `${username}@newbabyworld.top`,
+    display_name: username,
+    locked: false,
+    bot: false,
+    discoverable: true,
+    group: false,
+    created_at: createdAt,
+    note: '',
+    url: `https://www.newbabyworld.top/home.php?mod=space&uid=${authorId}`,
+    uri: `https://www.newbabyworld.top/home.php?mod=space&uid=${authorId}`,
+    avatar,
+    avatar_static: avatar,
+    header: DEFAULT_HEADER,
+    header_static: DEFAULT_HEADER,
+    followers_count: 0,
+    following_count: 0,
+    statuses_count: 0,
+    last_status_at: createdAt,
+    emojis: [],
+    fields: thread.forum_name
+      ? [{ name: '版块', value: escapeHtml(thread.forum_name), verified_at: null }]
+      : [],
+    roles: [],
+    hide_collections: false,
+    noindex: false,
+  }
+
+  const subject = (thread.subject || '').trim()
+  const abstract = (thread.abstract || '').trim()
+  const plain = [subject, abstract].filter(Boolean).join('\n\n') || '来自宝宝新天地'
+  const contentHtml = formatContent(plain)
+
+  const images = (thread.image_list || []).map((img, i) => {
+    if (typeof img === 'string') return toMediaAttachment(i, img)
+    return toMediaAttachment(i, img.url, null, img.width)
+  })
+
+  const threadUrl = `https://www.newbabyworld.top/forum.php?mod=viewthread&tid=${tid}`
+
+  return {
+    id: `nbw_${tid}`,
+    created_at: createdAt,
+    in_reply_to_id: null,
+    in_reply_to_account_id: null,
+    sensitive: false,
+    spoiler_text: '',
+    visibility: 'public',
+    language: 'zh',
+    uri: threadUrl,
+    url: threadUrl,
+    replies_count: Number(thread.replies || 0),
+    reblogs_count: 0,
+    favourites_count: 0,
+    bookmarks_count: 0,
+    shares_count: 0,
+    favourited: false,
+    reblogged: false,
+    muted: false,
+    bookmarked: false,
+    content: contentHtml,
+    reblog: null,
+    application: { name: '宝宝新天地', website: 'https://www.newbabyworld.top' },
+    account,
+    media_attachments: images,
+    mentions: [],
+    tags: extractTags(plain),
+    emojis: [],
+    card: thread.forum_name ? {
+      url: threadUrl,
+      title: subject || 'NBW 帖子',
+      description: abstract || `来自版块：${thread.forum_name}`,
+      type: 'link',
+      author_name: username,
+      author_url: account.url,
+      provider_name: '宝宝新天地',
+      provider_url: 'https://www.newbabyworld.top',
+      html: '',
+      width: 0,
+      height: 0,
+      image: images[0]?.url ?? null,
+      embed_url: '',
+      blurhash: null,
+    } : null,
+    poll: null,
+    edited_at: null,
+  }
+}
+
+function unixToISO(value?: number | string): string {
+  if (value == null || value === '') return new Date().toISOString()
+  if (typeof value === 'string' && value.includes('T')) return value
+  const n = typeof value === 'number' ? value : parseInt(value, 10)
+  if (!Number.isFinite(n) || n <= 0) return new Date().toISOString()
+  // 10-digit unix seconds
+  return new Date(n < 1e12 ? n * 1000 : n).toISOString()
+}
+
+function stripHtml(html: string): string {
+  return html
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .trim()
+}
+
+/** NBW regdate: "2024-7-21 13:24" / "2024-07-21 13:24:13" */
+function parseNBWDate(value?: string): string {
+  if (!value) return new Date().toISOString()
+  const cleaned = stripHtml(value)
+  // title="2026-7-9 17:43"
+  const titleMatch = value.match(/title="([^"]+)"/)
+  const raw = titleMatch ? titleMatch[1] : cleaned
+  const m = raw.match(/(\d{4})-(\d{1,2})-(\d{1,2})(?:\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?/)
+  if (!m) return new Date().toISOString()
+  const [, y, mo, d, h = '0', mi = '0', s = '0'] = m
+  const iso = `${y.padStart(4, '0')}-${mo.padStart(2, '0')}-${d.padStart(2, '0')}T${h.padStart(2, '0')}:${mi.padStart(2, '0')}:${s.padStart(2, '0')}.000Z`
+  const t = Date.parse(iso)
+  return Number.isFinite(t) ? new Date(t).toISOString() : new Date().toISOString()
+}
+
+function parseNBWLastActivity(value?: string): string | null {
+  if (!value) return null
+  const titleMatch = value.match(/title="([^"]+)"/)
+  if (titleMatch) return parseNBWDate(titleMatch[1])
+  const cleaned = stripHtml(value)
+  if (/\d{4}-\d{1,2}-\d{1,2}/.test(cleaned)) return parseNBWDate(cleaned)
+  return null
 }
 
 /** ABDL Notification → Mastodon Notification */
