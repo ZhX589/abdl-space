@@ -8,6 +8,8 @@ import app from './index'
 import type { Env, JWTPayload } from './types/index'
 import { handleOutboxBatch } from './lib/outbox-dispatcher'
 
+export { UserPresence } from './durable-objects/UserPresence'
+
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
 export default {
