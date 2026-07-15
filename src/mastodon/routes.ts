@@ -474,13 +474,16 @@ mastodon.get('/accounts/relationships', async (c) => {
 // 支持本地数字 ID 与远程 NBW 账号 ID（nbw_<uid>）
 // ============================================================
 mastodon.get('/accounts/:id', async (c) => {
-  const rawId = c.req.param('id')
+  // 解码 + 兼容路径里偶发的编码/大小写差异
+  let rawId = c.req.param('id') || ''
+  try { rawId = decodeURIComponent(rawId) } catch { /* keep raw */ }
+  rawId = rawId.trim()
 
-  // 远程 NBW 账号：id = nbw_<uid>
-  if (rawId.startsWith('nbw_')) {
+  // 远程 NBW 账号：id = nbw_<uid>（与 toStatusFromNBW / toAccountFromNBW 一致）
+  const nbwMatch = rawId.match(/^nbw_(\d+)$/i)
+  if (nbwMatch) {
     if (!c.env.NBW_API_KEY) return c.json({ error: 'NBW API 未配置' }, 503)
-    const nbwUid = rawId.slice(4)
-    if (!/^\d+$/.test(nbwUid)) return c.json({ error: 'Invalid id' }, 400)
+    const nbwUid = nbwMatch[1]
 
     try {
       const result = await nbwS2SRequest(c.env, 'get_user_info', { query: nbwUid })
@@ -508,7 +511,11 @@ mastodon.get('/accounts/:id', async (c) => {
     }
   }
 
-  const id = parseInt(rawId)
+  // 本地用户：仅纯数字 ID，避免 parseInt('nbw_4') 类误判
+  if (!/^\d+$/.test(rawId)) {
+    return c.json({ error: 'Invalid id', hint: 'use numeric local id or nbw_<uid>' }, 400)
+  }
+  const id = parseInt(rawId, 10)
   if (!id) return c.json({ error: 'Invalid id' }, 400)
 
   const dbUser = await queryOne<Record<string, unknown>>(
