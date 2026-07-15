@@ -159,7 +159,7 @@ likes.post('/', authMiddleware, async (c) => {
 
     // 发送极光推送通知
     sendJPushNotification(
-      c.env.abdl_space_db,
+      c.env,
       contentAuthorId,
       '收到点赞',
       `${user.username} 赞了你的${target_type === 'post' ? '帖子' : '评论'}`,

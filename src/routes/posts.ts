@@ -487,7 +487,7 @@ posts.post('/', authMiddleware, async (c) => {
         [origPost.user_id, 'repost', `${user.username} 转发了你的帖子`, repost_id, user.sub]
       )
       // 极光推送
-      sendJPushNotification(c.env.abdl_space_db, origPost.user_id, '帖子被转发', `${user.username} 转发了你的帖子`, { url: `/forum/${repost_id}` })
+      sendJPushNotification(c.env, origPost.user_id, '帖子被转发', `${user.username} 转发了你的帖子`, { url: `/forum/${repost_id}` })
     }
   }
 

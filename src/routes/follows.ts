@@ -54,7 +54,7 @@ follows.post('/:userId', authMiddleware, async (c) => {
     [targetId, 'follow', `${sender?.username || '用户'} 关注了你`, user.sub, user.sub]
   )
   // 极光推送
-  sendJPushNotification(c.env.abdl_space_db, targetId, '新粉丝', `${sender?.username || '用户'} 关注了你`, { url: `/profile/${user.sub}` })
+  sendJPushNotification(c.env, targetId, '新粉丝', `${sender?.username || '用户'} 关注了你`, { url: `/profile/${user.sub}` })
 
   // 检查是否互相关注（成为好友）
   const mutual = await queryOne<{ id: number }>(
