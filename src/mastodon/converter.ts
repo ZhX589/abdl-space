@@ -242,7 +242,10 @@ export function toAccountFromNBW(user: {
 }): MastodonAccount {
   const uid = Number(user.uid)
   const username = user.username || `nbw_${uid}`
-  const avatar = user.avatar || DEFAULT_AVATAR
+  // get_user_info 偶发不带 avatar；用 Discuz 标准头像 URL 兜底（不要用 ABDL 默认图）
+  const avatar = (typeof user.avatar === 'string' && user.avatar.trim())
+    ? user.avatar.trim()
+    : `https://www.newbabyworld.top/uc_server/avatar.php?uid=${uid}&size=middle`
   const profile = user.profile || {}
   const bio = stripHtml(String(profile['自我介绍'] || '')).trim()
   const createdAt = parseNBWDate(user.regdate)
@@ -309,7 +312,11 @@ export function toStatusFromNBW(thread: {
   const tid = Number(thread.tid)
   const authorId = Number(thread.authorid || 0)
   const username = thread.author || `nbw_${authorId}`
-  const avatar = thread.avatar || DEFAULT_AVATAR
+  const avatar = (typeof thread.avatar === 'string' && thread.avatar.trim())
+    ? thread.avatar.trim()
+    : (authorId > 0
+      ? `https://www.newbabyworld.top/uc_server/avatar.php?uid=${authorId}&size=middle`
+      : DEFAULT_AVATAR)
   const createdAt = unixToISO(thread.dateline)
 
   const account: MastodonAccount = {
