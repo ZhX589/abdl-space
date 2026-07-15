@@ -3,7 +3,7 @@ import type { JWTPayload } from '../types/index.ts'
 const PBKDF2_ITERATIONS = 100000  // CF Workers max limit
 const SALT_LENGTH = 16
 const KEY_LENGTH = 64
-const JWT_EXPIRES_IN = 7 * 24 * 60 * 60
+const JWT_EXPIRES_IN = 365 * 24 * 60 * 60
 
 function getClientIp(c: { req: { header: (name: string) => string | undefined } }): string {
   return c.req.header('CF-Connecting-IP') || c.req.header('X-Forwarded-For')?.split(',')[0]?.trim() || 'unknown'

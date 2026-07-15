@@ -21,17 +21,17 @@ test('rejects an expired JWT even with a valid signature', async () => {
   Date.now = () => 1_700_000_000_000
   try {
     const token = await signJWT(payload, secret)
-    Date.now = () => 1_700_000_000_000 + 8 * 24 * 60 * 60 * 1000
+    Date.now = () => 1_700_000_000_000 + 366 * 24 * 60 * 60 * 1000
     assert.equal(await verifyJWT(token, secret), null)
   } finally {
     Date.now = originalNow
   }
 })
 
-test('rejects payloads whose signed lifetime exceeds seven days', () => {
+test('rejects payloads whose signed lifetime exceeds the limit', () => {
   assert.equal(isValidJWTPayload({
     ...payload,
     iat: 1_700_000_000,
-    exp: 1_700_000_000 + 365 * 24 * 60 * 60,
+    exp: 1_700_000_000 + 366 * 24 * 60 * 60,
   }), false)
 })
