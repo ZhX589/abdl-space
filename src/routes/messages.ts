@@ -3,6 +3,7 @@ const DEFAULT_AVATAR = 'https://img.abdl-space.top/file/system/1781439303787_pla
 import type { Env, JWTPayload } from '../types/index.ts'
 import { query, queryOne, run } from '../lib/db.ts'
 import { authMiddleware } from '../middleware/auth.ts'
+import { resolveReadUpToId } from './message-read.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
@@ -271,13 +272,18 @@ messages.post('/', authMiddleware, async (c) => {
 messages.post('/:userId/read', authMiddleware, async (c) => {
   const user = c.get('user')
   const otherId = parseInt(c.req.param('userId') ?? '0')
-  const body = await c.req.json<{ read_up_to_id?: number }>()
-  const readUpToId = body.read_up_to_id
+  const rawBody = await c.req.text()
+  const body = rawBody ? JSON.parse(rawBody) as { read_up_to_id?: number } : {}
 
   const db = c.env.abdl_space_db
+  const latestReceived = body.read_up_to_id ? null : await queryOne<{ id: number }>(db,
+    'SELECT id FROM messages WHERE sender_id = ? AND receiver_id = ? ORDER BY id DESC LIMIT 1',
+    [otherId, user.sub],
+  )
+  const readUpToId = resolveReadUpToId(body.read_up_to_id, latestReceived?.id ?? null)
 
   if (!readUpToId) {
-    return c.json({ error: 'read_up_to_id 必填' }, 400)
+    return c.json({ message: '没有待读消息' })
   }
 
   // 只标记 id <= read_up_to_id 的未读消息
