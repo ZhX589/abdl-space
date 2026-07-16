@@ -9,12 +9,13 @@
 import { Hono } from 'hono'
 import type { Env, JWTPayload } from '../types/index.ts'
 import { query, queryOne, run } from '../lib/db.ts'
-import { toAccount, toAccountFromNBW, toStatus, toStatusFromComment, toNotification, toISOString } from './converter.ts'
+import { toAccount, toAccountFromNBW, toStatus, toStatusFromNBW, toStatusFromComment, toNotification, toISOString } from './converter.ts'
 import { generateCardsForPosts } from './linkpreview.ts'
 import type { MastodonNotification, MastodonAccount, MastodonStatus } from './types.ts'
 import { mastodonAuth, buildInstance, resolveStatus, parseMastoIdForCursor } from './shared.ts'
 import { syncPostToNBW } from '../lib/nbw-sync.ts'
 import { nbwS2SRequest } from '../lib/nbw.ts'
+import { handleNBWTimeline } from './nbw-timeline.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
@@ -1397,6 +1398,14 @@ mastodon.get('/timelines/public', async (c) => {
   const link = buildLinkHeader('/api/v1/timelines/public', publicStatuses, limit, { local: c.req.query('local') || '' })
   if (link) c.header('Link', link)
   return c.json(publicStatuses)
+})
+
+// ============================================================
+// GET /api/v1/timelines/nbw
+// NBW 同步时间线：代理 get_sync_threads，返回标准 Mastodon Status[]
+// ============================================================
+mastodon.get('/timelines/nbw', async (c) => {
+  return handleNBWTimeline(c, '/api/v1/timelines/nbw')
 })
 
 // ============================================================

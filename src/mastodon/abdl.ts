@@ -13,12 +13,30 @@ import { query, queryOne } from '../lib/db.ts'
 import { mastodonAuth } from './shared.ts'
 import { nbwS2SRequest } from '../lib/nbw.ts'
 import { toStatusFromNBW } from './converter.ts'
+import { handleNBWTimeline } from './nbw-timeline.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
 const abdl = new Hono<AppType>()
 
 const DEFAULT_AVATAR = 'https://img.abdl-space.top/file/system/1781439303787_play_store_512.png'
+
+type NBWThread = {
+  tid: number
+  fid?: number
+  forum_name?: string
+  subject?: string
+  abstract?: string
+  author?: string
+  authorid?: number
+  avatar?: string
+  dateline?: number | string
+  lastpost?: number | string
+  views?: number
+  replies?: number
+  has_image?: number
+  image_list?: Array<string | { url: string; width?: number }>
+}
 
 // Helper: build Mastodon account from user row
 function miniAccount(user: { id: number; username: string; avatar: string | null; role: string }) {
@@ -379,72 +397,11 @@ abdl.get('/users/:id/worn', async (c) => {
 })
 
 // ============================================================
-// GET /api/v1/abdl/nbw/sync-threads — NBW 待同步外发帖子时间线
-// 代理 get_sync_threads，转换为 Mastodon Status[]（同 /timelines/home 格式）
+// GET /api/v1/abdl/nbw/sync-threads — NBW 时间线（兼容入口）
+// 与 /api/v1/timelines/nbw 共享同一处理器
 // ============================================================
 abdl.get('/nbw/sync-threads', async (c) => {
-  if (!c.env.NBW_API_KEY) {
-    return c.json({ error: 'NBW API 未配置' }, 503)
-  }
-
-  const limit = Math.min(40, Math.max(1, parseInt(c.req.query('limit') || c.req.query('perpage') || '20') || 20))
-  const fid = c.req.query('fid') || ''
-  const orderby = c.req.query('orderby') === 'lastpost' ? 'lastpost' : 'dateline'
-  // Mastodon 风格 max_id 兼容：客户端可把上一页 next cursor 塞进 max_id
-  const cursor = c.req.query('cursor') || c.req.query('max_id') || ''
-
-  const params: Record<string, string> = {
-    perpage: String(limit),
-    orderby,
-  }
-  if (fid && fid !== '0') params.fid = fid
-  if (cursor) params.cursor = cursor
-
-  try {
-    const result = await nbwS2SRequest(c.env, 'get_sync_threads', params)
-    if (result.code !== 200) {
-      const status = result.code === 401 || result.code === 403 ? result.code as 401 | 403 : 502
-      return c.json({ error: result.msg || 'NBW 请求失败', code: result.code }, status)
-    }
-
-    const data = (result.data || {}) as {
-      has_more?: boolean
-      next_cursor?: string
-      list?: Array<{
-        tid: number
-        fid?: number
-        forum_name?: string
-        subject?: string
-        abstract?: string
-        author?: string
-        authorid?: number
-        avatar?: string
-        dateline?: number
-        lastpost?: number
-        views?: number
-        replies?: number
-        has_image?: number
-        image_list?: Array<string | { url: string; width?: number }>
-      }>
-    }
-
-    const statuses = (data.list || []).map((t) => toStatusFromNBW(t))
-
-    // Link header：与 /timelines/home 一致，用 next_cursor 作 max_id
-    if (data.has_more && data.next_cursor) {
-      const qs = new URLSearchParams()
-      qs.set('limit', String(limit))
-      qs.set('max_id', data.next_cursor)
-      if (fid && fid !== '0') qs.set('fid', fid)
-      if (orderby !== 'dateline') qs.set('orderby', orderby)
-      c.header('Link', `</api/v1/abdl/nbw/sync-threads?${qs}>; rel="next"`)
-    }
-
-    return c.json(statuses)
-  } catch (e) {
-    console.error('NBW get_sync_threads failed:', e)
-    return c.json({ error: 'NBW 服务请求失败' }, 502)
-  }
+  return handleNBWTimeline(c, '/api/v1/abdl/nbw/sync-threads')
 })
 
 export default abdl
