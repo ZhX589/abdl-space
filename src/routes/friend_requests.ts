@@ -24,7 +24,7 @@ friendRequests.get('/list', async (c) => {
 
   const db = c.env.abdl_space_db
 
-  let where = "fr.status = 'active' AND (fr.created_at > datetime('now', '-3 days') OR fr.id IN (SELECT request_id FROM friend_request_reports WHERE status = 'pending'))"
+  let where = "fr.status = 'active'"
   const params: any[] = []
 
   if (search) {
