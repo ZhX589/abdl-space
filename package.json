@@ -8,7 +8,7 @@
     "deploy": "wrangler deploy",
     "deploy:api": "wrangler deploy",
     "lint": "eslint .",
-    "test": "node --experimental-strip-types --test src/lib/auth.test.ts src/mastodon/converter-nbw.test.ts src/mastodon/nbw-timeline.test.ts src/middleware/auth.test.ts src/routes/message-read.test.ts src/routes/webauthn.test.ts",
+    "test": "node --experimental-strip-types --test src/lib/auth.test.ts src/mastodon/all-timeline.test.ts src/mastodon/converter-nbw.test.ts src/mastodon/nbw-timeline.test.ts src/middleware/auth.test.ts src/routes/message-read.test.ts src/routes/webauthn.test.ts",
     "cf-typegen": "wrangler types"
   },
   "dependencies": {

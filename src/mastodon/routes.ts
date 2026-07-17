@@ -16,7 +16,8 @@ import type { MastodonNotification, MastodonAccount, MastodonStatus } from './ty
 import { mastodonAuth, buildInstance, resolveStatus, parseMastoIdForCursor } from './shared.ts'
 import { syncPostToNBW } from '../lib/nbw-sync.ts'
 import { nbwS2SRequest } from '../lib/nbw.ts'
-import { handleNBWTimeline, buildNBWTimelineParams, hasNextAllTimelinePage } from './nbw-timeline.ts'
+import { handleNBWTimeline, buildNBWTimelineParams } from './nbw-timeline.ts'
+import { mergeAllTimelinePage } from './all-timeline.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
@@ -1478,41 +1479,35 @@ mastodon.get('/timelines/all', async (c) => {
     if (rawCursor) {
       try {
         const decoded = JSON.parse(atob(rawCursor))
-        if (decoded.a) abdlMaxId = decoded.a
-        if (decoded.n) nbwCursor = decoded.n
+        if (typeof decoded.a === 'number') abdlMaxId = decoded.a
+        if (typeof decoded.n === 'string') nbwCursor = decoded.n
       } catch { /* first page */ }
     }
 
     // 并行拉取两个数据源
     const [abdlStatuses, nbwResult] = await Promise.all([
       // ABDL Space 本站帖子
-      fetchAbdlPosts(c, limit, abdlMaxId),
+      abdlMaxId === -1 ? Promise.resolve([]) : fetchAbdlPosts(c, limit, abdlMaxId),
       // NBW 同步帖子
-      fetchNBWPosts(c, limit, nbwCursor),
+      nbwCursor === '!' ? Promise.resolve({ statuses: [], nextCursor: '', hasMore: false }) : fetchNBWPosts(c, limit, nbwCursor),
     ])
 
-    // 合并并按 created_at 倒序排序
-    const merged = [...abdlStatuses, ...nbwResult.statuses]
-      .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
-      .slice(0, limit)
-
-    // 构建下一页游标
-    const lastAbdlId = abdlStatuses.length > 0
-      ? parseInt(abdlStatuses[abdlStatuses.length - 1].id.replace(/^p_/, '')) || 0
-      : abdlMaxId || 0
-    const hasMore = hasNextAllTimelinePage(
-      abdlStatuses.length,
+    const page = mergeAllTimelinePage(
+      abdlStatuses,
+      nbwResult.statuses,
       limit,
+      abdlMaxId,
       nbwCursor,
       nbwResult.hasMore,
       nbwResult.nextCursor,
     )
-    if (hasMore) {
-      const nextCursor = btoa(JSON.stringify({ a: lastAbdlId, n: nbwResult.nextCursor }))
-      c.header('Link', `</api/v1/timelines/all?limit=${limit}&max_id=${nextCursor}>; rel="next"`)
+    if (page.hasMore) {
+      const nextCursor = btoa(JSON.stringify({ a: page.nextAbdlMaxId, n: page.nextNBWCursor }))
+      const query = new URLSearchParams({ limit: String(limit), max_id: nextCursor })
+      c.header('Link', `</api/v1/timelines/all?${query}>; rel="next"`)
     }
 
-    return c.json(merged)
+    return c.json(page.statuses)
   } catch (e) {
     console.error('GET /timelines/all failed:', e)
     return c.json({ error: 'Internal Server Error', detail: String(e) }, 500)
