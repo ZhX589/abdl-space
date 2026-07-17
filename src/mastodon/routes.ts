@@ -7,6 +7,7 @@
  */
 
 import { Hono } from 'hono'
+import type { Context } from 'hono'
 import type { Env, JWTPayload } from '../types/index.ts'
 import { query, queryOne, run } from '../lib/db.ts'
 import { toAccount, toAccountFromNBW, toStatus, toStatusFromNBW, toStatusFromComment, toNotification, toISOString } from './converter.ts'
@@ -15,7 +16,7 @@ import type { MastodonNotification, MastodonAccount, MastodonStatus } from './ty
 import { mastodonAuth, buildInstance, resolveStatus, parseMastoIdForCursor } from './shared.ts'
 import { syncPostToNBW } from '../lib/nbw-sync.ts'
 import { nbwS2SRequest } from '../lib/nbw.ts'
-import { handleNBWTimeline } from './nbw-timeline.ts'
+import { handleNBWTimeline, buildNBWTimelineParams } from './nbw-timeline.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
@@ -1406,6 +1407,110 @@ mastodon.get('/timelines/public', async (c) => {
 // ============================================================
 mastodon.get('/timelines/nbw', async (c) => {
   return handleNBWTimeline(c, '/api/v1/timelines/nbw')
+})
+
+async function fetchAbdlPosts(c: Context<{ Bindings: Env }>, limit: number, maxId?: number): Promise<MastodonStatus[]> {
+  let sql = `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
+    (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
+    (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) + (SELECT COUNT(*) FROM posts WHERE in_reply_to_id = p.id) as comment_count,
+    (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count,
+    (SELECT COUNT(*) FROM likes WHERE target_type = 'bookmark' AND target_id = p.id) as bookmarks_count
+    FROM posts p JOIN users u ON p.user_id = u.id
+    WHERE p.in_reply_to_id IS NULL AND p.repost_id IS NULL`
+  const params: unknown[] = []
+  if (maxId) { sql += ' AND p.id < ?'; params.push(maxId) }
+  sql += ' ORDER BY p.created_at DESC LIMIT ?'
+  params.push(limit)
+  const posts = await query<Record<string, unknown>>(c.env.abdl_space_db, sql, params)
+  const postIds = posts.map(r => r.id as number)
+  const imagesMap = await loadPostImages(c.env.abdl_space_db, postIds)
+  const pollIds = posts.filter(r => r.poll_id).map(r => r.poll_id as number)
+  const pollMap = await loadPolls(c.env.abdl_space_db, pollIds)
+  const repostIds = posts.filter(r => r.repost_id).map(r => r.repost_id as number)
+  const reblogMap = await loadReblogTargets(c.env.abdl_space_db, repostIds)
+  const cardMap = await generateCardsForPosts(posts.map(r => ({ id: r.id as number, content: r.content as string, diaper_id: r.diaper_id as number | null })))
+  return posts.map(r => {
+    const account = toAccount({
+      id: r.user_id as number, username: r.username as string, avatar: r.avatar as string | null,
+      role: r.role as string, bio: r.bio as string | null, created_at: r.user_created_at as string,
+    })
+    return toStatus({
+      id: r.id as number, user_id: r.user_id as number, content: r.content as string,
+      diaper_id: r.diaper_id as number | null, like_count: r.like_count as number,
+      comment_count: r.comment_count as number, reblogs_count: r.reblogs_count as number, bookmarks_count: r.bookmarks_count as number, shares_count: 0,
+      has_nsfw: !!r.has_nsfw, created_at: r.created_at as string,
+      images: imagesMap.get(r.id as number), spoiler_text: r.spoiler_text || '',
+      visibility: r.visibility as string, language: r.language as string,
+      in_reply_to_id: r.in_reply_to_id as number | null,
+      in_reply_to_type: r.in_reply_to_type as string | null,
+      in_reply_to_account_id: r.in_reply_to_account_id as number | null,
+      poll: r.poll_id ? pollMap.get(r.poll_id as number) ?? null : null,
+      linkCard: cardMap.get(r.id as number) ?? null,
+    }, account)
+  })
+}
+
+async function fetchNBWPosts(c: Context<{ Bindings: Env }>, limit: number, cursor: string): Promise<{ statuses: MastodonStatus[]; nextCursor: string; hasMore: boolean }> {
+  if (!c.env.NBW_API_KEY) return { statuses: [], nextCursor: '', hasMore: false }
+  const { params } = buildNBWTimelineParams({ limit: String(limit), cursor })
+  const result = await nbwS2SRequest(c.env, 'get_sync_threads', params)
+  if (result.code !== 200) return { statuses: [], nextCursor: '', hasMore: false }
+  const data = (result.data || {}) as { has_more?: boolean; next_cursor?: string; list?: Array<Parameters<typeof toStatusFromNBW>[0]> }
+  return {
+    statuses: (data.list || []).map(toStatusFromNBW),
+    nextCursor: data.next_cursor || '',
+    hasMore: !!data.has_more,
+  }
+}
+
+// ============================================================
+// GET /api/v1/timelines/all
+// 合并时间线：ABDL Space 本站帖子 + NBW 同步帖子，按时间排序
+// ============================================================
+mastodon.get('/timelines/all', async (c) => {
+  try {
+    const limit = Math.min(40, Math.max(1, parseInt(c.req.query('limit') || '20')))
+
+    // 解码游标：base64(JSON({ a: lastAbdlId, n: nbwCursor }))
+    let abdlMaxId: number | undefined
+    let nbwCursor = ''
+    const rawCursor = c.req.query('max_id')
+    if (rawCursor) {
+      try {
+        const decoded = JSON.parse(atob(rawCursor))
+        if (decoded.a) abdlMaxId = decoded.a
+        if (decoded.n) nbwCursor = decoded.n
+      } catch { /* first page */ }
+    }
+
+    // 并行拉取两个数据源
+    const [abdlStatuses, nbwResult] = await Promise.all([
+      // ABDL Space 本站帖子
+      fetchAbdlPosts(c, limit, abdlMaxId),
+      // NBW 同步帖子
+      fetchNBWPosts(c, limit, nbwCursor),
+    ])
+
+    // 合并并按 created_at 倒序排序
+    const merged = [...abdlStatuses, ...nbwResult.statuses]
+      .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+      .slice(0, limit)
+
+    // 构建下一页游标
+    const lastAbdlId = abdlStatuses.length > 0
+      ? parseInt(abdlStatuses[abdlStatuses.length - 1].id.replace(/^p_/, '')) || 0
+      : abdlMaxId || 0
+    const hasMore = abdlStatuses.length === limit || nbwResult.hasMore
+    if (hasMore) {
+      const nextCursor = btoa(JSON.stringify({ a: lastAbdlId, n: nbwResult.nextCursor }))
+      c.header('Link', `</api/v1/timelines/all?limit=${limit}&max_id=${nextCursor}>; rel="next"`)
+    }
+
+    return c.json(merged)
+  } catch (e) {
+    console.error('GET /timelines/all failed:', e)
+    return c.json({ error: 'Internal Server Error', detail: String(e) }, 500)
+  }
 })
 
 // ============================================================
