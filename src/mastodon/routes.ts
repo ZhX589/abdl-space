@@ -16,7 +16,7 @@ import type { MastodonNotification, MastodonAccount, MastodonStatus } from './ty
 import { mastodonAuth, buildInstance, resolveStatus, parseMastoIdForCursor } from './shared.ts'
 import { syncPostToNBW } from '../lib/nbw-sync.ts'
 import { nbwS2SRequest } from '../lib/nbw.ts'
-import { handleNBWTimeline, buildNBWTimelineParams } from './nbw-timeline.ts'
+import { handleNBWTimeline, buildNBWTimelineParams, hasNextAllTimelinePage } from './nbw-timeline.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
@@ -1500,7 +1500,13 @@ mastodon.get('/timelines/all', async (c) => {
     const lastAbdlId = abdlStatuses.length > 0
       ? parseInt(abdlStatuses[abdlStatuses.length - 1].id.replace(/^p_/, '')) || 0
       : abdlMaxId || 0
-    const hasMore = abdlStatuses.length === limit || nbwResult.hasMore
+    const hasMore = hasNextAllTimelinePage(
+      abdlStatuses.length,
+      limit,
+      nbwCursor,
+      nbwResult.hasMore,
+      nbwResult.nextCursor,
+    )
     if (hasMore) {
       const nextCursor = btoa(JSON.stringify({ a: lastAbdlId, n: nbwResult.nextCursor }))
       c.header('Link', `</api/v1/timelines/all?limit=${limit}&max_id=${nextCursor}>; rel="next"`)

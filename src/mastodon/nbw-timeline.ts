@@ -72,6 +72,17 @@ export function buildNBWTimelineNextLink(
   return `<${basePath}?${qs}>; rel="next"`
 }
 
+export function hasNextAllTimelinePage(
+  abdlCount: number,
+  limit: number,
+  currentNBWCursor: string,
+  nbwHasMore: boolean,
+  nextNBWCursor: string,
+): boolean {
+  const nbwCanAdvance = nbwHasMore && !!nextNBWCursor && nextNBWCursor !== currentNBWCursor
+  return abdlCount === limit || nbwCanAdvance
+}
+
 export async function handleNBWTimeline(
   c: Context<{ Bindings: Env }>,
   basePath: string,
