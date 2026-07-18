@@ -26,3 +26,14 @@ test('falls back to sharing for invalid AI output', () => {
     DEFAULT_NBW_FORUM_RECOMMENDATION,
   )
 })
+
+test('falls back when required AI response fields are missing or mistyped', () => {
+  assert.deepEqual(
+    parseNBWForumRecommendation('{"fid":27}'),
+    DEFAULT_NBW_FORUM_RECOMMENDATION,
+  )
+  assert.deepEqual(
+    parseNBWForumRecommendation('{"fid":3,"forum_name":"交友","confidence":"high"}'),
+    DEFAULT_NBW_FORUM_RECOMMENDATION,
+  )
+})

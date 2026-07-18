@@ -594,11 +594,13 @@ export function parseNBWForumRecommendation(content: string): NBWForumRecommenda
   try {
     const parsed = JSON.parse(jsonMatch[0]) as { fid?: number; forum_name?: string; confidence?: number }
     const forumNames: Record<number, string> = { 28: '自拍', 27: '分享', 26: '小说/漫画', 3: '交友' }
-    if (!parsed.fid || !forumNames[parsed.fid]) return DEFAULT_NBW_FORUM_RECOMMENDATION
+    if (!parsed.fid || !forumNames[parsed.fid] || typeof parsed.forum_name !== 'string' || typeof parsed.confidence !== 'number') {
+      return DEFAULT_NBW_FORUM_RECOMMENDATION
+    }
     return {
       fid: parsed.fid,
       forum_name: forumNames[parsed.fid],
-      confidence: typeof parsed.confidence === 'number' ? parsed.confidence : 0,
+      confidence: parsed.confidence,
       fallback: false,
     }
   } catch {
