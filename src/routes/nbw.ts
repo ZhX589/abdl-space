@@ -646,14 +646,26 @@ nbw.post('/recommend-fid', authMiddleware, async (c) => {
     })
 
     if (!response.ok) {
+      console.error('[nbw/recommend-fid] DeepSeek request failed', {
+        status: response.status,
+        requestId: response.headers.get('x-request-id'),
+      })
       return c.json(DEFAULT_NBW_FORUM_RECOMMENDATION)
     }
 
     const data = await response.json() as { choices: { message: { content: string } }[] }
     const content = data.choices[0]?.message?.content ?? ''
 
-    return c.json(parseNBWForumRecommendation(content))
-  } catch {
+    const recommendation = parseNBWForumRecommendation(content)
+    if (recommendation.fallback) {
+      console.error('[nbw/recommend-fid] DeepSeek response could not be parsed', {
+        outputLength: content.length,
+        hasChoices: Array.isArray(data.choices) && data.choices.length > 0,
+      })
+    }
+    return c.json(recommendation)
+  } catch (error) {
+    console.error('[nbw/recommend-fid] DeepSeek request threw', error instanceof Error ? error.message : String(error))
     return c.json(DEFAULT_NBW_FORUM_RECOMMENDATION)
   }
 })
