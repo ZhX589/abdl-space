@@ -573,6 +573,39 @@ nbw.post('/bind-by-email', authMiddleware, async (c) => {
  * Body: { content: string }
  * 需要登录
  */
+export type NBWForumRecommendation = {
+  fid: number
+  forum_name: string
+  confidence: number
+  fallback: boolean
+}
+
+export const DEFAULT_NBW_FORUM_RECOMMENDATION: NBWForumRecommendation = {
+  fid: 27,
+  forum_name: '分享',
+  confidence: 0.5,
+  fallback: true,
+}
+
+export function parseNBWForumRecommendation(content: string): NBWForumRecommendation {
+  const jsonMatch = content.match(/\{[^}]+\}/)
+  if (!jsonMatch) return DEFAULT_NBW_FORUM_RECOMMENDATION
+
+  try {
+    const parsed = JSON.parse(jsonMatch[0]) as { fid?: number; forum_name?: string; confidence?: number }
+    const forumNames: Record<number, string> = { 28: '自拍', 27: '分享', 26: '小说/漫画', 3: '交友' }
+    if (!parsed.fid || !forumNames[parsed.fid]) return DEFAULT_NBW_FORUM_RECOMMENDATION
+    return {
+      fid: parsed.fid,
+      forum_name: forumNames[parsed.fid],
+      confidence: typeof parsed.confidence === 'number' ? parsed.confidence : 0,
+      fallback: false,
+    }
+  } catch {
+    return DEFAULT_NBW_FORUM_RECOMMENDATION
+  }
+}
+
 nbw.post('/recommend-fid', authMiddleware, async (c) => {
   const body = await c.req.json<{ content?: string }>()
   if (!body.content) return c.json({ error: 'content is required' }, 400)
@@ -580,7 +613,7 @@ nbw.post('/recommend-fid', authMiddleware, async (c) => {
   const apiKey = c.env.DEEPSEEK_API_KEY
   if (!apiKey) {
     // 无 API Key 时返回默认推荐
-    return c.json({ fid: 27, forum_name: '分享', confidence: 0.5 })
+    return c.json(DEFAULT_NBW_FORUM_RECOMMENDATION)
   }
 
   const prompt = `你是 ABDL Space 帖子分类助手。根据以下帖子内容，从 NBW 版块列表中选择最合适的版块。
@@ -611,26 +644,15 @@ nbw.post('/recommend-fid', authMiddleware, async (c) => {
     })
 
     if (!response.ok) {
-      return c.json({ fid: 27, forum_name: '分享', confidence: 0.5 })
+      return c.json(DEFAULT_NBW_FORUM_RECOMMENDATION)
     }
 
     const data = await response.json() as { choices: { message: { content: string } }[] }
     const content = data.choices[0]?.message?.content ?? ''
 
-    // 解析 JSON 响应
-    const jsonMatch = content.match(/\{[^}]+\}/)
-    if (jsonMatch) {
-      const parsed = JSON.parse(jsonMatch[0])
-      // 校验 fid 是否在允许范围内
-      const allowedFids = [28, 27, 26, 3]
-      if (allowedFids.includes(parsed.fid)) {
-        return c.json(parsed)
-      }
-    }
-
-    return c.json({ fid: 27, forum_name: '分享', confidence: 0.5 })
+    return c.json(parseNBWForumRecommendation(content))
   } catch {
-    return c.json({ fid: 27, forum_name: '分享', confidence: 0.5 })
+    return c.json(DEFAULT_NBW_FORUM_RECOMMENDATION)
   }
 })
 
