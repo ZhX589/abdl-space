@@ -38,6 +38,7 @@ export interface MastodonStatus {
   in_reply_to_id: string | null
   in_reply_to_account_id: string | null
   sensitive: boolean
+  mental_crisis: boolean
   spoiler_text: string
   visibility: 'public' | 'unlisted' | 'private' | 'direct'
   language: string | null

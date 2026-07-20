@@ -82,6 +82,7 @@ export interface Post {
   content: string
   diaper_id: number | null
   pinned: number
+  mental_crisis: number
   created_at: string
 }
 

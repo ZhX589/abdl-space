@@ -101,6 +101,7 @@ CREATE TABLE IF NOT EXISTS posts (
   is_announcement INTEGER DEFAULT 0,     -- 公告帖子标记（仅管理员可发）
   repost_id INTEGER,                     -- 转发的原帖ID
   has_nsfw INTEGER DEFAULT 0,            -- 是否包含敏感图片
+  mental_crisis INTEGER NOT NULL DEFAULT 0, -- 是否需要心理危机干预提示
   spoiler_text TEXT DEFAULT '',           -- 内容警告文本
   visibility TEXT DEFAULT 'public',       -- public/unlisted/private/direct
   language TEXT DEFAULT 'zh',             -- 语言标签

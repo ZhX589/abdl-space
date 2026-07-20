@@ -84,6 +84,7 @@ export function toStatus(post: {
   diaper_id?: number | null
   pinned?: boolean | number
   has_nsfw?: boolean | number
+  mental_crisis?: boolean | number
   is_announcement?: boolean | number
   like_count?: number
   comment_count?: number
@@ -117,6 +118,7 @@ export function toStatus(post: {
     in_reply_to_id: post.in_reply_to_id ? toMastoId((post.in_reply_to_type || 'post') as 'post' | 'comment', post.in_reply_to_id) : null,
     in_reply_to_account_id: post.in_reply_to_account_id ? String(post.in_reply_to_account_id) : null,
     sensitive: !!post.has_nsfw,
+    mental_crisis: !!post.mental_crisis,
     spoiler_text: post.spoiler_text || '',
     visibility: (post.visibility as MastodonStatus['visibility']) || 'public',
     language: post.language || 'zh',
@@ -182,6 +184,7 @@ export function toStatusFromComment(comment: {
     in_reply_to_id: comment.parent_id ? toMastoId('comment', comment.parent_id) : toMastoId('post', comment.post_id),
     in_reply_to_account_id: null,
     sensitive: hasNsfwImage,
+    mental_crisis: false,
     spoiler_text: '',
     visibility: 'public',
     language: 'zh',
@@ -317,7 +320,7 @@ export function toStatusFromNBW(thread: {
     : (authorId > 0
       ? `https://www.newbabyworld.top/uc_server/avatar.php?uid=${authorId}&size=middle`
       : DEFAULT_AVATAR)
-  const createdAt = unixToISO(thread.dateline)
+  const createdAt = nbwThreadDateToISO(thread.dateline)
 
   const account: MastodonAccount = {
     id: `nbw_${authorId}`,
@@ -367,6 +370,7 @@ export function toStatusFromNBW(thread: {
     in_reply_to_id: null,
     in_reply_to_account_id: null,
     sensitive: false,
+    mental_crisis: false,
     spoiler_text: '',
     visibility: 'public',
     language: 'zh',
@@ -417,6 +421,34 @@ function unixToISO(value?: number | string): string {
   if (!Number.isFinite(n) || n <= 0) return new Date().toISOString()
   // 10-digit unix seconds
   return new Date(n < 1e12 ? n * 1000 : n).toISOString()
+}
+
+/** NBW thread dates may be Unix timestamps or Chinese relative times. */
+export function nbwThreadDateToISO(value?: number | string, now = Date.now()): string {
+  if (value == null || value === '') return new Date(now).toISOString()
+  if (typeof value === 'number' || /^\d{10,13}$/.test(String(value).trim())) return unixToISO(value)
+
+  const raw = stripHtml(String(value)).replace(/\s+/g, '')
+  if (raw === '刚刚') return new Date(now).toISOString()
+
+  const relative = raw.match(/^(\d+)(秒钟?|分钟?|小时|天)前$/)
+  if (relative) {
+    const amount = Number(relative[1])
+    const unitMs = relative[2].startsWith('秒') ? 1000
+      : relative[2].startsWith('分') ? 60_000
+        : relative[2] === '小时' ? 3_600_000 : 86_400_000
+    return new Date(now - amount * unitMs).toISOString()
+  }
+
+  // NBW uses China Standard Time for absolute forum timestamps.
+  const absolute = raw.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:日)?(?:([0-2]?\d):([0-5]\d)(?::([0-5]\d))?)?$/)
+  if (absolute) {
+    const [, year, month, day, hour = '0', minute = '0', second = '0'] = absolute
+    const timestamp = Date.parse(`${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}T${hour.padStart(2, '0')}:${minute}:${second}+08:00`)
+    if (Number.isFinite(timestamp)) return new Date(timestamp).toISOString()
+  }
+
+  return new Date(now).toISOString()
 }
 
 function stripHtml(html: string): string {
