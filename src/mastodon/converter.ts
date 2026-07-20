@@ -93,7 +93,7 @@ export function toStatus(post: {
   shares_count?: number
   has_liked?: boolean
   created_at: string
-  images?: { image_url: string; is_nsfw?: boolean | number }[]
+  images?: { image_url: string; is_nsfw?: boolean | number; alt_text?: string | null; blurhash?: string | null }[]
   repost?: unknown
   spoiler_text?: string
   visibility?: string
@@ -138,7 +138,7 @@ export function toStatus(post: {
     reblog: opts?.reblog ?? null,
     application: { name: 'ABDL Space', website: `https://${INSTANCE_DOMAIN}` },
     account,
-    media_attachments: images.map((img, i) => toMediaAttachment(i, img.image_url, img.alt_text)),
+    media_attachments: images.map((img, i) => toMediaAttachment(i, img.image_url, img.alt_text, undefined, img.blurhash)),
     mentions: [],
     tags: extractTags(post.content),
     emojis: [],
@@ -173,7 +173,7 @@ export function toStatusFromComment(comment: {
   like_count?: number
   has_liked?: boolean
   created_at: string
-  images?: { image_url: string; is_nsfw?: boolean | number }[]
+  images?: { image_url: string; is_nsfw?: boolean | number; alt_text?: string | null; blurhash?: string | null }[]
 }, account: MastodonAccount): MastodonStatus {
   const images = comment.images || []
   const hasNsfwImage = images.some(img => img.is_nsfw)
@@ -201,7 +201,7 @@ export function toStatusFromComment(comment: {
     reblog: null,
     application: { name: 'ABDL Space', website: `https://${INSTANCE_DOMAIN}` },
     account,
-    media_attachments: images.map((img, i) => toMediaAttachment(i, img.image_url, img.alt_text)),
+    media_attachments: images.map((img, i) => toMediaAttachment(i, img.image_url, img.alt_text, undefined, img.blurhash)),
     mentions: [],
     tags: [],
     emojis: [],
@@ -211,7 +211,7 @@ export function toStatusFromComment(comment: {
 }
 
 /** Image URL → Mastodon MediaAttachment */
-function toMediaAttachment(id: number, url: string, description?: string | null, width?: number): MastodonMediaAttachment {
+function toMediaAttachment(id: number, url: string, description?: string | null, width?: number, blurhash?: string | null): MastodonMediaAttachment {
   return {
     id: String(id),
     type: 'image',
@@ -223,7 +223,7 @@ function toMediaAttachment(id: number, url: string, description?: string | null,
       original: { width, height: 0, size: `${width}x0`, aspect: 0 },
     } : {},
     description: description || null,
-    blurhash: null,
+    blurhash: blurhash || null,
   }
 }
 

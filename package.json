@@ -8,11 +8,13 @@
     "deploy": "wrangler deploy",
     "deploy:api": "wrangler deploy",
     "lint": "eslint .",
-		"test": "node --experimental-strip-types --test src/lib/auth.test.ts src/mastodon/all-timeline.test.ts src/mastodon/converter-nbw.test.ts src/mastodon/nbw-timeline.test.ts src/middleware/auth.test.ts src/routes/message-read.test.ts src/routes/nbw.test.ts src/routes/webauthn.test.ts",
+    "test": "node --experimental-strip-types --test src/lib/auth.test.ts src/lib/blurhash.test.ts src/mastodon/all-timeline.test.ts src/mastodon/converter-nbw.test.ts src/mastodon/nbw-timeline.test.ts src/middleware/auth.test.ts src/routes/message-read.test.ts src/routes/nbw.test.ts src/routes/webauthn.test.ts",
     "cf-typegen": "wrangler types"
   },
   "dependencies": {
+    "@cf-wasm/photon": "^0.3.7",
     "@simplewebauthn/server": "^13.3.2",
+    "blurhash": "^2.0.5",
     "hono": "^4.12.21"
   },
   "devDependencies": {
