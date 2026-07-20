@@ -18,7 +18,7 @@ import { syncPostToNBW } from '../lib/nbw-sync.ts'
 import { nbwS2SRequest } from '../lib/nbw.ts'
 import { handleNBWTimeline, buildNBWTimelineParams } from './nbw-timeline.ts'
 import { mergeAllTimelinePage } from './all-timeline.ts'
-import { generateBlurhash } from '../lib/blurhash.ts'
+import { generateBlurhash, sanitizeBlurhash } from '../lib/blurhash.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
@@ -870,7 +870,7 @@ mastodon.post('/statuses', async (c) => {
       if (body.media_attributes && body.media_attributes.length > 0) {
         const attr = body.media_attributes.find(a => a.id === mediaId)
         if (attr && attr.description) altText = attr.description
-        if (typeof attr?.blurhash === 'string' && attr.blurhash.length <= 200) blurhash = attr.blurhash || null
+        blurhash = sanitizeBlurhash(attr?.blurhash)
       }
       try {
         await run(c.env.abdl_space_db, 'INSERT INTO post_images (post_id, image_url, is_nsfw, sort_order, alt_text, blurhash) VALUES (?, ?, ?, ?, ?, ?)', [postId, mediaId, hasNsfw, sortOrder++, altText, blurhash])
@@ -2769,8 +2769,8 @@ mastodon.put('/statuses/:id', async (c) => {
       if (!mediaId.startsWith(IMGBED_HOST + '/')) continue
       const attr = body.media_attributes?.find(a => a.id === mediaId)
       const altText = attr?.description || null
-      const blurhash = typeof attr?.blurhash === 'string' && attr.blurhash.length <= 200 ? attr.blurhash || null : null
-      await run(c.env.abdl_space_db, 'INSERT INTO post_images (post_id, image_url, sort_order, alt_text, blurhash) VALUES (?, ?, ?, ?, ?)', [resolved.realId, mediaId, sortOrder++, altText, blurhash])
+      const blurhash = sanitizeBlurhash(attr?.blurhash)
+      await run(c.env.abdl_space_db, 'INSERT INTO post_images (post_id, image_url, is_nsfw, sort_order, alt_text, blurhash) VALUES (?, ?, ?, ?, ?, ?)', [resolved.realId, mediaId, body.sensitive ? 1 : 0, sortOrder++, altText, blurhash])
     }
   }
 

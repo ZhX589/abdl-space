@@ -1,10 +1,11 @@
 import { PhotonImage, SamplingFilter, resize } from '@cf-wasm/photon'
-import { encode } from 'blurhash'
+import { encode, isBlurhashValid } from 'blurhash'
 
 const MAX_SAMPLE_SIZE = 32
+const MAX_INPUT_SIZE = 10 * 1024 * 1024
 
 export async function generateBlurhash(file: Blob): Promise<string | null> {
-  if (!file.type.startsWith('image/')) return null
+  if (!file.type.startsWith('image/') || file.size > MAX_INPUT_SIZE) return null
 
   let image: PhotonImage | null = null
   let sample: PhotonImage | null = null
@@ -35,4 +36,9 @@ export async function generateBlurhash(file: Blob): Promise<string | null> {
     sample?.free()
     image?.free()
   }
+}
+
+export function sanitizeBlurhash(value: unknown): string | null {
+  if (typeof value !== 'string' || value.length > 200) return null
+  return isBlurhashValid(value).result ? value : null
 }
