@@ -19,6 +19,7 @@ import { nbwS2SRequest } from '../lib/nbw.ts'
 import { handleNBWTimeline, buildNBWTimelineParams } from './nbw-timeline.ts'
 import { mergeAllTimelinePage } from './all-timeline.ts'
 import { generateBlurhash, sanitizeBlurhash } from '../lib/blurhash.ts'
+import { buildMediaPreviewUrl, fetchTrustedMediaSource, parseMediaPreviewSource, resizeMediaPreview } from '../lib/media-preview.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
@@ -1675,6 +1676,45 @@ mastodon.get('/notifications', async (c) => {
 })
 
 // ============================================================
+// GET /api/v1/media/preview/v1/:source — Cached media preview
+// ============================================================
+mastodon.on(['GET', 'HEAD'], '/media/preview/v1/:source', async (c) => {
+  const source = parseMediaPreviewSource(c.req.path)
+  if (!source) return c.json({ error: 'Invalid media preview source' }, 400)
+
+  const cache = caches.default
+  const cacheKey = new Request(c.req.url, { method: 'GET' })
+  const cached = await cache.match(cacheKey)
+  if (cached) {
+    if (c.req.method === 'HEAD') return new Response(null, { status: cached.status, headers: cached.headers })
+    return cached
+  }
+
+  const fallback = () => c.redirect(source, 302)
+  try {
+    const sourceBytes = await fetchTrustedMediaSource(source)
+    if (!sourceBytes) return fallback()
+    const preview = resizeMediaPreview(sourceBytes)
+    if (!preview) return fallback()
+
+    const response = new Response(preview.bytes, {
+      headers: {
+        'Content-Type': 'image/webp',
+        'Content-Length': String(preview.bytes.byteLength),
+        'Cache-Control': 'public, max-age=2592000, immutable',
+        'X-Image-Width': String(preview.width),
+        'X-Image-Height': String(preview.height),
+      },
+    })
+    c.executionCtx.waitUntil(cache.put(cacheKey, response.clone()))
+    if (c.req.method === 'HEAD') return new Response(null, { status: 200, headers: response.headers })
+    return response
+  } catch {
+    return fallback()
+  }
+})
+
+// ============================================================
 // POST /api/v1/media — Upload media
 // ============================================================
 mastodon.post('/media', async (c) => {
@@ -1724,7 +1764,7 @@ mastodon.post('/media', async (c) => {
     id: url,
     type: mediaType,
     url,
-    preview_url: url,
+    preview_url: mediaType === 'image' ? buildMediaPreviewUrl(url) : url,
     remote_url: null,
     text_url: null,
     meta: {},
@@ -1757,7 +1797,7 @@ mastodon.put('/media/:id', async (c) => {
     id: mediaId,
     type: 'image',
     url: mediaId,
-    preview_url: mediaId,
+    preview_url: buildMediaPreviewUrl(mediaId),
     remote_url: null,
     text_url: null,
     meta: {},

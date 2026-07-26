@@ -5,6 +5,7 @@
 
 import type { MastodonAccount, MastodonStatus, MastodonMediaAttachment, MastodonNotification, MastodonPoll } from './types.ts'
 import { toMastoId } from './shared.ts'
+import { buildMediaPreviewUrl } from '../lib/media-preview.ts'
 
 const INSTANCE_DOMAIN = 'abdl-space.top'
 const DEFAULT_AVATAR = 'https://img.abdl-space.top/file/system/1781439303787_play_store_512.png'
@@ -216,7 +217,7 @@ function toMediaAttachment(id: number, url: string, description?: string | null,
     id: String(id),
     type: 'image',
     url,
-    preview_url: url,
+    preview_url: buildMediaPreviewUrl(url),
     remote_url: null,
     text_url: null,
     meta: width ? {
