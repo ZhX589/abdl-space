@@ -19,7 +19,7 @@ import { nbwS2SRequest } from '../lib/nbw.ts'
 import { handleNBWTimeline, buildNBWTimelineParams } from './nbw-timeline.ts'
 import { mergeAllTimelinePage } from './all-timeline.ts'
 import { generateBlurhash, sanitizeBlurhash } from '../lib/blurhash.ts'
-import { buildMediaPreviewUrl, fetchTrustedMediaSource, parseMediaPreviewSource, resizeMediaPreview } from '../lib/media-preview.ts'
+import { buildMediaPreviewUrl, canonicalMediaPreviewCacheUrl, fetchTrustedMediaSource, parseMediaPreviewSource, resizeMediaPreview } from '../lib/media-preview.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
@@ -1676,14 +1676,14 @@ mastodon.get('/notifications', async (c) => {
 })
 
 // ============================================================
-// GET /api/v1/media/preview/v2/:source — Cached media preview
+// GET /api/v1/media/preview/v3/:source — Cached media preview
 // ============================================================
-mastodon.on(['GET', 'HEAD'], '/media/preview/v2/:source', async (c) => {
+mastodon.on(['GET', 'HEAD'], '/media/preview/v3/:source', async (c) => {
   const source = parseMediaPreviewSource(c.req.path)
   if (!source) return c.json({ error: 'Invalid media preview source' }, 400)
 
   const cache = caches.default
-  const cacheKey = new Request(c.req.url, { method: 'GET' })
+  const cacheKey = new Request(canonicalMediaPreviewCacheUrl(c.req.url), { method: 'GET' })
   const cached = await cache.match(cacheKey)
   if (cached) {
     if (c.req.method === 'HEAD') return new Response(null, { status: cached.status, headers: cached.headers })
@@ -1691,6 +1691,7 @@ mastodon.on(['GET', 'HEAD'], '/media/preview/v2/:source', async (c) => {
   }
 
   const fallback = () => c.redirect(source, 302)
+  if (c.req.method === 'HEAD') return fallback()
   try {
     const sourceBytes = await fetchTrustedMediaSource(source)
     if (!sourceBytes) return fallback()
