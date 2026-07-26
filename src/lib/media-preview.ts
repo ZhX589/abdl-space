@@ -1,6 +1,6 @@
 import { PhotonImage, SamplingFilter, resize } from '@cf-wasm/photon'
 
-const PREVIEW_PATH_PREFIX = '/api/v1/media/preview/v1/'
+const PREVIEW_PATH_PREFIX = '/api/v1/media/preview/v2/'
 const PREVIEW_LONG_EDGE = 720
 export const MAX_MEDIA_PREVIEW_SOURCE_BYTES = 10 * 1024 * 1024
 
@@ -57,7 +57,7 @@ export function calculateMediaPreviewSize(width: number, height: number): { widt
   }
 }
 
-export function resizeMediaPreview(bytes: Uint8Array): { bytes: Uint8Array; width: number; height: number } | null {
+export function resizeMediaPreview(bytes: Uint8Array): { bytes: Uint8Array; width: number; height: number; contentType: string } | null {
   let source: PhotonImage | null = null
   let preview: PhotonImage | null = null
   try {
@@ -65,7 +65,17 @@ export function resizeMediaPreview(bytes: Uint8Array): { bytes: Uint8Array; widt
     const size = calculateMediaPreviewSize(source.get_width(), source.get_height())
     if (!size) return null
     preview = resize(source, size.width, size.height, SamplingFilter.Lanczos3)
-    return { bytes: preview.get_bytes_webp(), ...size }
+    const pixels = preview.get_raw_pixels()
+    let opaque = true
+    for (let i = 3; i < pixels.length; i += 4) {
+      if (pixels[i] !== 255) {
+        opaque = false
+        break
+      }
+    }
+    return opaque
+      ? { bytes: preview.get_bytes_jpeg(80), contentType: 'image/jpeg', ...size }
+      : { bytes: preview.get_bytes_webp(), contentType: 'image/webp', ...size }
   } catch {
     return null
   } finally {

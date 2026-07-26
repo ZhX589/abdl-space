@@ -1676,9 +1676,9 @@ mastodon.get('/notifications', async (c) => {
 })
 
 // ============================================================
-// GET /api/v1/media/preview/v1/:source — Cached media preview
+// GET /api/v1/media/preview/v2/:source — Cached media preview
 // ============================================================
-mastodon.on(['GET', 'HEAD'], '/media/preview/v1/:source', async (c) => {
+mastodon.on(['GET', 'HEAD'], '/media/preview/v2/:source', async (c) => {
   const source = parseMediaPreviewSource(c.req.path)
   if (!source) return c.json({ error: 'Invalid media preview source' }, 400)
 
@@ -1699,7 +1699,7 @@ mastodon.on(['GET', 'HEAD'], '/media/preview/v1/:source', async (c) => {
 
     const response = new Response(preview.bytes, {
       headers: {
-        'Content-Type': 'image/webp',
+        'Content-Type': preview.contentType,
         'Content-Length': String(preview.bytes.byteLength),
         'Cache-Control': 'public, max-age=2592000, immutable',
         'X-Image-Width': String(preview.width),

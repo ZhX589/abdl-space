@@ -21,8 +21,8 @@ test('builds deterministic preview URLs for trusted media hosts', () => {
 test('keeps unknown and insecure media URLs unchanged', () => {
   assert.equal(buildMediaPreviewUrl('https://cdn.example.com/image.jpg', apiOrigin), 'https://cdn.example.com/image.jpg')
   assert.equal(buildMediaPreviewUrl('http://img.abdl-space.top/image.jpg', apiOrigin), 'http://img.abdl-space.top/image.jpg')
-  assert.equal(buildMediaPreviewUrl(`${apiOrigin}/api/v1/media/preview/v1/recursive`, apiOrigin), `${apiOrigin}/api/v1/media/preview/v1/recursive`)
-  assert.equal(parseMediaPreviewSource('/api/v1/media/preview/v1/not-valid'), null)
+  assert.equal(buildMediaPreviewUrl(`${apiOrigin}/api/v1/media/preview/v2/recursive`, apiOrigin), `${apiOrigin}/api/v1/media/preview/v2/recursive`)
+  assert.equal(parseMediaPreviewSource('/api/v1/media/preview/v2/not-valid'), null)
 })
 
 test('limits preview longest edge to 720 pixels without upscaling', () => {
@@ -32,12 +32,12 @@ test('limits preview longest edge to 720 pixels without upscaling', () => {
   assert.equal(calculateMediaPreviewSize(0, 240), null)
 })
 
-test('encodes a valid image as webp without enlarging it', () => {
+test('encodes an opaque image as a compressed jpeg without enlarging it', () => {
   const png = Uint8Array.from(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64'))
   const preview = resizeMediaPreview(png)
 
   assert.ok(preview)
   assert.deepEqual({ width: preview.width, height: preview.height }, { width: 1, height: 1 })
-  assert.deepEqual(Array.from(preview.bytes.slice(0, 4)), [0x52, 0x49, 0x46, 0x46])
-  assert.equal(new TextDecoder().decode(preview.bytes.slice(8, 12)), 'WEBP')
+  assert.equal(preview.contentType, 'image/jpeg')
+  assert.deepEqual(Array.from(preview.bytes.slice(0, 2)), [0xff, 0xd8])
 })
