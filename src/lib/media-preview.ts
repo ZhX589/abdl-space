@@ -38,7 +38,7 @@ function decodeSource(value: string): string | null {
   }
 }
 
-export function buildMediaPreviewUrl(source: string, apiOrigin = 'https://abdl-space-api.zhx589.workers.dev'): string {
+export function buildMediaPreviewUrl(source: string, apiOrigin = 'https://api.abdl-space.top'): string {
   if (!isTrustedMediaUrl(source)) return source
   return `${apiOrigin.replace(/\/$/, '')}${PREVIEW_PATH_PREFIX}${encodeSource(source)}`
 }

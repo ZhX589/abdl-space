@@ -10,13 +10,6 @@ import {
 } from '../lib/media-preview.ts'
 
 const apiOrigin = 'https://api.abdl-space.top'
-const previewOrigin = 'https://abdl-space-api.zhx589.workers.dev'
-
-test('uses the Worker subdomain for generated preview URLs by default', () => {
-  const source = 'https://img.abdl-space.top/file/posts/example.jpg'
-
-  assert.equal(new URL(buildMediaPreviewUrl(source)).origin, previewOrigin)
-})
 
 test('builds deterministic preview URLs for trusted media hosts', () => {
   const source = 'https://img.abdl-space.top/file/posts/example image.jpg'
