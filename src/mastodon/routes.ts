@@ -66,6 +66,14 @@ const mastodon = new Hono<AppType>()
 
 const IMGBED_HOST = 'https://img.abdl-space.top'
 
+export function isAllowedStatusMediaUrl(mediaId: string): boolean {
+  try {
+    return new URL(mediaId).protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
 async function loadPolls(db: D1Database, pollIds: number[]): Promise<Map<number, any>> {
   if (pollIds.length === 0) return new Map()
   const polls = await query<Record<string, unknown>>(
@@ -814,6 +822,12 @@ mastodon.post('/statuses', async (c) => {
   const visibility = body.visibility || 'public'
   const spoilerText = body.spoiler_text || ''
   const language = body.language || 'zh'
+  const mediaIds = body.media_ids || []
+  for (const mediaId of mediaIds) {
+    if (typeof mediaId !== 'string' || !isAllowedStatusMediaUrl(mediaId)) {
+      return c.json({ error: '图片 URL 必须是 HTTPS 地址，请先通过 /api/v1/media 上传' }, 400)
+    }
+  }
 
   // Resolve in_reply_to_id (could be p_123 or c_123 format)
   let inReplyToId: number | null = null
@@ -843,45 +857,39 @@ mastodon.post('/statuses', async (c) => {
   )
   const postId = result.meta.last_row_id as number
 
-  // Create poll if provided (after post so status_id FK is satisfied)
-  if (body.poll && body.poll.options && body.poll.options.length >= 2) {
-    const expiresAt = new Date(Date.now() + (body.poll.expires_in || 300) * 1000).toISOString()
-    const options = body.poll.options.map(title => ({ title, votes_count: 0 }))
-    const pollResult = await run(
-      c.env.abdl_space_db,
-      'INSERT INTO polls (status_id, expires_at, multiple, hide_totals, options) VALUES (?, ?, ?, ?, ?)',
-      [postId, expiresAt, body.poll.multiple ? 1 : 0, body.poll.hide_totals ? 1 : 0, JSON.stringify(options)]
-    )
-    const pollId = pollResult.meta.last_row_id as number
-    // Link poll to post
-    await run(c.env.abdl_space_db, 'UPDATE posts SET poll_id = ? WHERE id = ?', [pollId, postId])
-  }
+  try {
+      // Create poll if provided (after post so status_id FK is satisfied)
+      if (body.poll && body.poll.options && body.poll.options.length >= 2) {
+        const expiresAt = new Date(Date.now() + (body.poll.expires_in || 300) * 1000).toISOString()
+        const options = body.poll.options.map(title => ({ title, votes_count: 0 }))
+        const pollResult = await run(
+          c.env.abdl_space_db,
+          'INSERT INTO polls (status_id, expires_at, multiple, hide_totals, options) VALUES (?, ?, ?, ?, ?)',
+          [postId, expiresAt, body.poll.multiple ? 1 : 0, body.poll.hide_totals ? 1 : 0, JSON.stringify(options)]
+        )
+        const pollId = pollResult.meta.last_row_id as number
+        await run(c.env.abdl_space_db, 'UPDATE posts SET poll_id = ? WHERE id = ?', [pollId, postId])
+      }
 
-  // Handle media attachments (images from media_ids)
-  if (body.media_ids && body.media_ids.length > 0) {
-    let sortOrder = 0
-    for (const mediaId of body.media_ids) {
-      if (typeof mediaId !== 'string' || !mediaId) continue
-      if (!mediaId.startsWith(IMGBED_HOST + '/')) {
-        return c.json({ error: `图片 URL 必须来自 ${IMGBED_HOST}，请先通过 /api/v1/media 上传` }, 400)
-      }
-      // Find description from media_attributes if provided
-      let altText: string | null = null
-      let blurhash: string | null = null
-      if (body.media_attributes && body.media_attributes.length > 0) {
-        const attr = body.media_attributes.find(a => a.id === mediaId)
-        if (attr && attr.description) altText = attr.description
-        blurhash = sanitizeBlurhash(attr?.blurhash)
-      }
-      try {
+      let sortOrder = 0
+      for (const mediaId of mediaIds) {
+        let altText: string | null = null
+        let blurhash: string | null = null
+        if (body.media_attributes && body.media_attributes.length > 0) {
+          const attr = body.media_attributes.find(a => a.id === mediaId)
+          if (attr && attr.description) altText = attr.description
+          blurhash = sanitizeBlurhash(attr?.blurhash)
+        }
         await run(c.env.abdl_space_db, 'INSERT INTO post_images (post_id, image_url, is_nsfw, sort_order, alt_text, blurhash) VALUES (?, ?, ?, ?, ?, ?)', [postId, mediaId, hasNsfw, sortOrder++, altText, blurhash])
-      } catch {}
-    }
-  }
+      }
 
-  // If sensitive, also mark all existing images for this post as nsfw
-  if (hasNsfw) {
-    await run(c.env.abdl_space_db, 'UPDATE post_images SET is_nsfw = 1 WHERE post_id = ?', [postId])
+      if (hasNsfw) {
+        await run(c.env.abdl_space_db, 'UPDATE post_images SET is_nsfw = 1 WHERE post_id = ?', [postId])
+      }
+  } catch (error) {
+    console.error('Status creation failed after post insert', { postId, userId: user.sub, error: String(error) })
+    await run(c.env.abdl_space_db, 'DELETE FROM posts WHERE id = ?', [postId])
+    return c.json({ error: 'Failed to attach media to status' }, 500)
   }
 
   // Fetch the created post with all fields
