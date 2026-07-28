@@ -323,19 +323,27 @@ test('complete rejects pending, wrong-purpose, and self-referencing previews', a
 		uploadRow({ purpose: 'generic', status: 'complete' }),
 	]) {
 		const db = createDb([original, preview])
-		assert.equal((await complete(original.id, { previewUploadId: preview.id }, { db })).status, 409)
+		assert.equal((await complete(original.id, { preview_upload_id: preview.id }, { db })).status, 409)
 	}
 	const selfDb = createDb([original])
-	assert.equal((await complete(original.id, { previewUploadId: original.id }, { db: selfDb })).status, 400)
+	assert.equal((await complete(original.id, { preview_upload_id: original.id }, { db: selfDb })).status, 400)
 	const otherOwner = uploadRow({ user_id: 7, purpose: 'status_preview', status: 'complete', verified_size: 123 })
 	const ownerDb = createDb([original, otherOwner])
-	assert.equal((await complete(original.id, { previewUploadId: otherOwner.id }, { db: ownerDb })).status, 409)
+	assert.equal((await complete(original.id, { preview_upload_id: otherOwner.id }, { db: ownerDb })).status, 409)
 })
 
 test('complete rejects preview IDs for non-original uploads', async () => {
 	const row = uploadRow()
 	const db = createDb([row])
-	assert.equal((await complete(row.id, { previewUploadId: crypto.randomUUID() }, { db })).status, 400)
+	assert.equal((await complete(row.id, { preview_upload_id: crypto.randomUUID() }, { db })).status, 400)
+})
+
+test('complete does not accept camelCase previewUploadId as the request contract', async () => {
+	const preview = uploadRow({ purpose: 'status_preview', status: 'complete', verified_size: 50 })
+	const original = uploadRow({ purpose: 'status_original' })
+	const response = await complete(original.id, { previewUploadId: preview.id }, { db: createDb([preview, original]) })
+	assert.equal(response.status, 400)
+	assert.equal((await response.json() as { code: string }).code, 'preview_required')
 })
 
 test('complete rejects HEAD 404, size mismatch, and normalized type mismatch', async () => {
@@ -359,7 +367,7 @@ test('complete accepts an expired completed preview when the original is still p
 	const original = uploadRow({ purpose: 'status_original' })
 	const db = createDb([preview, original])
 	await withHead(new Response(null, { status: 200, headers: { 'Content-Length': '123', 'Content-Type': 'image/jpeg' } }), async () => {
-		assert.equal((await complete(original.id, { previewUploadId: preview.id }, { db })).status, 200)
+		assert.equal((await complete(original.id, { preview_upload_id: preview.id }, { db })).status, 200)
 	})
 })
 
@@ -371,7 +379,7 @@ test('complete verifies preview then atomically links it when completing an orig
 		assert.equal((await complete(preview.id, {}, { db })).status, 200)
 	})
 	await withHead(new Response(null, { status: 200, headers: { 'Content-Length': '123', 'Content-Type': 'IMAGE/JPEG' } }), async () => {
-		const response = await complete(original.id, { previewUploadId: preview.id }, { db })
+		const response = await complete(original.id, { preview_upload_id: preview.id }, { db })
 		assert.equal(response.status, 200, await response.clone().text())
 		assert.deepEqual(await response.json(), {
 			id: original.id,
@@ -428,8 +436,8 @@ test('complete rejects a different preview on an already completed original', as
 	}
 	try {
 		assert.equal((await complete(original.id, {}, { db })).status, 200)
-		assert.equal((await complete(original.id, { previewUploadId: firstPreview.id }, { db })).status, 200)
-		assert.equal((await complete(original.id, { previewUploadId: secondPreview.id }, { db })).status, 409)
+		assert.equal((await complete(original.id, { preview_upload_id: firstPreview.id }, { db })).status, 200)
+		assert.equal((await complete(original.id, { preview_upload_id: secondPreview.id }, { db })).status, 409)
 		assert.equal(calls, 0)
 	} finally {
 		globalThis.fetch = originalFetch
@@ -450,7 +458,7 @@ test('complete changes=0 reread rejects a concurrently linked different preview'
 		current.preview_url = concurrentPreview.public_url
 	})
 	await withHead(new Response(null, { status: 200, headers: { 'Content-Length': '123', 'Content-Type': 'image/jpeg' } }), async () => {
-		assert.equal((await complete(original.id, { previewUploadId: requestedPreview.id }, { db })).status, 409)
+		assert.equal((await complete(original.id, { preview_upload_id: requestedPreview.id }, { db })).status, 409)
 	})
 })
 
@@ -464,7 +472,7 @@ test('complete returns the preview key and URL copied by the atomic update', asy
 		current.public_url = 'https://media.example.test/current.webp'
 	})
 	await withHead(new Response(null, { status: 200, headers: { 'Content-Length': '123', 'Content-Type': 'image/jpeg' } }), async () => {
-		const response = await complete(original.id, { previewUploadId: preview.id }, { db })
+		const response = await complete(original.id, { preview_upload_id: preview.id }, { db })
 		assert.equal(response.status, 200)
 		assert.equal((await response.json() as Record<string, unknown>).preview_url, 'https://media.example.test/current.webp')
 	})

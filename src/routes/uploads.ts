@@ -213,7 +213,7 @@ uploads.post('/:id/complete', async (c) => {
 		if (body === null || typeof body !== 'object' || Array.isArray(body)) {
 			return c.json({ error: 'Invalid upload request', code: 'invalid_upload' }, 400)
 		}
-		const previewUploadId = typeof body.previewUploadId === 'string' ? body.previewUploadId : undefined
+		const previewUploadId = typeof body.preview_upload_id === 'string' ? body.preview_upload_id : undefined
 
 		if (upload.status === 'complete') {
 			if (upload.purpose === 'status_original' && previewUploadId !== undefined && previewUploadId !== upload.preview_upload_id) {
