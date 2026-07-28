@@ -336,7 +336,7 @@ ON message_outbox(dispatched_at, next_attempt_at);
 -- 媒体上传记录
 CREATE TABLE IF NOT EXISTS media_uploads (
   id TEXT PRIMARY KEY NOT NULL,
-  user_id INTEGER NOT NULL REFERENCES users(id),
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   purpose TEXT NOT NULL CHECK (purpose IN ('status_original', 'status_preview', 'avatar', 'header', 'generic', 'release')),
   object_key TEXT NOT NULL UNIQUE,
   public_url TEXT NOT NULL,
@@ -352,7 +352,11 @@ CREATE TABLE IF NOT EXISTS media_uploads (
   storage_provider TEXT NOT NULL CHECK (storage_provider IN ('cos', 'imgbed')),
   status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'complete', 'failed')),
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
-  expires_at INTEGER NOT NULL
+  expires_at INTEGER NOT NULL,
+  CHECK (
+    (preview_upload_id IS NULL AND preview_object_key IS NULL AND preview_url IS NULL)
+    OR (preview_upload_id IS NOT NULL AND preview_object_key IS NOT NULL AND preview_url IS NOT NULL)
+  )
 );
 CREATE INDEX IF NOT EXISTS idx_media_uploads_user_status ON media_uploads(user_id, status);
 CREATE INDEX IF NOT EXISTS idx_media_uploads_pending_expiry ON media_uploads(status, expires_at);
