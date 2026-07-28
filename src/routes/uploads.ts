@@ -72,7 +72,13 @@ uploads.post('/authorize', async (c) => {
 	const user = auth.user
 
 	try {
-		const input = await c.req.json()
+		let input: unknown
+		try {
+			const text = await c.req.text()
+			input = text.trim() ? JSON.parse(text) : {}
+		} catch {
+			return c.json({ error: 'Invalid upload request', code: 'invalid_upload' }, 400)
+		}
 		if (!input || typeof input !== 'object' || Array.isArray(input)) {
 			return c.json({ error: 'Invalid upload request', code: 'invalid_upload' }, 400)
 		}
@@ -128,11 +134,11 @@ uploads.post('/authorize', async (c) => {
 		if (!result.success) throw new Error('Database operation failed')
 
 		return c.json({
-			id,
-			uploadUrl: authorization.url,
-			publicUrl,
-			expiresAt: authorization.expiresAt,
-			requiredHeaders: authorization.headers,
+			upload_id: id,
+			upload_url: authorization.url,
+			public_url: publicUrl,
+			expires_at: authorization.expiresAt,
+			required_headers: authorization.headers,
 		})
 	} catch (error) {
 		const message = error instanceof Error ? error.message : 'Invalid upload request'
@@ -165,7 +171,7 @@ function attachment(row: MediaUploadRow, preview?: MediaUploadRow) {
 		preview_url: preview?.public_url ?? row.preview_url ?? row.public_url,
 		type: mediaType(row.mime_type),
 		blurhash: row.blurhash,
-		metadata: {
+		meta: {
 			...(original ? { original } : {}),
 			...(small ? { small } : {}),
 		},
@@ -199,9 +205,10 @@ uploads.post('/:id/complete', async (c) => {
 
 		let body: unknown = {}
 		try {
-			body = await c.req.json()
+			const text = await c.req.text()
+			body = text.trim() ? JSON.parse(text) : {}
 		} catch {
-			body = {}
+			return c.json({ error: 'Invalid upload request', code: 'invalid_upload' }, 400)
 		}
 		if (body === null || typeof body !== 'object' || Array.isArray(body)) {
 			return c.json({ error: 'Invalid upload request', code: 'invalid_upload' }, 400)

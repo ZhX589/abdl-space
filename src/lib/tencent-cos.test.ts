@@ -15,7 +15,7 @@ const credentials = {
 }
 const now = new Date('2026-07-29T08:00:00.000Z')
 
-test('creates a stable five-minute PUT authorization bound to content type, host, and encoded key', async () => {
+test('creates a stable five-minute PUT authorization that forbids overwrites', async () => {
 	const result = await createCosPutAuthorization({
 		...credentials,
 		objectKey: 'media/a b.jpg',
@@ -28,8 +28,9 @@ test('creates a stable five-minute PUT authorization bound to content type, host
 		host: 'abdl-1339643562.cos.ap-shanghai.myqcloud.com',
 		expiresAt: 1785312300,
 		headers: {
-			Authorization: 'q-sign-algorithm=sha1&q-ak=AKIDEXAMPLEFAKE&q-sign-time=1785312000;1785312300&q-key-time=1785312000;1785312300&q-header-list=content-type;host&q-url-param-list=&q-signature=a82aa9a46fca15257ba3903d7b7baa459baf5296',
+			Authorization: 'q-sign-algorithm=sha1&q-ak=AKIDEXAMPLEFAKE&q-sign-time=1785312000;1785312300&q-key-time=1785312000;1785312300&q-header-list=content-type;host;x-cos-forbid-overwrite&q-url-param-list=&q-signature=b2fb4b3f7c8565e43fc3f55fdd212d82b61c51ea',
 			'Content-Type': 'image/jpeg',
+			'x-cos-forbid-overwrite': 'true',
 		},
 	})
 })
@@ -43,7 +44,8 @@ test('signs a decoded Unicode canonical path while keeping the request URL encod
 	})
 
 	assert.equal(result.url, 'https://abdl-1339643562.cos.ap-shanghai.myqcloud.com/media/%E4%B8%AD%E6%96%87%20a.jpg')
-	assert.equal(result.headers.Authorization, 'q-sign-algorithm=sha1&q-ak=AKIDEXAMPLEFAKE&q-sign-time=1785312000;1785312300&q-key-time=1785312000;1785312300&q-header-list=content-type;host&q-url-param-list=&q-signature=2f02627bc23545d0f4e55beb43a8c98e04e44119')
+	assert.equal(result.headers.Authorization, 'q-sign-algorithm=sha1&q-ak=AKIDEXAMPLEFAKE&q-sign-time=1785312000;1785312300&q-key-time=1785312000;1785312300&q-header-list=content-type;host;x-cos-forbid-overwrite&q-url-param-list=&q-signature=368d0f79c8d93dcc57a731e7f771436c1a6d6d16')
+	assert.equal(result.headers['x-cos-forbid-overwrite'], 'true')
 })
 
 test('creates HEAD authorization with a method-specific signature', async () => {
@@ -56,6 +58,7 @@ test('creates HEAD authorization with a method-specific signature', async () => 
 
 	assert.equal(result.expiresAt, 1785312300)
 	assert.equal(result.headers['Content-Type'], 'image/jpeg')
+	assert.equal(Object.hasOwn(result.headers, 'x-cos-forbid-overwrite'), false)
 	assert.equal(result.headers.Authorization, 'q-sign-algorithm=sha1&q-ak=AKIDEXAMPLEFAKE&q-sign-time=1785312000;1785312300&q-key-time=1785312000;1785312300&q-header-list=content-type;host&q-url-param-list=&q-signature=00a32f5aa9b414d3a4cbb65e52a13d8a1a1a895b')
 })
 
@@ -100,6 +103,7 @@ test('uploads an object with signed PUT headers', async () => {
 		assert.equal(request?.init?.redirect, 'manual')
 		assert.equal(request?.init?.body, body)
 		assert.equal(Object.hasOwn(request?.init?.headers ?? {}, 'Host'), false)
+		assert.equal((request?.init?.headers as Record<string, string>)['x-cos-forbid-overwrite'], 'true')
 		assert.deepEqual(request?.init?.headers, (await createCosPutAuthorization({
 			...credentials,
 			objectKey: 'media/a b.jpg',

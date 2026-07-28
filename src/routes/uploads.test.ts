@@ -223,20 +223,33 @@ test('authorize rejects non-object JSON bodies as invalid uploads', async () => 
 	assert.equal(response.status, 400)
 })
 
+test('authorize rejects malformed non-empty JSON as invalid_upload', async () => {
+	const response = await createApp().request('/api/v1/uploads/authorize', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json', Authorization: await bearer() },
+		body: '{malformed',
+	}, { ...cosEnv, abdl_space_db: createDb() } as never)
+	assert.equal(response.status, 400)
+	assert.equal((await response.json() as { code: string }).code, 'invalid_upload')
+})
+
 test('authorize creates a pending server-owned upload and returns PUT instructions', async () => {
 	const { response, db } = await authorize({ purpose: 'status_preview', mimeType: 'image/webp', declaredSize: 123, width: 540, height: 360 })
 	assert.equal(response.status, 200, await response.clone().text())
 	const result = await response.json() as Record<string, unknown>
-	assert.match(String(result.id), /^[0-9a-f-]{36}$/i)
-	assert.match(String(result.uploadUrl), /^https:\/\/test-bucket-123\.cos\.ap-shanghai\.myqcloud\.com\/media\/preview\/42\//)
-	assert.match(String(result.publicUrl), /^https:\/\/media\.example\.test\/media\/preview\/42\//)
-	assert.equal(typeof result.expiresAt, 'number')
-	const requiredHeaders = result.requiredHeaders as Record<string, string>
+	assert.deepEqual(Object.keys(result).sort(), ['expires_at', 'public_url', 'required_headers', 'upload_id', 'upload_url'])
+	assert.match(String(result.upload_id), /^[0-9a-f-]{36}$/i)
+	assert.match(String(result.upload_url), /^https:\/\/test-bucket-123\.cos\.ap-shanghai\.myqcloud\.com\/media\/preview\/42\//)
+	assert.match(String(result.public_url), /^https:\/\/media\.example\.test\/media\/preview\/42\//)
+	assert.equal(typeof result.expires_at, 'number')
+	const requiredHeaders = result.required_headers as Record<string, string>
 	assert.equal(requiredHeaders['Content-Type'], 'image/webp')
+	assert.equal(requiredHeaders['x-cos-forbid-overwrite'], 'true')
 	assert.equal(typeof requiredHeaders.Authorization, 'string')
+	assert.match(requiredHeaders.Authorization, /q-header-list=content-type;host;x-cos-forbid-overwrite(?:&|$)/)
 	assert.equal(Object.hasOwn(requiredHeaders, 'Host'), false)
-	assert.equal(db.rows.get(String(result.id))?.status, 'pending')
-	assert.equal(db.rows.get(String(result.id))?.object_key.includes(String(result.id)), false)
+	assert.equal(db.rows.get(String(result.upload_id))?.status, 'pending')
+	assert.equal(db.rows.get(String(result.upload_id))?.object_key.includes(String(result.upload_id)), false)
 })
 
 test('release authorize uses the current database role for JWT administrators', async () => {
@@ -278,6 +291,28 @@ test('complete rejects null and array JSON bodies as invalid uploads', async () 
 		}, { ...cosEnv, abdl_space_db: createDb([row]) } as never)
 		assert.equal(response.status, 400)
 		assert.equal((await response.json() as { code: string }).code, 'invalid_upload')
+	}
+})
+
+test('complete rejects malformed non-empty JSON before issuing HEAD', async () => {
+	const row = uploadRow()
+	let headCalls = 0
+	const originalFetch = globalThis.fetch
+	globalThis.fetch = async () => {
+		headCalls++
+		throw new Error('HEAD must not run')
+	}
+	try {
+		const response = await createApp().request(`/api/v1/uploads/${row.id}/complete`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json', Authorization: await bearer() },
+			body: '{malformed',
+		}, { ...cosEnv, abdl_space_db: createDb([row]) } as never)
+		assert.equal(response.status, 400)
+		assert.equal((await response.json() as { code: string }).code, 'invalid_upload')
+		assert.equal(headCalls, 0)
+	} finally {
+		globalThis.fetch = originalFetch
 	}
 })
 
@@ -344,7 +379,7 @@ test('complete verifies preview then atomically links it when completing an orig
 			preview_url: preview.public_url,
 			type: 'image',
 			blurhash: null,
-			metadata: { original: { width: 100, height: 80, size: '100x80' }, small: { width: 540, height: 360, size: '540x360' } },
+			meta: { original: { width: 100, height: 80, size: '100x80' }, small: { width: 540, height: 360, size: '540x360' } },
 		})
 	})
 	assert.equal(db.rows.get(original.id)?.preview_upload_id, preview.id)
