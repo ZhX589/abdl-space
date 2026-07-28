@@ -359,6 +359,12 @@ export interface Env {
   SES_FROM_EMAIL: string
   SES_TEMPLATE_ID: string
   SES_REGION?: string
+  // 腾讯云 COS
+  COS_SECRET_ID: string
+  COS_SECRET_KEY: string
+  COS_BUCKET: string
+  COS_REGION: string
+  COS_PUBLIC_ORIGIN?: string
   // NBW S2S
   NBW_API_KEY?: string
   // NBW OAuth
