@@ -30,7 +30,6 @@ test('creates a stable five-minute PUT authorization bound to content type, host
 		headers: {
 			Authorization: 'q-sign-algorithm=sha1&q-ak=AKIDEXAMPLEFAKE&q-sign-time=1785312000;1785312300&q-key-time=1785312000;1785312300&q-header-list=content-type;host&q-url-param-list=&q-signature=a82aa9a46fca15257ba3903d7b7baa459baf5296',
 			'Content-Type': 'image/jpeg',
-			Host: 'abdl-1339643562.cos.ap-shanghai.myqcloud.com',
 		},
 	})
 })
@@ -98,7 +97,9 @@ test('uploads an object with signed PUT headers', async () => {
 		assert.equal(response.status, 200)
 		assert.equal(request?.input, 'https://abdl-1339643562.cos.ap-shanghai.myqcloud.com/media/a%20b.jpg')
 		assert.equal(request?.init?.method, 'PUT')
+		assert.equal(request?.init?.redirect, 'manual')
 		assert.equal(request?.init?.body, body)
+		assert.equal(Object.hasOwn(request?.init?.headers ?? {}, 'Host'), false)
 		assert.deepEqual(request?.init?.headers, (await createCosPutAuthorization({
 			...credentials,
 			objectKey: 'media/a b.jpg',
@@ -156,6 +157,7 @@ test('checks an object with signed HEAD headers and manual redirects', async () 
 		assert.equal(response.status, 200)
 		assert.equal(request?.init?.method, 'HEAD')
 		assert.equal(request?.init?.redirect, 'manual')
+		assert.equal(Object.hasOwn(request?.init?.headers ?? {}, 'Host'), false)
 		assert.deepEqual(request?.init?.headers, (await createCosHeadAuthorization({
 			...credentials,
 			objectKey: 'media/a.jpg',

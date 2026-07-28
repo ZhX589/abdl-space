@@ -25,7 +25,6 @@ export interface CosAuthorization {
 	headers: {
 		Authorization: string
 		'Content-Type': string
-		Host: string
 	}
 }
 
@@ -113,7 +112,6 @@ async function createCosAuthorization(method: 'put' | 'head', options: CosAuthor
 		headers: {
 			Authorization: authorization,
 			'Content-Type': options.contentType,
-			Host: host,
 		},
 	}
 }
@@ -132,6 +130,7 @@ export async function putObjectToCos(options: PutObjectToCosOptions): Promise<Re
 		method: 'PUT',
 		headers: signed.headers,
 		body: options.body,
+		redirect: 'manual',
 	})
 	if (!response.ok) {
 		throw new Error(`COS PUT failed: ${response.status}`)

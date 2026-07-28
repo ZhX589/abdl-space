@@ -1,9 +1,10 @@
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 
+import { queryOne } from '../lib/db.ts'
 import { buildMediaObjectKey, validateMediaUpload } from '../lib/media-upload.ts'
 import { buildCosObjectUrl, createCosPutAuthorization, headObjectFromCos } from '../lib/tencent-cos.ts'
-import { mastodonAuth } from '../mastodon/shared.ts'
+import { mastodonAuthDetails } from '../mastodon/shared.ts'
 import type { Env } from '../types/index.ts'
 
 type AppType = { Bindings: Env }
@@ -30,6 +31,35 @@ interface MediaUploadRow {
 	expires_at: number
 }
 
+export const COMPLETE_ORIGINAL_UPLOAD_SQL = `
+	UPDATE media_uploads
+	SET status = 'complete',
+		preview_upload_id = (
+			SELECT preview.id FROM media_uploads AS preview WHERE preview.id = ?1
+		),
+		preview_object_key = (
+			SELECT preview.object_key FROM media_uploads AS preview WHERE preview.id = ?1
+		),
+		preview_url = (
+			SELECT preview.public_url FROM media_uploads AS preview WHERE preview.id = ?1
+		),
+		verified_size = ?5
+	WHERE id = ?2 AND user_id = ?3 AND purpose = 'status_original'
+		AND status = 'pending' AND expires_at >= ?4
+		AND EXISTS (
+			SELECT 1 FROM media_uploads AS preview
+			WHERE preview.id = ?1 AND preview.user_id = ?3
+				AND preview.purpose = 'status_preview'
+				AND preview.status = 'complete'
+				AND preview.verified_size IS NOT NULL
+		)
+`
+
+async function canUploadRelease(db: D1Database, auth: NonNullable<Awaited<ReturnType<typeof mastodonAuthDetails>>>): Promise<boolean> {
+	const currentUser = await queryOne<{ role: string }>(db, 'SELECT role FROM users WHERE id = ?', [auth.user.sub])
+	return currentUser?.role === 'admin' && (auth.tokenType === 'jwt' || auth.scopes.includes('admin'))
+}
+
 uploads.use('*', cors({
 	origin: '*',
 	allowMethods: ['POST', 'OPTIONS'],
@@ -37,8 +67,9 @@ uploads.use('*', cors({
 }))
 
 uploads.post('/authorize', async (c) => {
-	const user = await mastodonAuth(c)
-	if (!user) return c.json({ error: 'The access token is invalid', code: 'unauthorized' }, 401)
+	const auth = await mastodonAuthDetails(c)
+	if (!auth) return c.json({ error: 'The access token is invalid', code: 'unauthorized' }, 401)
+	const user = auth.user
 
 	try {
 		const input = await c.req.json()
@@ -46,7 +77,7 @@ uploads.post('/authorize', async (c) => {
 			return c.json({ error: 'Invalid upload request', code: 'invalid_upload' }, 400)
 		}
 		const validated = validateMediaUpload(input)
-		if (validated.purpose === 'release' && user.role !== 'admin') {
+		if (validated.purpose === 'release' && !await canUploadRelease(c.env.abdl_space_db, auth)) {
 			return c.json({ error: 'Admin access required', code: 'release_forbidden' }, 403)
 		}
 
@@ -154,14 +185,15 @@ async function getUpload(db: D1Database, id: string): Promise<MediaUploadRow | n
 }
 
 uploads.post('/:id/complete', async (c) => {
-	const user = await mastodonAuth(c)
-	if (!user) return c.json({ error: 'The access token is invalid', code: 'unauthorized' }, 401)
+	const auth = await mastodonAuthDetails(c)
+	if (!auth) return c.json({ error: 'The access token is invalid', code: 'unauthorized' }, 401)
+	const user = auth.user
 
 	try {
 		const upload = await getUpload(c.env.abdl_space_db, c.req.param('id'))
 		if (!upload) return c.json({ error: 'Upload not found', code: 'upload_not_found' }, 404)
 		if (upload.user_id !== user.sub) return c.json({ error: 'Upload owner mismatch', code: 'wrong_owner' }, 403)
-		if (upload.purpose === 'release' && user.role !== 'admin') {
+		if (upload.purpose === 'release' && !await canUploadRelease(c.env.abdl_space_db, auth)) {
 			return c.json({ error: 'Admin access required', code: 'release_forbidden' }, 403)
 		}
 
@@ -174,7 +206,7 @@ uploads.post('/:id/complete', async (c) => {
 		const previewUploadId = typeof body.previewUploadId === 'string' ? body.previewUploadId : undefined
 
 		if (upload.status === 'complete') {
-			if (upload.purpose === 'status_original' && previewUploadId !== upload.preview_upload_id) {
+			if (upload.purpose === 'status_original' && previewUploadId !== undefined && previewUploadId !== upload.preview_upload_id) {
 				return c.json({ error: 'Upload was completed with a different preview', code: 'upload_conflict' }, 409)
 			}
 			if (upload.purpose !== 'status_original' && previewUploadId !== undefined) {
@@ -197,8 +229,7 @@ uploads.post('/:id/complete', async (c) => {
 				|| preview.user_id !== user.sub
 				|| preview.purpose !== 'status_preview'
 				|| preview.status !== 'complete'
-				|| preview.verified_size === null
-				|| preview.expires_at < nowSeconds) {
+				|| preview.verified_size === null) {
 				return c.json({ error: 'Preview upload is not complete', code: 'invalid_preview' }, 409)
 			}
 		} else if (previewUploadId !== undefined) {
@@ -219,7 +250,11 @@ uploads.post('/:id/complete', async (c) => {
 			return c.json({ error: 'COS object verification failed', code: 'cos_head_failed' }, 502)
 		}
 
-		const verifiedSize = Number(headResponse.headers.get('Content-Length'))
+		const contentLength = headResponse.headers.get('Content-Length')
+		if (contentLength === null) {
+			return c.json({ error: 'COS verification header missing', code: 'verification_header_missing' }, 422)
+		}
+		const verifiedSize = Number(contentLength)
 		if (!Number.isSafeInteger(verifiedSize) || verifiedSize !== upload.declared_size) {
 			return c.json({ error: 'Uploaded object size mismatch', code: 'size_mismatch' }, 422)
 		}
@@ -228,29 +263,12 @@ uploads.post('/:id/complete', async (c) => {
 		}
 
 		const completeResult = preview
-			? await c.env.abdl_space_db.prepare(`
-				UPDATE media_uploads
-				SET status = 'complete', verified_size = ?, preview_upload_id = ?, preview_object_key = ?, preview_url = ?
-				WHERE id = ? AND user_id = ? AND status = 'pending' AND expires_at >= ?
-					AND EXISTS (
-						SELECT 1 FROM media_uploads AS preview
-						WHERE preview.id = ? AND preview.user_id = ?
-							AND preview.purpose = 'status_preview'
-							AND preview.status = 'complete'
-							AND preview.verified_size IS NOT NULL
-							AND preview.expires_at >= ?
-					)
-			`).bind(
-				verifiedSize,
+			? await c.env.abdl_space_db.prepare(COMPLETE_ORIGINAL_UPLOAD_SQL).bind(
 				preview.id,
-				preview.object_key,
-				preview.public_url,
 				upload.id,
 				user.sub,
 				nowSeconds,
-				preview.id,
-				user.sub,
-				nowSeconds,
+				verifiedSize,
 			).run()
 			: await c.env.abdl_space_db.prepare(`
 				UPDATE media_uploads SET status = 'complete', verified_size = ?
@@ -260,20 +278,19 @@ uploads.post('/:id/complete', async (c) => {
 		if (completeResult.meta.changes !== 1) {
 			const current = await getUpload(c.env.abdl_space_db, upload.id)
 			if (current?.user_id === user.sub && current.status === 'complete') {
+				if (current.purpose === 'status_original' && previewUploadId !== undefined && previewUploadId !== current.preview_upload_id) {
+					return c.json({ error: 'Upload was completed with a different preview', code: 'upload_conflict' }, 409)
+				}
 				const linkedPreview = current.preview_upload_id ? await getUpload(c.env.abdl_space_db, current.preview_upload_id) : undefined
 				return c.json(attachment(current, linkedPreview ?? undefined))
 			}
 			return c.json({ error: 'Upload state changed', code: 'upload_conflict' }, 409)
 		}
 
-		upload.status = 'complete'
-		upload.verified_size = verifiedSize
-		if (preview) {
-			upload.preview_upload_id = preview.id
-			upload.preview_object_key = preview.object_key
-			upload.preview_url = preview.public_url
-		}
-		return c.json(attachment(upload, preview))
+		const completed = await getUpload(c.env.abdl_space_db, upload.id)
+		if (!completed) throw new Error('Completed upload disappeared')
+		const linkedPreview = completed.preview_upload_id ? await getUpload(c.env.abdl_space_db, completed.preview_upload_id) : undefined
+		return c.json(attachment(completed, linkedPreview ?? undefined))
 	} catch {
 		return c.json({ error: 'Upload completion failed', code: 'complete_failed' }, 500)
 	}

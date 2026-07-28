@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict'
+import { DatabaseSync } from 'node:sqlite'
 import test from 'node:test'
 
 import { Hono } from 'hono'
 
 import { signJWT } from '../lib/auth.ts'
-import uploads from './uploads.ts'
+import uploads, { COMPLETE_ORIGINAL_UPLOAD_SQL } from './uploads.ts'
 
 const jwtSecret = 'test-jwt-secret'
 const cosEnv = {
@@ -37,12 +38,29 @@ interface UploadRow {
 	expires_at: number
 }
 
-function createDb(initialRows: UploadRow[] = []) {
+interface OAuthToken {
+	accessToken: string
+	userId: number
+	scopes: string
+}
+
+function createDb(initialRows: UploadRow[] = [], options: { roles?: Record<number, string>, oauthTokens?: OAuthToken[] } = {}) {
 	const rows = new Map(initialRows.map(row => [row.id, { ...row }]))
+	const roles = new Map(Object.entries(options.roles ?? { 42: 'user' }).map(([id, role]) => [Number(id), role]))
+	const oauthTokens = new Map((options.oauthTokens ?? []).map(token => [token.accessToken, token]))
+	let beforeCompleteUpdate: (() => void) | undefined
 	function statement(sql: string, params: unknown[]) {
 		return {
 			all: async () => {
-				if (sql.includes('FROM oauth_tokens')) return { success: true, results: [] }
+				if (sql.includes('FROM oauth_tokens')) {
+					const token = oauthTokens.get(String(params[0]))
+					return { success: true, results: token ? [{ client_id: 'test-client', user_id: token.userId, scopes: token.scopes, access_expires_at: Math.floor(Date.now() / 1000) + 300, revoked: 0 }] : [] }
+				}
+				if (sql.includes('FROM users')) {
+					const id = Number(params[0])
+					const role = roles.get(id)
+					return { success: true, results: role ? [{ id, username: `user${id}`, email: `user${id}@example.test`, role }] : [] }
+				}
 				if (sql.includes('FROM media_uploads')) {
 					const row = rows.get(String(params[0]))
 					return { success: true, results: row ? [{ ...row }] : [] }
@@ -60,17 +78,26 @@ function createDb(initialRows: UploadRow[] = []) {
 					})
 				}
 				if (sql.includes("SET status = 'complete'")) {
-					const hasPreview = sql.includes('preview_upload_id = ?')
-					const id = String(hasPreview ? params[4] : params.at(-3))
-					const userId = Number(hasPreview ? params[5] : params.at(-2))
+					beforeCompleteUpdate?.()
+					beforeCompleteUpdate = undefined
+					const hasPreview = sql.includes('preview_upload_id = (')
+					const id = String(hasPreview ? params[1] : params.at(-3))
+					const userId = Number(hasPreview ? params[2] : params.at(-2))
 					const row = rows.get(id)
-					if (!row || row.user_id !== userId || row.status !== 'pending') return { success: true, meta: { changes: 0 } }
+					const now = Number(hasPreview ? params[3] : params.at(-1))
+					if (!row || row.user_id !== userId || row.status !== 'pending' || row.expires_at < now) return { success: true, meta: { changes: 0 } }
+					const previewId = hasPreview ? String(params[0]) : undefined
+					const preview = previewId ? rows.get(previewId) : undefined
+					if (hasPreview && (!preview || preview.user_id !== userId || preview.purpose !== 'status_preview' || preview.status !== 'complete' || preview.verified_size === null)) {
+						return { success: true, meta: { changes: 0 } }
+					}
 					row.status = 'complete'
 					row.verified_size = Number(params[0])
 					if (hasPreview) {
-						row.preview_upload_id = String(params[1])
-						row.preview_object_key = String(params[2])
-						row.preview_url = String(params[3])
+						row.verified_size = Number(params[4])
+						row.preview_upload_id = preview!.id
+						row.preview_object_key = preview!.object_key
+						row.preview_url = preview!.public_url
 					}
 				}
 				return { success: true, meta: { changes: 1 } }
@@ -79,6 +106,10 @@ function createDb(initialRows: UploadRow[] = []) {
 	}
 	return {
 		rows,
+		roles,
+		setBeforeCompleteUpdate(callback: () => void) {
+			beforeCompleteUpdate = callback
+		},
 		prepare(sql: string) {
 			return {
 				bind(...params: unknown[]) {
@@ -118,16 +149,20 @@ async function bearer(role = 'user', sub = 42): Promise<string> {
 	return `Bearer ${await signJWT({ sub, username: `user${sub}`, email: `user${sub}@example.test`, role }, jwtSecret)}`
 }
 
+function oauthBearer(token = 'oauth-token'): string {
+	return `Bearer ${token}`
+}
+
 function createApp() {
 	const app = new Hono()
 	app.route('/api/v1/uploads', uploads)
 	return app
 }
 
-async function authorize(body: Record<string, unknown>, options: { role?: string, sub?: number, authenticated?: boolean, db?: ReturnType<typeof createDb> } = {}) {
+async function authorize(body: Record<string, unknown>, options: { role?: string, sub?: number, authenticated?: boolean, db?: ReturnType<typeof createDb>, authorization?: string } = {}) {
 	const db = options.db ?? createDb()
 	const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-	if (options.authenticated !== false) headers.Authorization = await bearer(options.role, options.sub)
+	if (options.authenticated !== false) headers.Authorization = options.authorization ?? await bearer(options.role, options.sub)
 	const response = await createApp().request('/api/v1/uploads/authorize', {
 		method: 'POST',
 		headers,
@@ -136,9 +171,9 @@ async function authorize(body: Record<string, unknown>, options: { role?: string
 	return { response, db }
 }
 
-async function complete(id: string, body: Record<string, unknown> = {}, options: { role?: string, sub?: number, authenticated?: boolean, db: ReturnType<typeof createDb> }) {
+async function complete(id: string, body: Record<string, unknown> = {}, options: { role?: string, sub?: number, authenticated?: boolean, db: ReturnType<typeof createDb>, authorization?: string }) {
 	const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-	if (options.authenticated !== false) headers.Authorization = await bearer(options.role, options.sub)
+	if (options.authenticated !== false) headers.Authorization = options.authorization ?? await bearer(options.role, options.sub)
 	return createApp().request(`/api/v1/uploads/${id}/complete`, {
 		method: 'POST',
 		headers,
@@ -199,15 +234,27 @@ test('authorize creates a pending server-owned upload and returns PUT instructio
 	const requiredHeaders = result.requiredHeaders as Record<string, string>
 	assert.equal(requiredHeaders['Content-Type'], 'image/webp')
 	assert.equal(typeof requiredHeaders.Authorization, 'string')
+	assert.equal(Object.hasOwn(requiredHeaders, 'Host'), false)
 	assert.equal(db.rows.get(String(result.id))?.status, 'pending')
 	assert.equal(db.rows.get(String(result.id))?.object_key.includes(String(result.id)), false)
 })
 
-test('release authorize requires an authenticated administrator', async () => {
+test('release authorize uses the current database role for JWT administrators', async () => {
 	const body = { purpose: 'release', mimeType: 'application/vnd.android.package-archive', declaredSize: 1024 }
-	assert.equal((await authorize(body, { role: 'user' })).response.status, 403)
-	const adminResponse = (await authorize(body, { role: 'admin' })).response
+	const demotedDb = createDb([], { roles: { 42: 'user' } })
+	assert.equal((await authorize(body, { role: 'admin', db: demotedDb })).response.status, 403)
+	const adminDb = createDb([], { roles: { 42: 'admin' } })
+	const adminResponse = (await authorize(body, { role: 'user', db: adminDb })).response
 	assert.equal(adminResponse.status, 200, await adminResponse.clone().text())
+})
+
+test('release authorize requires admin scope for administrator OAuth tokens', async () => {
+	const body = { purpose: 'release', mimeType: 'application/vnd.android.package-archive', declaredSize: 1024 }
+	const withoutScope = createDb([], { roles: { 42: 'admin' }, oauthTokens: [{ accessToken: 'no-admin', userId: 42, scopes: 'read write' }] })
+	assert.equal((await authorize(body, { db: withoutScope, authorization: oauthBearer('no-admin') })).response.status, 403)
+	const withScope = createDb([], { roles: { 42: 'admin' }, oauthTokens: [{ accessToken: 'has-admin', userId: 42, scopes: 'read admin write' }] })
+	const response = (await authorize(body, { db: withScope, authorization: oauthBearer('has-admin') })).response
+	assert.equal(response.status, 200, await response.clone().text())
 })
 
 test('complete rejects wrong owners, expired uploads, and failed uploads', async () => {
@@ -246,6 +293,7 @@ test('complete rejects preview IDs for non-original uploads', async () => {
 test('complete rejects HEAD 404, size mismatch, and normalized type mismatch', async () => {
 	const cases = [
 		[new Response(null, { status: 404, headers: { 'x-cos-request-id': 'safe-id' } }), 502],
+		[new Response(null, { status: 200, headers: { 'Content-Type': 'image/jpeg' } }), 422],
 		[new Response(null, { status: 200, headers: { 'Content-Length': '122', 'Content-Type': 'image/jpeg' } }), 422],
 		[new Response(null, { status: 200, headers: { 'Content-Length': '123', 'Content-Type': 'image/png; charset=binary' } }), 422],
 	] as const
@@ -256,6 +304,15 @@ test('complete rejects HEAD 404, size mismatch, and normalized type mismatch', a
 			assert.equal((await complete(row.id, {}, { db })).status, expected)
 		})
 	}
+})
+
+test('complete accepts an expired completed preview when the original is still pending', async () => {
+	const preview = uploadRow({ purpose: 'status_preview', status: 'complete', verified_size: 50, expires_at: Math.floor(Date.now() / 1000) - 30, mime_type: 'image/webp' })
+	const original = uploadRow({ purpose: 'status_original' })
+	const db = createDb([preview, original])
+	await withHead(new Response(null, { status: 200, headers: { 'Content-Length': '123', 'Content-Type': 'image/jpeg' } }), async () => {
+		assert.equal((await complete(original.id, { previewUploadId: preview.id }, { db })).status, 200)
+	})
 })
 
 test('complete verifies preview then atomically links it when completing an original', async () => {
@@ -282,7 +339,7 @@ test('complete verifies preview then atomically links it when completing an orig
 
 test('complete supports non-image single objects and is idempotent without another HEAD', async () => {
 	const row = uploadRow({ purpose: 'release', mime_type: 'application/vnd.android.package-archive', object_key: 'releases/42/app.apk', public_url: 'https://media.example.test/app.apk', width: null, height: null })
-	const db = createDb([row])
+	const db = createDb([row], { roles: { 42: 'admin' } })
 	let calls = 0
 	const originalFetch = globalThis.fetch
 	globalThis.fetch = async () => {
@@ -315,15 +372,99 @@ test('complete rejects a different preview on an already completed original', as
 		preview_url: firstPreview.public_url,
 	})
 	const db = createDb([original, firstPreview, secondPreview])
-	assert.equal((await complete(original.id, { previewUploadId: secondPreview.id }, { db })).status, 409)
+	let calls = 0
+	const originalFetch = globalThis.fetch
+	globalThis.fetch = async () => {
+		calls++
+		throw new Error('HEAD must not run')
+	}
+	try {
+		assert.equal((await complete(original.id, {}, { db })).status, 200)
+		assert.equal((await complete(original.id, { previewUploadId: firstPreview.id }, { db })).status, 200)
+		assert.equal((await complete(original.id, { previewUploadId: secondPreview.id }, { db })).status, 409)
+		assert.equal(calls, 0)
+	} finally {
+		globalThis.fetch = originalFetch
+	}
+})
+
+test('complete changes=0 reread rejects a concurrently linked different preview', async () => {
+	const requestedPreview = uploadRow({ purpose: 'status_preview', status: 'complete', verified_size: 50 })
+	const concurrentPreview = uploadRow({ purpose: 'status_preview', status: 'complete', verified_size: 50 })
+	const original = uploadRow({ purpose: 'status_original' })
+	const db = createDb([requestedPreview, concurrentPreview, original])
+	db.setBeforeCompleteUpdate(() => {
+		const current = db.rows.get(original.id)!
+		current.status = 'complete'
+		current.verified_size = current.declared_size
+		current.preview_upload_id = concurrentPreview.id
+		current.preview_object_key = concurrentPreview.object_key
+		current.preview_url = concurrentPreview.public_url
+	})
+	await withHead(new Response(null, { status: 200, headers: { 'Content-Length': '123', 'Content-Type': 'image/jpeg' } }), async () => {
+		assert.equal((await complete(original.id, { previewUploadId: requestedPreview.id }, { db })).status, 409)
+	})
+})
+
+test('complete returns the preview key and URL copied by the atomic update', async () => {
+	const preview = uploadRow({ purpose: 'status_preview', status: 'complete', verified_size: 50, public_url: 'https://media.example.test/before.webp' })
+	const original = uploadRow({ purpose: 'status_original' })
+	const db = createDb([preview, original])
+	db.setBeforeCompleteUpdate(() => {
+		const current = db.rows.get(preview.id)!
+		current.object_key = 'media/preview/42/current.webp'
+		current.public_url = 'https://media.example.test/current.webp'
+	})
+	await withHead(new Response(null, { status: 200, headers: { 'Content-Length': '123', 'Content-Type': 'image/jpeg' } }), async () => {
+		const response = await complete(original.id, { previewUploadId: preview.id }, { db })
+		assert.equal(response.status, 200)
+		assert.equal((await response.json() as Record<string, unknown>).preview_url, 'https://media.example.test/current.webp')
+	})
+})
+
+test('atomic original completion copies the current preview key and URL in SQLite', () => {
+	const db = new DatabaseSync(':memory:')
+	db.exec(`
+		CREATE TABLE media_uploads (
+			id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, purpose TEXT NOT NULL,
+			object_key TEXT NOT NULL, public_url TEXT NOT NULL,
+			preview_upload_id TEXT, preview_object_key TEXT, preview_url TEXT,
+			verified_size INTEGER, status TEXT NOT NULL, expires_at INTEGER NOT NULL
+		)
+	`)
+	const now = Math.floor(Date.now() / 1000)
+	db.prepare(`INSERT INTO media_uploads VALUES (?, 42, 'status_preview', ?, ?, NULL, NULL, NULL, 50, 'complete', ?)`).run('preview', 'old-key', 'old-url', now - 60)
+	db.prepare(`INSERT INTO media_uploads VALUES (?, 42, 'status_original', ?, ?, NULL, NULL, NULL, NULL, 'pending', ?)`).run('original', 'original-key', 'original-url', now + 60)
+	db.prepare('UPDATE media_uploads SET object_key = ?, public_url = ? WHERE id = ?').run('current-key', 'current-url', 'preview')
+	const result = db.prepare(COMPLETE_ORIGINAL_UPLOAD_SQL).run('preview', 'original', 42, now, 123)
+	assert.equal(result.changes, 1)
+	assert.deepEqual({ ...db.prepare('SELECT preview_upload_id, preview_object_key, preview_url, verified_size FROM media_uploads WHERE id = ?').get('original') }, {
+		preview_upload_id: 'preview',
+		preview_object_key: 'current-key',
+		preview_url: 'current-url',
+		verified_size: 123,
+	})
+	db.close()
 })
 
 test('release completion still requires administrator authorization', async () => {
 	const row = uploadRow({ purpose: 'release', mime_type: 'application/vnd.android.package-archive', width: null, height: null })
-	const db = createDb([row])
-	assert.equal((await complete(row.id, {}, { db, role: 'user' })).status, 403)
+	const db = createDb([row], { roles: { 42: 'user' } })
+	assert.equal((await complete(row.id, {}, { db, role: 'admin' })).status, 403)
 	row.status = 'complete'
 	row.verified_size = row.declared_size
 	db.rows.set(row.id, row)
-	assert.equal((await complete(row.id, {}, { db, role: 'user' })).status, 403)
+	assert.equal((await complete(row.id, {}, { db, role: 'admin' })).status, 403)
+})
+
+test('release completion accepts current DB admin JWT and requires admin-scoped OAuth', async () => {
+	const jwtRow = uploadRow({ purpose: 'release', status: 'complete', verified_size: 123, mime_type: 'application/vnd.android.package-archive', width: null, height: null })
+	const jwtDb = createDb([jwtRow], { roles: { 42: 'admin' } })
+	assert.equal((await complete(jwtRow.id, {}, { db: jwtDb, role: 'user' })).status, 200)
+
+	for (const [token, scopes, expected] of [['no-admin', 'read write', 403], ['has-admin', 'read admin', 200]] as const) {
+		const row = uploadRow({ purpose: 'release', status: 'complete', verified_size: 123, mime_type: 'application/vnd.android.package-archive', width: null, height: null })
+		const db = createDb([row], { roles: { 42: 'admin' }, oauthTokens: [{ accessToken: token, userId: 42, scopes }] })
+		assert.equal((await complete(row.id, {}, { db, authorization: oauthBearer(token) })).status, expected)
+	}
 })
