@@ -335,7 +335,7 @@ ON message_outbox(dispatched_at, next_attempt_at);
 
 -- 媒体上传记录
 CREATE TABLE IF NOT EXISTS media_uploads (
-  id TEXT PRIMARY KEY,
+  id TEXT PRIMARY KEY NOT NULL,
   user_id INTEGER NOT NULL REFERENCES users(id),
   purpose TEXT NOT NULL CHECK (purpose IN ('status_original', 'status_preview', 'avatar', 'header', 'generic', 'release')),
   object_key TEXT NOT NULL UNIQUE,

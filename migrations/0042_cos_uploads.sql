@@ -1,5 +1,5 @@
 CREATE TABLE media_uploads (
-  id TEXT PRIMARY KEY,
+  id TEXT PRIMARY KEY NOT NULL,
   user_id INTEGER NOT NULL REFERENCES users(id),
   purpose TEXT NOT NULL CHECK (purpose IN ('status_original', 'status_preview', 'avatar', 'header', 'generic', 'release')),
   object_key TEXT NOT NULL UNIQUE,

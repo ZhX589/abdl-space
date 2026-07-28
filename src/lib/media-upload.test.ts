@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { DatabaseSync } from 'node:sqlite'
 import test from 'node:test'
 
 import {
@@ -13,6 +15,36 @@ import {
 
 const mib = 1024 * 1024
 const now = new Date('2026-07-29T23:59:59.000Z')
+
+function assertMediaUploadIdRejectsNull(database: DatabaseSync): void {
+	assert.throws(() => database.exec(`
+		INSERT INTO media_uploads (
+			id, user_id, purpose, object_key, public_url, mime_type,
+			declared_size, storage_provider, expires_at
+		) VALUES (
+			NULL, 1, 'generic', 'generic/1/test.jpg', 'https://example.com/test.jpg',
+			'image/jpeg', 1, 'cos', 1
+		)
+	`), /NOT NULL constraint failed: media_uploads\.id/)
+}
+
+test('rejects NULL media upload IDs in migration and complete schema', () => {
+	const migrationDatabase = new DatabaseSync(':memory:')
+	migrationDatabase.exec(`
+		CREATE TABLE users (id INTEGER PRIMARY KEY);
+		CREATE TABLE post_images (id INTEGER PRIMARY KEY);
+		INSERT INTO users (id) VALUES (1);
+	`)
+	migrationDatabase.exec(readFileSync(new URL('../../migrations/0042_cos_uploads.sql', import.meta.url), 'utf8'))
+	assertMediaUploadIdRejectsNull(migrationDatabase)
+	migrationDatabase.close()
+
+	const schemaDatabase = new DatabaseSync(':memory:')
+	schemaDatabase.exec(readFileSync(new URL('../../schemas/schema.sql', import.meta.url), 'utf8'))
+	schemaDatabase.exec("INSERT INTO users (id, email, password_hash, username) VALUES (1, 'test@example.com', 'hash', 'tester')")
+	assertMediaUploadIdRejectsNull(schemaDatabase)
+	schemaDatabase.close()
+})
 
 test('defines MIME and size policy for every supported upload purpose', () => {
 	assert.deepEqual(getMediaUploadPolicy('status_original'), {
