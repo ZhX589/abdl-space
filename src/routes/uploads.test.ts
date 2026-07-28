@@ -268,6 +268,19 @@ test('complete rejects wrong owners, expired uploads, and failed uploads', async
 	}
 })
 
+test('complete rejects null and array JSON bodies as invalid uploads', async () => {
+	for (const body of ['null', '[]']) {
+		const row = uploadRow()
+		const response = await createApp().request(`/api/v1/uploads/${row.id}/complete`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json', Authorization: await bearer() },
+			body,
+		}, { ...cosEnv, abdl_space_db: createDb([row]) } as never)
+		assert.equal(response.status, 400)
+		assert.equal((await response.json() as { code: string }).code, 'invalid_upload')
+	}
+})
+
 test('complete rejects pending, wrong-purpose, and self-referencing previews', async () => {
 	const original = uploadRow({ purpose: 'status_original', object_key: 'media/original/42/original.jpg', public_url: 'https://media.example.test/original.jpg' })
 	for (const preview of [

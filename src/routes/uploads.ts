@@ -197,11 +197,14 @@ uploads.post('/:id/complete', async (c) => {
 			return c.json({ error: 'Admin access required', code: 'release_forbidden' }, 403)
 		}
 
-		let body: { previewUploadId?: unknown } = {}
+		let body: unknown = {}
 		try {
 			body = await c.req.json()
 		} catch {
 			body = {}
+		}
+		if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+			return c.json({ error: 'Invalid upload request', code: 'invalid_upload' }, 400)
 		}
 		const previewUploadId = typeof body.previewUploadId === 'string' ? body.previewUploadId : undefined
 
