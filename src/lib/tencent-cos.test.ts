@@ -5,6 +5,7 @@ import {
 	buildCosObjectUrl,
 	createCosHeadAuthorization,
 	createCosPutAuthorization,
+	headObjectFromCos,
 	putObjectToCos,
 } from './tencent-cos.ts'
 
@@ -123,6 +124,70 @@ test('throws when COS rejects an object upload', async () => {
 				now,
 			}),
 			/COS PUT failed: 403/,
+		)
+	} finally {
+		globalThis.fetch = originalFetch
+	}
+})
+
+test('checks an object with signed HEAD headers and manual redirects', async () => {
+	const originalFetch = globalThis.fetch
+	let request: { input: string | URL | Request, init?: RequestInit } | undefined
+	globalThis.fetch = async (input, init) => {
+		request = { input, init }
+		return new Response(null, {
+			status: 200,
+			headers: {
+				'Content-Length': '123',
+				'Content-Type': 'image/jpeg',
+				'x-cos-request-id': 'safe-request-id',
+			},
+		})
+	}
+
+	try {
+		const response = await headObjectFromCos({
+			...credentials,
+			objectKey: 'media/a.jpg',
+			contentType: 'image/jpeg',
+			now,
+		})
+
+		assert.equal(response.status, 200)
+		assert.equal(request?.init?.method, 'HEAD')
+		assert.equal(request?.init?.redirect, 'manual')
+		assert.deepEqual(request?.init?.headers, (await createCosHeadAuthorization({
+			...credentials,
+			objectKey: 'media/a.jpg',
+			contentType: 'image/jpeg',
+			now,
+		})).headers)
+	} finally {
+		globalThis.fetch = originalFetch
+	}
+})
+
+test('reports only COS HEAD status and request ID on failure', async () => {
+	const originalFetch = globalThis.fetch
+	globalThis.fetch = async () => new Response(null, {
+		status: 404,
+		headers: { 'x-cos-request-id': 'safe-request-id' },
+	})
+
+	try {
+		await assert.rejects(
+			headObjectFromCos({
+				...credentials,
+				objectKey: 'media/a.jpg',
+				contentType: 'image/jpeg',
+				now,
+			}),
+			(error: Error) => {
+				assert.match(error.message, /COS HEAD failed: 404/)
+				assert.match(error.message, /safe-request-id/)
+				assert.doesNotMatch(error.message, /AKIDEXAMPLEFAKE|q-signature|myqcloud\.com/)
+				return true
+			},
 		)
 	} finally {
 		globalThis.fetch = originalFetch

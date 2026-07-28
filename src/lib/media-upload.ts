@@ -110,7 +110,7 @@ export function buildMediaObjectKey(options: MediaObjectKeyOptions): string {
 	if (!policy.mimeTypes.includes(options.mimeType)) throw new Error('Unsupported upload MIME type')
 	const extension = mimeExtensions[options.mimeType]
 	const date = (options.now ?? new Date()).toISOString().slice(0, 10)
-	const uuid = (options.makeUuid ?? crypto.randomUUID)()
+	const uuid = options.makeUuid ? options.makeUuid() : crypto.randomUUID()
 	if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(uuid)) {
 		throw new Error('Invalid generated upload UUID')
 	}

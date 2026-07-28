@@ -173,6 +173,13 @@ test('generates server-owned keys from purpose, user, UTC date, UUID, and MIME e
 	assert.throws(() => buildMediaObjectKey({ purpose: 'generic', userId: 42, mimeType: 'image/avif', now, makeUuid }), /MIME/i)
 })
 
+test('generates a UUID with the platform crypto implementation by default', () => {
+	assert.match(
+		buildMediaObjectKey({ purpose: 'generic', userId: 42, mimeType: 'image/jpeg', now }),
+		/^generic\/42\/2026-07-29\/[0-9a-f-]{36}\.jpg$/i,
+	)
+})
+
 test('expires upload authorization exactly five minutes after creation', () => {
 	assert.equal(MEDIA_UPLOAD_AUTHORIZATION_TTL_SECONDS, 300)
 	assert.equal(getUploadExpiresAt(now), 1785369899)

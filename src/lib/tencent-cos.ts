@@ -138,3 +138,17 @@ export async function putObjectToCos(options: PutObjectToCosOptions): Promise<Re
 	}
 	return response
 }
+
+export async function headObjectFromCos(options: CosAuthorizationOptions): Promise<Response> {
+	const signed = await createCosHeadAuthorization(options)
+	const response = await fetch(signed.url, {
+		method: 'HEAD',
+		headers: signed.headers,
+		redirect: 'manual',
+	})
+	if (!response.ok) {
+		const requestId = response.headers.get('x-cos-request-id')
+		throw new Error(`COS HEAD failed: ${response.status}${requestId ? ` (request ${requestId})` : ''}`)
+	}
+	return response
+}
