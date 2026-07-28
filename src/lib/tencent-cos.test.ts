@@ -27,11 +27,23 @@ test('creates a stable five-minute PUT authorization bound to content type, host
 		host: 'abdl-1339643562.cos.ap-shanghai.myqcloud.com',
 		expiresAt: 1785312300,
 		headers: {
-			Authorization: 'q-sign-algorithm=sha1&q-ak=AKIDEXAMPLEFAKE&q-sign-time=1785312000;1785312300&q-key-time=1785312000;1785312300&q-header-list=content-type;host&q-url-param-list=&q-signature=61ebdc70ae39a9160d1e0e5d84ed0e00900d31ad',
+			Authorization: 'q-sign-algorithm=sha1&q-ak=AKIDEXAMPLEFAKE&q-sign-time=1785312000;1785312300&q-key-time=1785312000;1785312300&q-header-list=content-type;host&q-url-param-list=&q-signature=a82aa9a46fca15257ba3903d7b7baa459baf5296',
 			'Content-Type': 'image/jpeg',
 			Host: 'abdl-1339643562.cos.ap-shanghai.myqcloud.com',
 		},
 	})
+})
+
+test('signs a decoded Unicode canonical path while keeping the request URL encoded', async () => {
+	const result = await createCosPutAuthorization({
+		...credentials,
+		objectKey: 'media/中文 a.jpg',
+		contentType: 'image/jpeg',
+		now,
+	})
+
+	assert.equal(result.url, 'https://abdl-1339643562.cos.ap-shanghai.myqcloud.com/media/%E4%B8%AD%E6%96%87%20a.jpg')
+	assert.equal(result.headers.Authorization, 'q-sign-algorithm=sha1&q-ak=AKIDEXAMPLEFAKE&q-sign-time=1785312000;1785312300&q-key-time=1785312000;1785312300&q-header-list=content-type;host&q-url-param-list=&q-signature=2f02627bc23545d0f4e55beb43a8c98e04e44119')
 })
 
 test('creates HEAD authorization with a method-specific signature', async () => {
@@ -44,7 +56,7 @@ test('creates HEAD authorization with a method-specific signature', async () => 
 
 	assert.equal(result.expiresAt, 1785312300)
 	assert.equal(result.headers['Content-Type'], 'image/jpeg')
-	assert.equal(result.headers.Authorization, 'q-sign-algorithm=sha1&q-ak=AKIDEXAMPLEFAKE&q-sign-time=1785312000;1785312300&q-key-time=1785312000;1785312300&q-header-list=content-type;host&q-url-param-list=&q-signature=69303e06e707e52032932855bbef0a9252189bc6')
+	assert.equal(result.headers.Authorization, 'q-sign-algorithm=sha1&q-ak=AKIDEXAMPLEFAKE&q-sign-time=1785312000;1785312300&q-key-time=1785312000;1785312300&q-header-list=content-type;host&q-url-param-list=&q-signature=00a32f5aa9b414d3a4cbb65e52a13d8a1a1a895b')
 })
 
 test('builds encoded default and custom public object URLs', () => {

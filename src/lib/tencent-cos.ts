@@ -92,7 +92,7 @@ async function createCosAuthorization(method: 'put' | 'head', options: CosAuthor
 	const signTime = `${start};${expiresAt}`
 	const headerList = 'content-type;host'
 	const canonicalHeaders = `content-type=${encodeRfc3986(options.contentType)}&host=${encodeRfc3986(host)}`
-	const httpString = `${method}\n/${encodedKey}\n\n${canonicalHeaders}\n`
+	const httpString = `${method}\n/${options.objectKey}\n\n${canonicalHeaders}\n`
 	const stringToSign = `sha1\n${signTime}\n${await sha1(httpString)}\n`
 	const signKey = await hmacSha1(options.secretKey, signTime)
 	const signature = await hmacSha1(signKey, stringToSign)
