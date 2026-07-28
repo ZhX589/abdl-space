@@ -333,6 +333,30 @@ CREATE TABLE IF NOT EXISTS message_outbox (
 CREATE INDEX IF NOT EXISTS idx_message_outbox_pending
 ON message_outbox(dispatched_at, next_attempt_at);
 
+-- 媒体上传记录
+CREATE TABLE IF NOT EXISTS media_uploads (
+  id TEXT PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  purpose TEXT NOT NULL CHECK (purpose IN ('status_original', 'status_preview', 'avatar', 'header', 'generic', 'release')),
+  object_key TEXT NOT NULL UNIQUE,
+  public_url TEXT NOT NULL,
+  preview_upload_id TEXT REFERENCES media_uploads(id),
+  preview_object_key TEXT,
+  preview_url TEXT,
+  mime_type TEXT NOT NULL,
+  declared_size INTEGER NOT NULL CHECK (declared_size > 0),
+  verified_size INTEGER CHECK (verified_size IS NULL OR verified_size >= 0),
+  width INTEGER CHECK (width IS NULL OR width > 0),
+  height INTEGER CHECK (height IS NULL OR height > 0),
+  blurhash TEXT,
+  storage_provider TEXT NOT NULL CHECK (storage_provider IN ('cos', 'imgbed')),
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'complete', 'failed')),
+  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  expires_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_media_uploads_user_status ON media_uploads(user_id, status);
+CREATE INDEX IF NOT EXISTS idx_media_uploads_pending_expiry ON media_uploads(status, expires_at);
+
 -- 帖子图片表
 CREATE TABLE IF NOT EXISTS post_images (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -341,6 +365,8 @@ CREATE TABLE IF NOT EXISTS post_images (
   is_nsfw INTEGER DEFAULT 0,
   alt_text TEXT,
   blurhash TEXT,
+  preview_url TEXT,
+  storage_provider TEXT CHECK (storage_provider IS NULL OR storage_provider IN ('cos', 'imgbed')),
   sort_order INTEGER DEFAULT 0,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
