@@ -537,14 +537,17 @@ function formatContent(text: string): string {
   html = html.replace(/(?<!href=")(https?:\/\/[^\s<>]+)/g, '<a href="$1" rel="nofollow noopener noreferrer" target="_blank">$1</a>')
 
   // Convert bare domains with common TLDs
-  html = html.replace(/(?<!href=")(?<!:\/\/)(?<![a-zA-Z0-9])((?:[a-zA-Z0-9][a-zA-Z0-9-]*\.){0,2}[a-zA-Z0-9][a-zA-Z0-9-]+\.)(com|net|org|cn|top|xyz|io|dev|app|co|me|cc|info|edu|gov|club|online|site|tech|store|blog|work|live|video|social|design|shop|icu|ltd|fun|space|host|press|link|buzz|pro|vip|wang|ren)(?:\/[^\s<>]*)?/g, (match, domain, tld) => {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const URL_TLDS = 'com|net|org|cn|top|xyz|io|dev|app|co|me|cc|info|edu|gov|club|online|site|tech|store|blog|work|live|video|social|design|shop|icu|ltd|fun|space|host|press|link|buzz|pro|vip|wang|ren'
+  html = html.replace(/(?<!href=")(?<!:\/\/)(?<![a-zA-Z0-9])((?:[a-zA-Z0-9][a-zA-Z0-9-]*\.){0,2}[a-zA-Z0-9][a-zA-Z0-9-]+\.)(?:${URL_TLDS})(?:\/[^\s<>]*)?/g, (match, domain, tld) => {
     const full = domain + tld
     const rest = match.substring(full.length)
     return `<a href="https://${full}${rest}" rel="nofollow noopener noreferrer" target="_blank">${full}${rest}</a>`
   })
 
   // Convert #hashtags
-  html = html.replace(/(^|[^/\w])#([\w\u4e00-\u9fa5]+)/g, `$1<a href="https://${INSTANCE_DOMAIN}/tags/$2" class="mention hashtag" rel="tag">#<span>$2</span></a>`)
+  // eslint-disable-next-line no-useless-escape
+  html = html.replace(/(^|[^\/\w])#([\w\u4e00-\u9fa5]+)/g, `$1<a href="https://${INSTANCE_DOMAIN}/tags/$2" class="mention hashtag" rel="tag">#<span>$2</span></a>`)
   // Convert @mentions
   html = html.replace(/@([\w\u4e00-\u9fa5]+)/g, `<span class="h-card"><a href="https://${INSTANCE_DOMAIN}/@$1" class="u-url mention" rel="nofollow noopener noreferrer" target="_blank">@<span>$1</span></a></span>`)
 
