@@ -11,10 +11,14 @@ const TRUSTED_MEDIA_HOSTS = new Set([
   'cloudflare-imgbed-790.pages.dev',
 ])
 
-function isTrustedMediaUrl(value: string): boolean {
+function isTrustedMediaUrl(value: string, additionalOrigins: string[] = []): boolean {
   try {
     const url = new URL(value)
-    return url.protocol === 'https:' && TRUSTED_MEDIA_HOSTS.has(url.hostname)
+    if (url.protocol !== 'https:') return false
+    if (TRUSTED_MEDIA_HOSTS.has(url.hostname)) return true
+    return additionalOrigins.some(origin => {
+      try { return new URL(origin).origin === url.origin } catch { return false }
+    })
   } catch {
     return false
   }
@@ -38,16 +42,16 @@ function decodeSource(value: string): string | null {
   }
 }
 
-export function buildMediaPreviewUrl(source: string, apiOrigin = 'https://api.abdl-space.top'): string {
-  if (!isTrustedMediaUrl(source)) return source
+export function buildMediaPreviewUrl(source: string, apiOrigin = 'https://api.abdl-space.top', trustedSource = false): string {
+  if (!trustedSource && !isTrustedMediaUrl(source)) return source
   return `${apiOrigin.replace(/\/$/, '')}${PREVIEW_PATH_PREFIX}${encodeSource(source)}`
 }
 
-export function parseMediaPreviewSource(pathname: string): string | null {
+export function parseMediaPreviewSource(pathname: string, additionalOrigins: string[] = []): string | null {
   if (!pathname.startsWith(PREVIEW_PATH_PREFIX)) return null
   const encoded = pathname.slice(PREVIEW_PATH_PREFIX.length)
   const source = encoded && !encoded.includes('/') ? decodeSource(encoded) : null
-  return source && isTrustedMediaUrl(source) ? source : null
+  return source && isTrustedMediaUrl(source, additionalOrigins) ? source : null
 }
 
 export function calculateMediaPreviewSize(width: number, height: number): { width: number; height: number } | null {
@@ -141,10 +145,10 @@ export function resizeMediaPreview(bytes: Uint8Array): { bytes: Uint8Array; widt
   }
 }
 
-export async function fetchTrustedMediaSource(source: string): Promise<Uint8Array | null> {
+export async function fetchTrustedMediaSource(source: string, additionalOrigins: string[] = []): Promise<Uint8Array | null> {
   let current = source
   for (let redirectCount = 0; redirectCount <= 3; redirectCount++) {
-    if (!isTrustedMediaUrl(current)) return null
+    if (!isTrustedMediaUrl(current, additionalOrigins)) return null
     const response = await fetch(current, { redirect: 'manual' })
     if (response.status >= 300 && response.status < 400) {
       const location = response.headers.get('location')
