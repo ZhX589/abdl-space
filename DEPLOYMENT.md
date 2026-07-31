@@ -27,9 +27,21 @@ npm run deploy
 
 **触发**: `schemas/schema.sql` 有变更（新增表、新字段、新索引、FTS 虚拟表等）
 
+新数据库只执行完整 schema：
+
 ```bash
 npx wrangler d1 execute abdl-space-db --remote --file schemas/schema.sql
 ```
+
+现有数据库只执行当前增量 migration，例如：
+
+```bash
+npx wrangler d1 execute abdl-space-db --remote --file migrations/0042_cos_uploads.sql
+```
+
+> 不要对现有数据库用完整 `schema.sql` 代替增量 migration。`CREATE TABLE IF NOT EXISTS` 不会为已有表增加字段。
+>
+> 生产 D1 的 Wrangler migration 账本可能落后于真实 schema。运行 `wrangler d1 migrations apply --remote` 前必须核对待执行列表；若它包含已实际存在的历史迁移，不得批量 apply，应只执行当前已审查的 SQL 文件。
 
 > `--remote` 操作生产数据库，不加则操作本地。
 
@@ -50,8 +62,10 @@ npx wrangler d1 execute abdl-space-db --remote --file schemas/seeds/<name>.sql
 **触发**: 新增或修改了密钥（如 `JWT_SECRET`、`AI_API_KEY` 等）
 
 ```bash
-echo "your-secret-value" | npx wrangler secret put JWT_SECRET --name abdl-space-api
+npx wrangler secret put JWT_SECRET --name abdl-space-api
 ```
+
+由交互提示安全输入 Secret，不要把 Secret 写入命令参数、shell history、仓库文件或日志。
 
 ## 3. 首次部署完整流程
 
@@ -84,10 +98,21 @@ npx wrangler d1 execute abdl-space-db --remote --file schemas/seeds/diapers.sql
 ### Step 4: 设置 JWT 密钥
 
 ```bash
-echo "your-secret-value" | npx wrangler secret put JWT_SECRET --name abdl-space-api
+npx wrangler secret put JWT_SECRET --name abdl-space-api
 ```
 
-### Step 5: 验证
+### Step 5: 设置 COS 密钥
+
+先在腾讯云 CAM 创建仅允许目标 Bucket 业务目录执行必要 PutObject、HeadObject、DeleteObject 的子账号密钥，再交互设置：
+
+```bash
+npx wrangler secret put COS_SECRET_ID --name abdl-space-api
+npx wrangler secret put COS_SECRET_KEY --name abdl-space-api
+```
+
+已在聊天、日志或其他非 Secret 渠道出现过的密钥必须先轮换，禁止复用。
+
+### Step 6: 验证
 
 ```bash
 curl https://api.abdl-space.top/api/health
