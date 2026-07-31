@@ -55,7 +55,7 @@ export const COMPLETE_ORIGINAL_UPLOAD_SQL = `
 		)
 `
 
-async function canUploadRelease(db: D1Database, auth: NonNullable<Awaited<ReturnType<typeof mastodonAuthDetails>>>): Promise<boolean> {
+export async function canUploadRelease(db: D1Database, auth: NonNullable<Awaited<ReturnType<typeof mastodonAuthDetails>>>): Promise<boolean> {
 	const currentUser = await queryOne<{ role: string }>(db, 'SELECT role FROM users WHERE id = ?', [auth.user.sub])
 	return currentUser?.role === 'admin' && (auth.tokenType === 'jwt' || auth.scopes.includes('admin'))
 }

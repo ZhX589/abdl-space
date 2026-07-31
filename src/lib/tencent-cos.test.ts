@@ -3,8 +3,10 @@ import test from 'node:test'
 
 import {
 	buildCosObjectUrl,
+	createCosDeleteAuthorization,
 	createCosHeadAuthorization,
 	createCosPutAuthorization,
+	deleteObjectFromCos,
 	headObjectFromCos,
 	putObjectToCos,
 } from './tencent-cos.ts'
@@ -195,6 +197,36 @@ test('reports only COS HEAD status and request ID on failure', async () => {
 				return true
 			},
 		)
+	} finally {
+		globalThis.fetch = originalFetch
+	}
+})
+
+test('deletes an object with a method-specific signature and no overwrite header', async () => {
+	const originalFetch = globalThis.fetch
+	let request: { input: string | URL | Request; init?: RequestInit } | undefined
+	globalThis.fetch = async (input, init) => {
+		request = { input, init }
+		return new Response(null, { status: 204 })
+	}
+
+	try {
+		const signed = await createCosDeleteAuthorization({
+			...credentials,
+			objectKey: 'generic/42/a.jpg',
+			contentType: 'image/jpeg',
+			now,
+		})
+		assert.equal(Object.hasOwn(signed.headers, 'x-cos-forbid-overwrite'), false)
+		await deleteObjectFromCos({
+			...credentials,
+			objectKey: 'generic/42/a.jpg',
+			contentType: 'image/jpeg',
+			now,
+		})
+		assert.equal(request?.init?.method, 'DELETE')
+		assert.equal(request?.init?.redirect, 'manual')
+		assert.deepEqual(request?.init?.headers, signed.headers)
 	} finally {
 		globalThis.fetch = originalFetch
 	}

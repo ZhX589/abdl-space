@@ -84,7 +84,7 @@ export function buildCosObjectUrl(objectKey: string, options: CosObjectOptions =
 	return `${origin}/${encodedKey}`
 }
 
-async function createCosAuthorization(method: 'put' | 'head', options: CosAuthorizationOptions): Promise<CosAuthorization> {
+async function createCosAuthorization(method: 'put' | 'head' | 'delete', options: CosAuthorizationOptions): Promise<CosAuthorization> {
 	const encodedKey = encodeObjectKey(options.objectKey)
 	const host = getCosHost(options.bucket, options.region)
 	const start = Math.floor((options.now ?? new Date()).getTime() / 1000)
@@ -127,6 +127,10 @@ export function createCosHeadAuthorization(options: CosAuthorizationOptions): Pr
 	return createCosAuthorization('head', options)
 }
 
+export function createCosDeleteAuthorization(options: CosAuthorizationOptions): Promise<CosAuthorization> {
+	return createCosAuthorization('delete', options)
+}
+
 export async function putObjectToCos(options: PutObjectToCosOptions): Promise<Response> {
 	const signed = await createCosPutAuthorization(options)
 	const response = await fetch(signed.url, {
@@ -151,6 +155,20 @@ export async function headObjectFromCos(options: CosAuthorizationOptions): Promi
 	if (!response.ok) {
 		const requestId = response.headers.get('x-cos-request-id')
 		throw new Error(`COS HEAD failed: ${response.status}${requestId ? ` (request ${requestId})` : ''}`)
+	}
+	return response
+}
+
+export async function deleteObjectFromCos(options: CosAuthorizationOptions): Promise<Response> {
+	const signed = await createCosDeleteAuthorization(options)
+	const response = await fetch(signed.url, {
+		method: 'DELETE',
+		headers: signed.headers,
+		redirect: 'manual',
+	})
+	if (!response.ok) {
+		const requestId = response.headers.get('x-cos-request-id')
+		throw new Error(`COS DELETE failed: ${response.status}${requestId ? ` (request ${requestId})` : ''}`)
 	}
 	return response
 }

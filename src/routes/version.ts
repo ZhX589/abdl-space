@@ -2,7 +2,9 @@ import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import type { Env } from '../types/index.ts'
 import { queryOne, run } from '../lib/db.ts'
-import { authMiddleware } from '../middleware/auth.ts'
+import { mastodonAuthDetails } from '../mastodon/shared.ts'
+import { getCompletedUploadReference, uploadLegacyObject } from '../lib/upload-consumer.ts'
+import { canUploadRelease } from './uploads.ts'
 
 type AppType = { Bindings: Env }
 
@@ -15,7 +17,11 @@ version.use('*', cors({
   allowHeaders: ['Content-Type', 'Authorization', 'X-Upload-Key'],
 }))
 
-const IMGBED_HOST = 'https://img.abdl-space.top'
+const IMGBED_FALLBACK_HEADER = 'X-ABDL-Upload-Fallback'
+
+export function resolveReleaseUpload(db: D1Database, reference: string, userId: number) {
+  return getCompletedUploadReference(db, reference, userId, 'release')
+}
 
 /**
  * GET /api/v1/version — 获取最新版本信息
@@ -58,6 +64,9 @@ version.get('/', async (c) => {
 version.post('/upload', async (c) => {
   try {
   const db = c.env.abdl_space_db
+  const auth = await mastodonAuthDetails(c)
+  if (!auth) return c.json({ error: 'Authentication required' }, 401)
+  if (!await canUploadRelease(db, auth)) return c.json({ error: 'Admin access required' }, 403)
 
   let versionName = ''
   let versionCode = 0
@@ -65,6 +74,7 @@ version.post('/upload', async (c) => {
   let apkUrl = ''
   let apkSize = 0
   let apk: File | null = null
+  let uploadId = ''
 
   const contentType = c.req.header('Content-Type') || ''
 
@@ -74,33 +84,12 @@ version.post('/upload', async (c) => {
     versionCode = parseInt(formData.get('versionCode') as string) || 0
     changelog = formData.get('changelog') as string || ''
 
-    const apk = formData.get('apk')
-    if (apk && apk instanceof File) {
-      const uploadForm = new FormData()
-      uploadForm.append('file', apk)
-
-      let res = await fetch(`${IMGBED_HOST}/upload?returnFormat=full&uploadFolder=apk`, {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${c.env.IMGBED_UPLOAD_KEY}` },
-        body: uploadForm,
-      })
-
-      if (!res.ok && c.env.IMGBED_UPLOAD_KEY) {
-        const uploadForm2 = new FormData()
-        uploadForm2.append('file', apk)
-        res = await fetch(`${IMGBED_HOST}/upload?returnFormat=full&uploadFolder=apk&authCode=${c.env.IMGBED_UPLOAD_KEY}`, {
-          method: 'POST',
-          body: uploadForm2,
-        })
-      }
-
-      if (!res.ok) {
-        return c.json({ error: 'APK 上传失败' }, 500)
-      }
-
-      const data = await res.json() as { src: string }[]
-      apkUrl = data[0]?.src || ''
-      if (!apkUrl) return c.json({ error: 'APK 上传返回为空' }, 500)
+    apk = formData.get('apk') instanceof File ? formData.get('apk') as File : null
+    if (apk) {
+      const upload = await uploadLegacyObject(c.env, auth.user.sub, 'release', apk, c.req.header(IMGBED_FALLBACK_HEADER) === 'imgbed')
+      uploadId = upload.id
+      apkUrl = upload.public_url
+      apkSize = upload.verified_size || upload.declared_size
     }
   } else {
     try {
@@ -108,9 +97,11 @@ version.post('/upload', async (c) => {
       versionName = body.versionName || ''
       versionCode = body.versionCode || 0
       changelog = body.changelog || ''
-      apkUrl = body.apkUrl || ''
-      apkSize = body.apkSize || 0
-    } catch (e) {
+      uploadId = body.upload_id || ''
+      const upload = await resolveReleaseUpload(db, uploadId, auth.user.sub)
+      apkUrl = upload.public_url
+      apkSize = upload.verified_size || upload.declared_size
+    } catch {
       return c.json({ error: 'Invalid JSON body' }, 400)
     }
   }
@@ -133,7 +124,8 @@ version.post('/upload', async (c) => {
     downloadUrl: apkUrl,
     changelog,
     releasedAt: new Date().toISOString(),
-    apkSize: apk ? apk.size : apkSize,
+    apkSize,
+    uploadId,
   })
 
   await run(db,
@@ -147,10 +139,11 @@ version.post('/upload', async (c) => {
     versionName,
     versionCode,
     downloadUrl: apkUrl,
+    uploadId,
     message: '版本更新成功',
   })
-  } catch (e) {
-    return c.json({ error: String(e) }, 500)
+  } catch {
+    return c.json({ error: '版本更新失败' }, 500)
   }
 })
 

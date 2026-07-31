@@ -2,12 +2,17 @@ import { Hono } from 'hono'
 import type { Env, JWTPayload, UpdateUserRequest } from '../types/index.ts'
 import { query, queryOne, run } from '../lib/db.ts'
 import { authMiddleware } from '../middleware/auth.ts'
+import { getCompletedUploadReference } from '../lib/upload-consumer.ts'
 
 const DEFAULT_AVATAR = 'https://img.abdl-space.top/file/system/1781439303787_play_store_512.png'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
 const users = new Hono<AppType>()
+
+export function resolveUserAvatarUpload(db: D1Database, reference: string, userId: number) {
+  return getCompletedUploadReference(db, reference, userId, 'avatar')
+}
 
 const LEVEL_TABLE = [
   { level: 1, exp: 0, badge_name: '婴儿奶瓶', badge_icon: '🍼' },
@@ -111,11 +116,18 @@ users.patch('/me', authMiddleware, async (c) => {
   const params: unknown[] = []
 
   if (body.avatar !== undefined) {
-    if (typeof body.avatar === 'string' && body.avatar.length > 2048) {
-      return c.json({ error: 'Avatar URL must be 2048 characters or less' }, 400)
+    if (body.avatar === null || body.avatar === '') {
+      updates.push('avatar = ?')
+      params.push('')
+    } else {
+      try {
+        const upload = await resolveUserAvatarUpload(c.env.abdl_space_db, String(body.avatar), user.sub)
+        updates.push('avatar = ?')
+        params.push(upload.public_url)
+      } catch {
+        return c.json({ error: 'Invalid avatar upload' }, 400)
+      }
     }
-    updates.push('avatar = ?')
-    params.push(body.avatar)
   }
   if (body.age !== undefined) {
     if (body.age !== null && (typeof body.age !== 'number' || body.age < 1 || body.age > 150)) {

@@ -22,6 +22,8 @@ import { generateBlurhash, sanitizeBlurhash } from '../lib/blurhash.ts'
 import { buildMediaPreviewUrl, canonicalMediaPreviewCacheUrl, fetchTrustedMediaSource, inspectMediaImageDimensions, parseMediaPreviewSource, resizeMediaPreview } from '../lib/media-preview.ts'
 import { buildMediaObjectKey, validateMediaUpload } from '../lib/media-upload.ts'
 import { buildCosObjectUrl, putObjectToCos } from '../lib/tencent-cos.ts'
+import { getCompletedUploadReference, uploadLegacyObject } from '../lib/upload-consumer.ts'
+import type { MediaUploadPurpose } from '../lib/media-upload.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
@@ -212,6 +214,15 @@ export async function insertStatusMedia(db: D1Database, postId: number, media: R
       postId, item.imageUrl, item.previewUrl, item.storageProvider, isNsfw, sortOrder, item.altText, item.blurhash,
     ])
   }
+}
+
+export function resolveProfileImageUpload(db: D1Database, reference: string, userId: number, purpose: Extract<MediaUploadPurpose, 'avatar' | 'header'>) {
+  return getCompletedUploadReference(db, reference, userId, purpose)
+}
+
+export async function resolveOptionalProfileImageUpload(db: D1Database, reference: unknown, userId: number, purpose: Extract<MediaUploadPurpose, 'avatar' | 'header'>): Promise<string> {
+  if (reference === null || reference === '') return ''
+  return (await resolveProfileImageUpload(db, String(reference), userId, purpose)).public_url
 }
 
 export async function resolveMediaAttachment(db: D1Database, rawMediaId: string, userId: number, options: StatusMediaOptions = {}) {
@@ -544,57 +555,39 @@ mastodon.patch('/accounts/update_credentials', async (c) => {
   }
   if (body.avatar !== undefined) {
     if (body.avatar instanceof File) {
-      const uploadForm = new FormData()
-      uploadForm.append('file', body.avatar)
-      let res = await fetch(`${IMGBED_HOST}/upload?returnFormat=full`, {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${c.env.IMGBED_UPLOAD_KEY}` },
-        body: uploadForm,
-      })
-      if (!res.ok && c.env.IMGBED_UPLOAD_KEY) {
-        const uploadForm2 = new FormData()
-        uploadForm2.append('file', body.avatar)
-        res = await fetch(`${IMGBED_HOST}/upload?returnFormat=full&authCode=${c.env.IMGBED_UPLOAD_KEY}`, {
-          method: 'POST',
-          body: uploadForm2,
-        })
-      }
-      if (res.ok) {
-        const data = await res.json() as { src: string }[]
-        const url = data[0]?.src
-        if (url) { updates.push('avatar = ?'); params.push(url) }
-      }
-    } else {
+      const bytes = new Uint8Array(await body.avatar.arrayBuffer())
+      const dimensions = inspectMediaImageDimensions(bytes)
+      if (!dimensions) return c.json({ error: 'invalid avatar image' }, 400)
+      const upload = await uploadLegacyObject(c.env, user.sub, 'avatar', body.avatar, shouldUseImgbedFallback(c.req.header(IMGBED_FALLBACK_HEADER)), dimensions)
       updates.push('avatar = ?')
-      params.push(String(body.avatar))
+      params.push(upload.public_url)
+    } else {
+      try {
+        const url = await resolveOptionalProfileImageUpload(c.env.abdl_space_db, body.avatar, user.sub, 'avatar')
+        updates.push('avatar = ?')
+        params.push(url)
+      } catch {
+        return c.json({ error: 'invalid avatar upload' }, 400)
+      }
     }
   }
 
   if (body.header !== undefined) {
     if (body.header instanceof File) {
-      const uploadForm = new FormData()
-      uploadForm.append('file', body.header)
-      let res = await fetch(`${IMGBED_HOST}/upload?returnFormat=full`, {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${c.env.IMGBED_UPLOAD_KEY}` },
-        body: uploadForm,
-      })
-      if (!res.ok && c.env.IMGBED_UPLOAD_KEY) {
-        const uploadForm2 = new FormData()
-        uploadForm2.append('file', body.header)
-        res = await fetch(`${IMGBED_HOST}/upload?returnFormat=full&authCode=${c.env.IMGBED_UPLOAD_KEY}`, {
-          method: 'POST',
-          body: uploadForm2,
-        })
-      }
-      if (res.ok) {
-        const data = await res.json() as { src: string }[]
-        const url = data[0]?.src
-        if (url) { updates.push('header = ?'); params.push(url) }
-      }
-    } else {
+      const bytes = new Uint8Array(await body.header.arrayBuffer())
+      const dimensions = inspectMediaImageDimensions(bytes)
+      if (!dimensions) return c.json({ error: 'invalid header image' }, 400)
+      const upload = await uploadLegacyObject(c.env, user.sub, 'header', body.header, shouldUseImgbedFallback(c.req.header(IMGBED_FALLBACK_HEADER)), dimensions)
       updates.push('header = ?')
-      params.push(String(body.header))
+      params.push(upload.public_url)
+    } else {
+      try {
+        const url = await resolveOptionalProfileImageUpload(c.env.abdl_space_db, body.header, user.sub, 'header')
+        updates.push('header = ?')
+        params.push(url)
+      } catch {
+        return c.json({ error: 'invalid header upload' }, 400)
+      }
     }
   }
 
