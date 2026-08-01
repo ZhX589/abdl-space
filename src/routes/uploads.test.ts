@@ -181,13 +181,15 @@ async function complete(id: string, body: Record<string, unknown> = {}, options:
 	}, { ...cosEnv, abdl_space_db: options.db } as never)
 }
 
-async function withHead(response: Response, callback: () => Promise<void>): Promise<void> {
+async function withHead(response: Response, objectKey: string, callback: () => Promise<void>): Promise<void> {
 	const originalFetch = globalThis.fetch
 	let calls = 0
-	globalThis.fetch = async (_input, init) => {
+	globalThis.fetch = async (input, init) => {
 		calls++
+		assert.equal(input, `https://${cosEnv.COS_BUCKET}.cos.${cosEnv.COS_REGION}.myqcloud.com/${objectKey}`)
 		assert.equal(init?.method, 'HEAD')
 		assert.equal(init?.redirect, 'manual')
+		assert.equal(init?.headers, undefined)
 		return response
 	}
 	try {
@@ -195,7 +197,7 @@ async function withHead(response: Response, callback: () => Promise<void>): Prom
 	} finally {
 		globalThis.fetch = originalFetch
 	}
-	assert.ok(calls >= 0)
+	assert.equal(calls, 1)
 }
 
 test('authorize rejects unauthenticated requests', async () => {
@@ -356,7 +358,7 @@ test('complete rejects HEAD 404, size mismatch, and normalized type mismatch', a
 	for (const [headResponse, expected] of cases) {
 		const row = uploadRow()
 		const db = createDb([row])
-		await withHead(headResponse, async () => {
+		await withHead(headResponse, row.object_key, async () => {
 			assert.equal((await complete(row.id, {}, { db })).status, expected)
 		})
 	}
@@ -366,7 +368,7 @@ test('complete accepts an expired completed preview when the original is still p
 	const preview = uploadRow({ purpose: 'status_preview', status: 'complete', verified_size: 50, expires_at: Math.floor(Date.now() / 1000) - 30, mime_type: 'image/webp' })
 	const original = uploadRow({ purpose: 'status_original' })
 	const db = createDb([preview, original])
-	await withHead(new Response(null, { status: 200, headers: { 'Content-Length': '123', 'Content-Type': 'image/jpeg' } }), async () => {
+	await withHead(new Response(null, { status: 200, headers: { 'Content-Length': '123', 'Content-Type': 'image/jpeg' } }), original.object_key, async () => {
 		assert.equal((await complete(original.id, { preview_upload_id: preview.id }, { db })).status, 200)
 	})
 })
@@ -375,10 +377,10 @@ test('complete verifies preview then atomically links it when completing an orig
 	const preview = uploadRow({ purpose: 'status_preview', object_key: 'media/preview/42/preview.webp', public_url: 'https://media.example.test/preview.webp', mime_type: 'image/webp', declared_size: 50, width: 540, height: 360 })
 	const original = uploadRow({ purpose: 'status_original', object_key: 'media/original/42/original.jpg', public_url: 'https://media.example.test/original.jpg' })
 	const db = createDb([preview, original])
-	await withHead(new Response(null, { status: 200, headers: { 'Content-Length': '50', 'Content-Type': 'image/webp; charset=binary' } }), async () => {
+	await withHead(new Response(null, { status: 200, headers: { 'Content-Length': '50', 'Content-Type': 'image/webp; charset=binary' } }), preview.object_key, async () => {
 		assert.equal((await complete(preview.id, {}, { db })).status, 200)
 	})
-	await withHead(new Response(null, { status: 200, headers: { 'Content-Length': '123', 'Content-Type': 'IMAGE/JPEG' } }), async () => {
+	await withHead(new Response(null, { status: 200, headers: { 'Content-Length': '123', 'Content-Type': 'IMAGE/JPEG' } }), original.object_key, async () => {
 		const response = await complete(original.id, { preview_upload_id: preview.id }, { db })
 		assert.equal(response.status, 200, await response.clone().text())
 		assert.deepEqual(await response.json(), {
@@ -457,7 +459,7 @@ test('complete changes=0 reread rejects a concurrently linked different preview'
 		current.preview_object_key = concurrentPreview.object_key
 		current.preview_url = concurrentPreview.public_url
 	})
-	await withHead(new Response(null, { status: 200, headers: { 'Content-Length': '123', 'Content-Type': 'image/jpeg' } }), async () => {
+	await withHead(new Response(null, { status: 200, headers: { 'Content-Length': '123', 'Content-Type': 'image/jpeg' } }), original.object_key, async () => {
 		assert.equal((await complete(original.id, { preview_upload_id: requestedPreview.id }, { db })).status, 409)
 	})
 })
@@ -471,7 +473,7 @@ test('complete returns the preview key and URL copied by the atomic update', asy
 		current.object_key = 'media/preview/42/current.webp'
 		current.public_url = 'https://media.example.test/current.webp'
 	})
-	await withHead(new Response(null, { status: 200, headers: { 'Content-Length': '123', 'Content-Type': 'image/jpeg' } }), async () => {
+	await withHead(new Response(null, { status: 200, headers: { 'Content-Length': '123', 'Content-Type': 'image/jpeg' } }), original.object_key, async () => {
 		const response = await complete(original.id, { preview_upload_id: preview.id }, { db })
 		assert.equal(response.status, 200)
 		assert.equal((await response.json() as Record<string, unknown>).preview_url, 'https://media.example.test/current.webp')
