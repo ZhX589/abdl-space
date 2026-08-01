@@ -256,7 +256,12 @@ uploads.post('/:id/complete', async (c) => {
 				objectKey: upload.object_key,
 				contentType: upload.mime_type,
 			})
-		} catch {
+		} catch (error) {
+			console.error('COS upload verification failed', {
+				uploadId: upload.id,
+				purpose: upload.purpose,
+				error: error instanceof Error ? error.message : 'Unknown COS HEAD error',
+			})
 			return c.json({ error: 'COS object verification failed', code: 'cos_head_failed' }, 502)
 		}
 
