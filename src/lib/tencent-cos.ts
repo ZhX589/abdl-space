@@ -91,8 +91,10 @@ async function createCosAuthorization(method: 'put' | 'head' | 'delete', options
 	const expiresAt = start + AUTHORIZATION_TTL_SECONDS
 	const signTime = `${start};${expiresAt}`
 	const forbidOverwrite = method === 'put'
-	const headerList = forbidOverwrite ? 'content-type;host;x-cos-forbid-overwrite' : 'content-type;host'
-	const canonicalHeaders = `content-type=${encodeRfc3986(options.contentType)}&host=${encodeRfc3986(host)}${forbidOverwrite ? '&x-cos-forbid-overwrite=true' : ''}`
+	const headerList = forbidOverwrite ? 'content-type;host;x-cos-forbid-overwrite' : 'host'
+	const canonicalHeaders = forbidOverwrite
+		? `content-type=${encodeRfc3986(options.contentType)}&host=${encodeRfc3986(host)}&x-cos-forbid-overwrite=true`
+		: `host=${encodeRfc3986(host)}`
 	const httpString = `${method}\n/${options.objectKey}\n\n${canonicalHeaders}\n`
 	const stringToSign = `sha1\n${signTime}\n${await sha1(httpString)}\n`
 	const signKey = await hmacSha1(options.secretKey, signTime)
@@ -113,7 +115,7 @@ async function createCosAuthorization(method: 'put' | 'head' | 'delete', options
 		expiresAt,
 		headers: {
 			Authorization: authorization,
-			'Content-Type': options.contentType,
+			...(method === 'put' ? { 'Content-Type': options.contentType } : {}),
 			...(forbidOverwrite ? { 'x-cos-forbid-overwrite': 'true' as const } : {}),
 		},
 	}

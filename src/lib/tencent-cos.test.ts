@@ -59,9 +59,9 @@ test('creates HEAD authorization with a method-specific signature', async () => 
 	})
 
 	assert.equal(result.expiresAt, 1785312300)
-	assert.equal(result.headers['Content-Type'], 'image/jpeg')
+	assert.equal(Object.hasOwn(result.headers, 'Content-Type'), false)
 	assert.equal(Object.hasOwn(result.headers, 'x-cos-forbid-overwrite'), false)
-	assert.equal(result.headers.Authorization, 'q-sign-algorithm=sha1&q-ak=AKIDEXAMPLEFAKE&q-sign-time=1785312000;1785312300&q-key-time=1785312000;1785312300&q-header-list=content-type;host&q-url-param-list=&q-signature=00a32f5aa9b414d3a4cbb65e52a13d8a1a1a895b')
+	assert.match(result.headers.Authorization, /q-header-list=host(?:&|$)/)
 })
 
 test('builds encoded default and custom public object URLs', () => {
@@ -164,6 +164,7 @@ test('checks an object with signed HEAD headers and manual redirects', async () 
 		assert.equal(request?.init?.method, 'HEAD')
 		assert.equal(request?.init?.redirect, 'manual')
 		assert.equal(Object.hasOwn(request?.init?.headers ?? {}, 'Host'), false)
+		assert.equal(Object.hasOwn(request?.init?.headers ?? {}, 'Content-Type'), false)
 		assert.deepEqual(request?.init?.headers, (await createCosHeadAuthorization({
 			...credentials,
 			objectKey: 'media/a.jpg',
@@ -218,6 +219,8 @@ test('deletes an object with a method-specific signature and no overwrite header
 			now,
 		})
 		assert.equal(Object.hasOwn(signed.headers, 'x-cos-forbid-overwrite'), false)
+		assert.equal(Object.hasOwn(signed.headers, 'Content-Type'), false)
+		assert.match(signed.headers.Authorization, /q-header-list=host(?:&|$)/)
 		await deleteObjectFromCos({
 			...credentials,
 			objectKey: 'generic/42/a.jpg',
