@@ -148,10 +148,8 @@ export async function putObjectToCos(options: PutObjectToCosOptions): Promise<Re
 }
 
 export async function headObjectFromCos(options: CosAuthorizationOptions): Promise<Response> {
-	const signed = await createCosHeadAuthorization(options)
-	const response = await fetch(signed.url, {
+	const response = await fetch(buildCosObjectUrl(options.objectKey, options), {
 		method: 'HEAD',
-		headers: signed.headers,
 		redirect: 'manual',
 	})
 	if (!response.ok) {

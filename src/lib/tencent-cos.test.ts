@@ -137,7 +137,7 @@ test('throws when COS rejects an object upload', async () => {
 	}
 })
 
-test('checks an object with signed HEAD headers and manual redirects', async () => {
+test('checks a public object without authorization and with manual redirects', async () => {
 	const originalFetch = globalThis.fetch
 	let request: { input: string | URL | Request, init?: RequestInit } | undefined
 	globalThis.fetch = async (input, init) => {
@@ -155,6 +155,7 @@ test('checks an object with signed HEAD headers and manual redirects', async () 
 	try {
 		const response = await headObjectFromCos({
 			...credentials,
+			bucket: 'abdl-123',
 			objectKey: 'media/a.jpg',
 			contentType: 'image/jpeg',
 			now,
@@ -163,14 +164,8 @@ test('checks an object with signed HEAD headers and manual redirects', async () 
 		assert.equal(response.status, 200)
 		assert.equal(request?.init?.method, 'HEAD')
 		assert.equal(request?.init?.redirect, 'manual')
-		assert.equal(Object.hasOwn(request?.init?.headers ?? {}, 'Host'), false)
-		assert.equal(Object.hasOwn(request?.init?.headers ?? {}, 'Content-Type'), false)
-		assert.deepEqual(request?.init?.headers, (await createCosHeadAuthorization({
-			...credentials,
-			objectKey: 'media/a.jpg',
-			contentType: 'image/jpeg',
-			now,
-		})).headers)
+		assert.equal(request?.input, 'https://abdl-123.cos.ap-shanghai.myqcloud.com/media/a.jpg')
+		assert.equal(request?.init?.headers, undefined)
 	} finally {
 		globalThis.fetch = originalFetch
 	}
