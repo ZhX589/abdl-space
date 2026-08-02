@@ -2,9 +2,7 @@ import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import type { Env } from '../types/index.ts'
 import { queryOne, run } from '../lib/db.ts'
-import { mastodonAuthDetails } from '../mastodon/shared.ts'
-import { getCompletedUploadReference, uploadLegacyObject } from '../lib/upload-consumer.ts'
-import { canUploadRelease } from './uploads.ts'
+import { getCompletedUploadReference } from '../lib/upload-consumer.ts'
 
 type AppType = { Bindings: Env }
 
@@ -17,7 +15,7 @@ version.use('*', cors({
   allowHeaders: ['Content-Type', 'Authorization', 'X-Upload-Key'],
 }))
 
-const IMGBED_FALLBACK_HEADER = 'X-ABDL-Upload-Fallback'
+const IMGBED_HOST = 'https://img.abdl-space.top'
 
 export function resolveReleaseUpload(db: D1Database, reference: string, userId: number) {
   return getCompletedUploadReference(db, reference, userId, 'release')
@@ -64,9 +62,6 @@ version.get('/', async (c) => {
 version.post('/upload', async (c) => {
   try {
   const db = c.env.abdl_space_db
-  const auth = await mastodonAuthDetails(c)
-  if (!auth) return c.json({ error: 'Authentication required' }, 401)
-  if (!await canUploadRelease(db, auth)) return c.json({ error: 'Admin access required' }, 403)
 
   let versionName = ''
   let versionCode = 0
@@ -74,7 +69,6 @@ version.post('/upload', async (c) => {
   let apkUrl = ''
   let apkSize = 0
   let apk: File | null = null
-  let uploadId = ''
 
   const contentType = c.req.header('Content-Type') || ''
 
@@ -86,10 +80,25 @@ version.post('/upload', async (c) => {
 
     apk = formData.get('apk') instanceof File ? formData.get('apk') as File : null
     if (apk) {
-      const upload = await uploadLegacyObject(c.env, auth.user.sub, 'release', apk, c.req.header(IMGBED_FALLBACK_HEADER) === 'imgbed')
-      uploadId = upload.id
-      apkUrl = upload.public_url
-      apkSize = upload.verified_size || upload.declared_size
+      const uploadForm = new FormData()
+      uploadForm.append('file', apk)
+      let response = await fetch(`${IMGBED_HOST}/upload?returnFormat=full&uploadFolder=apk`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${c.env.IMGBED_UPLOAD_KEY}` },
+        body: uploadForm,
+      })
+      if (!response.ok && c.env.IMGBED_UPLOAD_KEY) {
+        const retryForm = new FormData()
+        retryForm.append('file', apk)
+        response = await fetch(`${IMGBED_HOST}/upload?returnFormat=full&uploadFolder=apk&authCode=${encodeURIComponent(c.env.IMGBED_UPLOAD_KEY)}`, {
+          method: 'POST',
+          body: retryForm,
+        })
+      }
+      if (!response.ok) return c.json({ error: 'APK 上传失败' }, 500)
+      const data = await response.json() as { src?: string }[]
+      apkUrl = data[0]?.src || ''
+      apkSize = apk.size
     }
   } else {
     try {
@@ -97,10 +106,8 @@ version.post('/upload', async (c) => {
       versionName = body.versionName || ''
       versionCode = body.versionCode || 0
       changelog = body.changelog || ''
-      uploadId = body.upload_id || ''
-      const upload = await resolveReleaseUpload(db, uploadId, auth.user.sub)
-      apkUrl = upload.public_url
-      apkSize = upload.verified_size || upload.declared_size
+      apkUrl = body.apkUrl || ''
+      apkSize = body.apkSize || 0
     } catch {
       return c.json({ error: 'Invalid JSON body' }, 400)
     }
@@ -125,7 +132,6 @@ version.post('/upload', async (c) => {
     changelog,
     releasedAt: new Date().toISOString(),
     apkSize,
-    uploadId,
   })
 
   await run(db,
@@ -139,7 +145,6 @@ version.post('/upload', async (c) => {
     versionName,
     versionCode,
     downloadUrl: apkUrl,
-    uploadId,
     message: '版本更新成功',
   })
   } catch {

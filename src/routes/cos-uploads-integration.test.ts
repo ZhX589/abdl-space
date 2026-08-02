@@ -110,17 +110,48 @@ test('version publishing consumes only completed release uploads and verified si
 	sqlite.close()
 })
 
-test('version publishing rejects unauthenticated arbitrary APK URLs before database writes', async () => {
+test('version publishing anonymously uploads APK files to the legacy imgbed distribution', async () => {
 	const app = new Hono()
 	app.route('/api/v1/version', version)
-	const response = await app.request('/api/v1/version/upload', {
-		method: 'POST',
-		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify({
-			versionName: '9.9.9',
-			versionCode: 999,
-			apkUrl: 'https://attacker.example/app.apk',
-		}),
-	}, { JWT_SECRET: 'test-secret', abdl_space_db: d1(database()) } as never)
-	assert.equal(response.status, 401)
+	const sqlite = database()
+	const originalFetch = globalThis.fetch
+	let uploadUrl = ''
+	globalThis.fetch = async input => {
+		uploadUrl = String(input)
+		return Response.json([{ src: 'https://img.abdl-space.top/file/apk/app.apk' }])
+	}
+	try {
+		const form = new FormData()
+		form.append('apk', new File([new Uint8Array([1, 2, 3])], 'app.apk', { type: 'application/vnd.android.package-archive' }))
+		form.append('versionName', '2.4.0')
+		form.append('versionCode', '22')
+		form.append('changelog', '提升图片上传与图片加载速度')
+		const response = await app.request('/api/v1/version/upload', { method: 'POST', body: form }, {
+			IMGBED_UPLOAD_KEY: 'test-key',
+			abdl_space_db: d1(sqlite),
+		} as never)
+		assert.equal(response.status, 200, await response.clone().text())
+		assert.equal(uploadUrl, 'https://img.abdl-space.top/upload?returnFormat=full&uploadFolder=apk')
+		assert.deepEqual(await response.json(), {
+			success: true,
+			versionName: '2.4.0',
+			versionCode: 22,
+			downloadUrl: 'https://img.abdl-space.top/file/apk/app.apk',
+			message: '版本更新成功',
+		})
+		const stored = sqlite.prepare("SELECT value FROM kv_store WHERE key = 'app_version_latest'").get() as { value: string }
+		const storedVersion = JSON.parse(stored.value)
+		assert.equal(typeof storedVersion.releasedAt, 'string')
+		delete storedVersion.releasedAt
+		assert.deepEqual(storedVersion, {
+			versionName: '2.4.0',
+			versionCode: 22,
+			downloadUrl: 'https://img.abdl-space.top/file/apk/app.apk',
+			changelog: '提升图片上传与图片加载速度',
+			apkSize: 3,
+		})
+	} finally {
+		globalThis.fetch = originalFetch
+		sqlite.close()
+	}
 })
