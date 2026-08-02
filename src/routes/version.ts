@@ -108,8 +108,9 @@ version.post('/upload', async (c) => {
         upstreamStatuses.push(response.status)
       }
       if (!response.ok) return c.json({ error: 'APK 上传失败', upstream_statuses: upstreamStatuses }, 502)
-      const data = await response.json() as { src?: string }[]
-      apkUrl = data[0]?.src || ''
+      const data = await response.json() as { src?: string; url?: string } | { src?: string; url?: string }[]
+      const uploaded = Array.isArray(data) ? data[0] : data
+      apkUrl = uploaded?.src || uploaded?.url || ''
       apkSize = apk.size
     }
   } else {
