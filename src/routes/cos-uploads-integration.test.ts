@@ -155,3 +155,26 @@ test('version publishing anonymously uploads APK files to the legacy imgbed dist
 		sqlite.close()
 	}
 })
+
+test('version publishing reports both imgbed authentication failure statuses', async () => {
+	const app = new Hono()
+	app.route('/api/v1/version', version)
+	const sqlite = database()
+	const originalFetch = globalThis.fetch
+	globalThis.fetch = async () => new Response('Unauthorized', { status: 401 })
+	try {
+		const form = new FormData()
+		form.append('apk', new File([new Uint8Array([1])], 'app.apk', { type: 'application/vnd.android.package-archive' }))
+		form.append('versionName', '2.4.0')
+		form.append('versionCode', '22')
+		const response = await app.request('/api/v1/version/upload', { method: 'POST', body: form }, {
+			IMGBED_UPLOAD_KEY: 'stale-key',
+			abdl_space_db: d1(sqlite),
+		} as never)
+		assert.equal(response.status, 502)
+		assert.deepEqual(await response.json(), { error: 'APK 上传失败', upstream_statuses: [401, 401] })
+	} finally {
+		globalThis.fetch = originalFetch
+		sqlite.close()
+	}
+})

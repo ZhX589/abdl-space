@@ -87,6 +87,7 @@ version.post('/upload', async (c) => {
         headers: { Authorization: `Bearer ${c.env.IMGBED_UPLOAD_KEY}` },
         body: uploadForm,
       })
+      const upstreamStatuses = [response.status]
       if (!response.ok && c.env.IMGBED_UPLOAD_KEY) {
         const retryForm = new FormData()
         retryForm.append('file', apk)
@@ -94,8 +95,9 @@ version.post('/upload', async (c) => {
           method: 'POST',
           body: retryForm,
         })
+        upstreamStatuses.push(response.status)
       }
-      if (!response.ok) return c.json({ error: 'APK 上传失败' }, 500)
+      if (!response.ok) return c.json({ error: 'APK 上传失败', upstream_statuses: upstreamStatuses }, 502)
       const data = await response.json() as { src?: string }[]
       apkUrl = data[0]?.src || ''
       apkSize = apk.size
