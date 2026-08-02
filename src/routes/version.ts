@@ -97,6 +97,16 @@ version.post('/upload', async (c) => {
         })
         upstreamStatuses.push(response.status)
       }
+      if (!response.ok && c.env.IMGBED_UPLOAD_KEY) {
+        const headerForm = new FormData()
+        headerForm.append('file', apk)
+        response = await fetch(`${IMGBED_HOST}/upload?returnFormat=full&uploadFolder=apk`, {
+          method: 'POST',
+          headers: { authCode: c.env.IMGBED_UPLOAD_KEY },
+          body: headerForm,
+        })
+        upstreamStatuses.push(response.status)
+      }
       if (!response.ok) return c.json({ error: 'APK 上传失败', upstream_statuses: upstreamStatuses }, 502)
       const data = await response.json() as { src?: string }[]
       apkUrl = data[0]?.src || ''

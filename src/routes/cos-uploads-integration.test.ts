@@ -156,7 +156,7 @@ test('version publishing anonymously uploads APK files to the legacy imgbed dist
 	}
 })
 
-test('version publishing reports both imgbed authentication failure statuses', async () => {
+test('version publishing reports all imgbed authentication failure statuses', async () => {
 	const app = new Hono()
 	app.route('/api/v1/version', version)
 	const sqlite = database()
@@ -172,7 +172,7 @@ test('version publishing reports both imgbed authentication failure statuses', a
 			abdl_space_db: d1(sqlite),
 		} as never)
 		assert.equal(response.status, 502)
-		assert.deepEqual(await response.json(), { error: 'APK 上传失败', upstream_statuses: [401, 401] })
+		assert.deepEqual(await response.json(), { error: 'APK 上传失败', upstream_statuses: [401, 401, 401] })
 	} finally {
 		globalThis.fetch = originalFetch
 		sqlite.close()
