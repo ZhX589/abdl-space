@@ -116,8 +116,10 @@ test('version publishing anonymously uploads APK files to the legacy imgbed dist
 	const sqlite = database()
 	const originalFetch = globalThis.fetch
 	let uploadUrl = ''
-	globalThis.fetch = async input => {
+	let uploadedSha256 = ''
+	globalThis.fetch = async (input, init) => {
 		uploadUrl = String(input)
+		uploadedSha256 = String((init?.body as FormData).get('sha256'))
 		return Response.json([{ src: 'https://img.abdl-space.top/file/apk/app.apk' }])
 	}
 	try {
@@ -132,6 +134,7 @@ test('version publishing anonymously uploads APK files to the legacy imgbed dist
 		} as never)
 		assert.equal(response.status, 200, await response.clone().text())
 		assert.equal(uploadUrl, 'https://img.abdl-space.top/upload?returnFormat=full&uploadFolder=apk&uploadChannel=huggingface&channelName=abdl-space-img&autoRetry=false')
+		assert.equal(uploadedSha256, '039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81')
 		assert.deepEqual(await response.json(), {
 			success: true,
 			versionName: '2.4.0',

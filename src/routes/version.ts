@@ -18,6 +18,10 @@ version.use('*', cors({
 const IMGBED_HOST = 'https://img.abdl-space.top'
 const IMGBED_APK_UPLOAD_URL = `${IMGBED_HOST}/upload?returnFormat=full&uploadFolder=apk&uploadChannel=huggingface&channelName=abdl-space-img&autoRetry=false`
 
+function toHex(buffer: ArrayBuffer): string {
+  return Array.from(new Uint8Array(buffer), byte => byte.toString(16).padStart(2, '0')).join('')
+}
+
 export function resolveReleaseUpload(db: D1Database, reference: string, userId: number) {
   return getCompletedUploadReference(db, reference, userId, 'release')
 }
@@ -83,8 +87,10 @@ version.post('/upload', async (c) => {
     apk = formData.get('apk') instanceof File ? formData.get('apk') as File : null
     if (apk) {
       stage = 'imgbed_upload'
+      const sha256 = toHex(await crypto.subtle.digest('SHA-256', await apk.arrayBuffer()))
       const uploadForm = new FormData()
       uploadForm.append('file', apk)
+      uploadForm.append('sha256', sha256)
       let response = await fetch(IMGBED_APK_UPLOAD_URL, {
         method: 'POST',
         headers: { Authorization: `Bearer ${c.env.IMGBED_UPLOAD_KEY}` },
@@ -94,6 +100,7 @@ version.post('/upload', async (c) => {
       if (!response.ok && c.env.IMGBED_UPLOAD_KEY) {
         const retryForm = new FormData()
         retryForm.append('file', apk)
+        retryForm.append('sha256', sha256)
         response = await fetch(`${IMGBED_APK_UPLOAD_URL}&authCode=${encodeURIComponent(c.env.IMGBED_UPLOAD_KEY)}`, {
           method: 'POST',
           body: retryForm,
@@ -103,6 +110,7 @@ version.post('/upload', async (c) => {
       if (!response.ok && c.env.IMGBED_UPLOAD_KEY) {
         const headerForm = new FormData()
         headerForm.append('file', apk)
+        headerForm.append('sha256', sha256)
         response = await fetch(IMGBED_APK_UPLOAD_URL, {
           method: 'POST',
           headers: { authCode: c.env.IMGBED_UPLOAD_KEY },
