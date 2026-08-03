@@ -36,7 +36,7 @@ npx wrangler d1 execute abdl-space-db --remote --file schemas/schema.sql
 现有数据库只执行当前增量 migration，例如：
 
 ```bash
-npx wrangler d1 execute abdl-space-db --remote --file migrations/0042_cos_uploads.sql
+npx wrangler d1 execute abdl-space-db --remote --file migrations/0043_cos_uploads.sql
 ```
 
 > 不要对现有数据库用完整 `schema.sql` 代替增量 migration。`CREATE TABLE IF NOT EXISTS` 不会为已有表增加字段。

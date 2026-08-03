@@ -76,7 +76,7 @@ test('enforces media upload relationships in migration and complete schema', () 
 		CREATE TABLE post_images (id INTEGER PRIMARY KEY);
 		INSERT INTO users (id) VALUES (1), (2);
 	`)
-	migrationDatabase.exec(readFileSync(new URL('../../migrations/0042_cos_uploads.sql', import.meta.url), 'utf8'))
+	migrationDatabase.exec(readFileSync(new URL('../../migrations/0043_cos_uploads.sql', import.meta.url), 'utf8'))
 	assertMediaUploadIdRejectsNull(migrationDatabase)
 	assertMediaUploadRelations(migrationDatabase)
 	migrationDatabase.close()

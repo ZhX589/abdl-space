@@ -59,7 +59,7 @@ Commit message: `feat(media): 添加腾讯云 COS 请求签名`
 **Covers:** [S4, S6, S7, S9]
 
 **Files:**
-- Create: `migrations/0042_cos_uploads.sql`
+- Create: `migrations/0043_cos_uploads.sql`
 - Modify: `schemas/schema.sql:336-349`
 - Create: `src/lib/media-upload.ts`
 - Create: `src/lib/media-upload.test.ts`
@@ -222,7 +222,7 @@ Allow required web origins, methods `PUT,HEAD`, request header `Content-Type`, a
 
 - [ ] **Step 3: Apply migration and dry-run**
 
-Run `npm test`, `npx wrangler deploy --dry-run`, then apply `0042_cos_uploads.sql` to the confirmed production D1 account.
+Run `npm test`, `npx wrangler deploy --dry-run`, then apply `0043_cos_uploads.sql` to the confirmed production D1 account.
 
 - [ ] **Step 4: Deploy backend first**
 
