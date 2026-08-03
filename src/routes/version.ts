@@ -61,6 +61,7 @@ version.get('/', async (c) => {
  * - changelog: string (optional)
  */
 version.post('/upload', async (c) => {
+  let stage = 'request'
   try {
   const db = c.env.abdl_space_db
 
@@ -81,6 +82,7 @@ version.post('/upload', async (c) => {
 
     apk = formData.get('apk') instanceof File ? formData.get('apk') as File : null
     if (apk) {
+      stage = 'imgbed_upload'
       const uploadForm = new FormData()
       uploadForm.append('file', apk)
       let response = await fetch(IMGBED_APK_UPLOAD_URL, {
@@ -136,6 +138,7 @@ version.post('/upload', async (c) => {
   }
 
   // Ensure kv_store table exists
+  stage = 'version_update'
   await run(db, `CREATE TABLE IF NOT EXISTS kv_store (key TEXT PRIMARY KEY, value TEXT, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP)`)
 
   // Update version info
@@ -161,8 +164,11 @@ version.post('/upload', async (c) => {
     downloadUrl: apkUrl,
     message: '版本更新成功',
   })
-  } catch {
-    return c.json({ error: '版本更新失败' }, 500)
+  } catch (error) {
+    let detail = error instanceof Error ? error.message : 'Unknown error'
+    if (c.env.IMGBED_UPLOAD_KEY) detail = detail.replaceAll(c.env.IMGBED_UPLOAD_KEY, '[redacted]')
+    detail = detail.replace(/authCode=[^&\s]+/gi, 'authCode=[redacted]').slice(0, 200)
+    return c.json({ error: '版本更新失败', stage, detail }, 500)
   }
 })
 
