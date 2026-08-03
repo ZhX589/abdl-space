@@ -111,9 +111,24 @@ version.post('/upload', async (c) => {
         upstreamStatuses.push(response.status)
       }
       if (!response.ok) return c.json({ error: 'APK 上传失败', upstream_statuses: upstreamStatuses }, 502)
-      const data = await response.json() as { src?: string; url?: string } | { src?: string; url?: string }[]
+      const upstreamContentType = response.headers.get('Content-Type') || ''
+      const upstreamBody = await response.text()
+      let data: { src?: string; url?: string } | { src?: string; url?: string }[]
+      try {
+        data = JSON.parse(upstreamBody)
+      } catch {
+        return c.json({
+          error: 'APK 上传失败',
+          upstream_status: response.status,
+          upstream_content_type: upstreamContentType,
+          upstream_body: upstreamBody.slice(0, 200),
+        }, 502)
+      }
       const uploaded = Array.isArray(data) ? data[0] : data
       apkUrl = uploaded?.src || uploaded?.url || ''
+      if (!apkUrl || new URL(apkUrl).origin !== IMGBED_HOST) {
+        return c.json({ error: 'APK 上传失败', upstream_status: response.status }, 502)
+      }
       apkSize = apk.size
     }
   } else {

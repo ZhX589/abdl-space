@@ -224,3 +224,34 @@ test('version publishing reports safe imgbed transport errors', async () => {
 		sqlite.close()
 	}
 })
+
+test('version publishing rejects successful HTML responses from imgbed', async () => {
+	const app = new Hono()
+	app.route('/api/v1/version', version)
+	const sqlite = database()
+	const originalFetch = globalThis.fetch
+	globalThis.fetch = async () => new Response('<!doctype html><title>Upload route fallback</title>', {
+		status: 200,
+		headers: { 'Content-Type': 'text/html; charset=utf-8' },
+	})
+	try {
+		const form = new FormData()
+		form.append('apk', new File([new Uint8Array([1])], 'app.apk', { type: 'application/vnd.android.package-archive' }))
+		form.append('versionName', '2.4.0')
+		form.append('versionCode', '22')
+		const response = await app.request('/api/v1/version/upload', { method: 'POST', body: form }, {
+			IMGBED_UPLOAD_KEY: 'secret-value',
+			abdl_space_db: d1(sqlite),
+		} as never)
+		assert.equal(response.status, 502)
+		assert.deepEqual(await response.json(), {
+			error: 'APK 上传失败',
+			upstream_status: 200,
+			upstream_content_type: 'text/html; charset=utf-8',
+			upstream_body: '<!doctype html><title>Upload route fallback</title>',
+		})
+	} finally {
+		globalThis.fetch = originalFetch
+		sqlite.close()
+	}
+})
