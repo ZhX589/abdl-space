@@ -12,13 +12,18 @@ import type { Env, JWTPayload } from '../types/index.ts'
 import { query, queryOne, run } from '../lib/db.ts'
 import { toAccount, toAccountFromNBW, toStatus, toStatusFromNBW, toStatusFromComment, toNotification, toISOString } from './converter.ts'
 import { generateCardsForPosts } from './linkpreview.ts'
-import type { MastodonNotification, MastodonAccount, MastodonStatus } from './types.ts'
+import type { MastodonNotification, MastodonAccount, MastodonPoll, MastodonStatus } from './types.ts'
 import { mastodonAuth, buildInstance, resolveStatus, parseMastoIdForCursor } from './shared.ts'
 import { syncPostToNBW } from '../lib/nbw-sync.ts'
 import { nbwS2SRequest } from '../lib/nbw.ts'
 import { handleNBWTimeline, buildNBWTimelineParams } from './nbw-timeline.ts'
 import { mergeAllTimelinePage } from './all-timeline.ts'
 import { generateBlurhash, sanitizeBlurhash } from '../lib/blurhash.ts'
+import { buildMediaPreviewUrl, canonicalMediaPreviewCacheUrl, fetchTrustedMediaSource, inspectMediaImageDimensions, parseMediaPreviewSource, resizeMediaPreview } from '../lib/media-preview.ts'
+import { buildMediaObjectKey, validateMediaUpload } from '../lib/media-upload.ts'
+import { buildCosObjectUrl, putObjectToCos } from '../lib/tencent-cos.ts'
+import { getCompletedUploadReference, uploadLegacyObject } from '../lib/upload-consumer.ts'
+import type { MediaUploadPurpose } from '../lib/media-upload.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
@@ -64,13 +69,214 @@ function buildLinkHeader(
 const mastodon = new Hono<AppType>()
 
 const IMGBED_HOST = 'https://img.abdl-space.top'
+export const IMGBED_FALLBACK_HEADER = 'X-ABDL-Upload-Fallback'
+const LEGACY_IMGBED_ORIGINS = new Set([IMGBED_HOST, 'https://cloudflare-imgbed-790.pages.dev'])
+const DEFAULT_COS_ORIGIN = 'https://abdl-1339643562.cos.ap-shanghai.myqcloud.com'
 
-async function loadPolls(db: D1Database, pollIds: number[]): Promise<Map<number, any>> {
+export function shouldUseImgbedFallback(headerValue: string | undefined): boolean {
+  return headerValue === 'imgbed'
+}
+
+interface StatusMediaOptions {
+  cosPublicOrigin?: string
+  cosBucket?: string
+  cosRegion?: string
+}
+
+interface MediaUploadRow {
+  id: string
+  user_id: number
+  purpose: string
+  public_url: string
+  preview_url: string | null
+  mime_type: string
+  width: number | null
+  height: number | null
+  blurhash: string | null
+  storage_provider: string
+  status: string
+}
+
+export interface ResolvedStatusMedia {
+  id: string
+  imageUrl: string
+  previewUrl: string | null
+  storageProvider: 'cos' | 'imgbed'
+  altText: string | null
+  blurhash: string | null
+}
+
+interface PostImageRow {
+  image_url: string
+  is_nsfw: number
+  alt_text: string | null
+  blurhash: string | null
+  preview_url: string | null
+  storage_provider: string | null
+}
+
+const POST_IMAGE_SELECT = 'SELECT image_url, is_nsfw, alt_text, blurhash, preview_url, storage_provider'
+
+function cosOrigin(options: StatusMediaOptions): string {
+  if (options.cosPublicOrigin) {
+    try { return new URL(options.cosPublicOrigin).origin } catch { return '' }
+  }
+  if (options.cosBucket && options.cosRegion) return `https://${options.cosBucket}.cos.${options.cosRegion}.myqcloud.com`
+  return DEFAULT_COS_ORIGIN
+}
+
+export function isAllowedStatusMediaUrl(mediaId: string, configuredCosOrigin?: string, options: StatusMediaOptions = {}): boolean {
+  try {
+    const url = new URL(mediaId)
+    if (url.protocol !== 'https:') return false
+    const allowedCosOrigin = configuredCosOrigin ? new URL(configuredCosOrigin).origin : cosOrigin(options)
+    return LEGACY_IMGBED_ORIGINS.has(url.origin) || url.origin === allowedCosOrigin
+  } catch {
+    return false
+  }
+}
+
+function mediaOptions(env: Env): StatusMediaOptions {
+  return { cosPublicOrigin: env.COS_PUBLIC_ORIGIN, cosBucket: env.COS_BUCKET, cosRegion: env.COS_REGION }
+}
+
+function isCosMediaUrl(mediaUrl: string, options: StatusMediaOptions): boolean {
+  try {
+    return new URL(mediaUrl).origin === cosOrigin(options)
+  } catch {
+    return false
+  }
+}
+
+export async function resolveStatusMedia(
+  db: D1Database,
+  mediaIds: string[],
+  userId: number,
+  attributes: { id?: string; description?: string; blurhash?: string | null }[] = [],
+  options: StatusMediaOptions = {},
+): Promise<ResolvedStatusMedia[]> {
+  if (mediaIds.some(mediaId => typeof mediaId !== 'string' || !mediaId)) throw new Error('Invalid status media')
+  const uniqueIds = [...new Set(mediaIds)]
+  const uploads = uniqueIds.length === 0 ? [] : await query<MediaUploadRow>(
+    db,
+    `SELECT id, user_id, purpose, public_url, preview_url, mime_type, width, height, blurhash, storage_provider, status
+     FROM media_uploads WHERE id IN (${uniqueIds.map(() => '?').join(',')})`,
+    uniqueIds,
+  )
+  const uploadsById = new Map(uploads.map(upload => [upload.id, upload]))
+
+  return mediaIds.map(mediaId => {
+    const attr = attributes.find(item => item.id === mediaId)
+    if (isAllowedStatusMediaUrl(mediaId, options.cosPublicOrigin, options)) {
+      return {
+        id: mediaId,
+        imageUrl: mediaId,
+        previewUrl: null,
+        storageProvider: isCosMediaUrl(mediaId, options) ? 'cos' : 'imgbed',
+        altText: attr?.description || null,
+        blurhash: sanitizeBlurhash(attr?.blurhash),
+      }
+    }
+    const upload = uploadsById.get(mediaId)
+    if (upload) {
+      if (upload.user_id !== userId || upload.status !== 'complete' || upload.purpose !== 'status_original') {
+        throw new Error('Invalid status media upload')
+      }
+      if (upload.storage_provider === 'imgbed' && isAllowedStatusMediaUrl(upload.public_url)) {
+        return {
+          id: mediaId,
+          imageUrl: upload.public_url,
+          previewUrl: upload.preview_url,
+          storageProvider: 'imgbed',
+          altText: attr?.description || null,
+          blurhash: upload.blurhash || sanitizeBlurhash(attr?.blurhash),
+        }
+      }
+      if (upload.storage_provider !== 'cos') throw new Error('Invalid status media upload')
+      return {
+        id: mediaId,
+        imageUrl: upload.public_url,
+        previewUrl: upload.preview_url,
+        storageProvider: 'cos',
+        altText: attr?.description || null,
+        blurhash: upload.blurhash || sanitizeBlurhash(attr?.blurhash),
+      }
+    }
+    throw new Error('Invalid status media URL')
+  })
+}
+
+export async function insertStatusMedia(db: D1Database, postId: number, media: ResolvedStatusMedia[], isNsfw: number): Promise<void> {
+  for (const [sortOrder, item] of media.entries()) {
+    await run(db, `INSERT INTO post_images
+      (post_id, image_url, preview_url, storage_provider, is_nsfw, sort_order, alt_text, blurhash)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, [
+      postId, item.imageUrl, item.previewUrl, item.storageProvider, isNsfw, sortOrder, item.altText, item.blurhash,
+    ])
+  }
+}
+
+export function resolveProfileImageUpload(db: D1Database, reference: string, userId: number, purpose: Extract<MediaUploadPurpose, 'avatar' | 'header'>) {
+  return getCompletedUploadReference(db, reference, userId, purpose)
+}
+
+export async function resolveOptionalProfileImageUpload(db: D1Database, reference: unknown, userId: number, purpose: Extract<MediaUploadPurpose, 'avatar' | 'header'>): Promise<string> {
+  if (reference === null || reference === '') return ''
+  return (await resolveProfileImageUpload(db, String(reference), userId, purpose)).public_url
+}
+
+export async function resolveMediaAttachment(db: D1Database, rawMediaId: string, userId: number, options: StatusMediaOptions = {}) {
+  let mediaId = rawMediaId
+  try { mediaId = decodeURIComponent(rawMediaId) } catch { /* Keep the route parameter unchanged. */ }
+  if (isAllowedStatusMediaUrl(mediaId, options.cosPublicOrigin, options)) {
+    const storageProvider = isCosMediaUrl(mediaId, options) ? 'cos' : 'imgbed'
+    return {
+      id: mediaId,
+      url: mediaId,
+      previewUrl: buildMediaPreviewUrl(mediaId, undefined, storageProvider === 'cos'),
+      storageProvider,
+      blurhash: null,
+      width: null,
+      height: null,
+    }
+  }
+  const upload = await queryOne<MediaUploadRow>(db, `SELECT id, user_id, purpose, public_url, preview_url, mime_type,
+    width, height, blurhash, storage_provider, status FROM media_uploads WHERE id = ?`, [mediaId])
+  if (upload) {
+    if (upload.user_id !== userId || upload.status !== 'complete' || upload.purpose !== 'status_original') {
+      throw new Error('Invalid media attachment')
+    }
+    if (upload.storage_provider === 'imgbed' && isAllowedStatusMediaUrl(upload.public_url)) {
+      return {
+        id: upload.id,
+        url: upload.public_url,
+        previewUrl: upload.preview_url || buildMediaPreviewUrl(upload.public_url),
+        storageProvider: 'imgbed' as const,
+        blurhash: upload.blurhash,
+        width: upload.width,
+        height: upload.height,
+      }
+    }
+    if (upload.storage_provider !== 'cos') throw new Error('Invalid media attachment')
+    return {
+      id: upload.id,
+      url: upload.public_url,
+      previewUrl: upload.preview_url || buildMediaPreviewUrl(upload.public_url, undefined, true),
+      storageProvider: 'cos' as const,
+      blurhash: upload.blurhash,
+      width: upload.width,
+      height: upload.height,
+    }
+  }
+  throw new Error('Invalid media attachment')
+}
+
+async function loadPolls(db: D1Database, pollIds: number[]): Promise<Map<number, MastodonPoll>> {
   if (pollIds.length === 0) return new Map()
   const polls = await query<Record<string, unknown>>(
     db, `SELECT * FROM polls WHERE id IN (${pollIds.map(() => '?').join(',')})`, pollIds
   )
-  const map = new Map<number, any>()
+  const map = new Map<number, MastodonPoll>()
   for (const p of polls) {
     const options = JSON.parse(p.options as string || '[]')
     map.set(p.id as number, {
@@ -84,17 +290,17 @@ async function loadPolls(db: D1Database, pollIds: number[]): Promise<Map<number,
       emojis: [],
       voted: false,
       own_votes: [],
-    })
+    } as MastodonPoll)
   }
   return map
 }
 
-async function loadPostImages(db: D1Database, postIds: number[]): Promise<Map<number, { image_url: string; is_nsfw: number; alt_text: string | null; blurhash: string | null }[]>> {
+async function loadPostImages(db: D1Database, postIds: number[]): Promise<Map<number, PostImageRow[]>> {
   if (postIds.length === 0) return new Map()
-  const allImages = await query<{ post_id: number; image_url: string; is_nsfw: number; alt_text: string | null; blurhash: string | null }>(
-    db, `SELECT post_id, image_url, is_nsfw, alt_text, blurhash FROM post_images WHERE post_id IN (${postIds.map(() => '?').join(',')}) ORDER BY sort_order`, postIds
+  const allImages = await query<PostImageRow & { post_id: number }>(
+    db, `SELECT post_id, image_url, is_nsfw, alt_text, blurhash, preview_url, storage_provider FROM post_images WHERE post_id IN (${postIds.map(() => '?').join(',')}) ORDER BY sort_order`, postIds
   )
-  const map = new Map<number, { image_url: string; is_nsfw: number; alt_text: string | null; blurhash: string | null }[]>()
+  const map = new Map<number, PostImageRow[]>()
   for (const img of allImages) {
     if (!map.has(img.post_id)) map.set(img.post_id, [])
     map.get(img.post_id)!.push(img)
@@ -296,7 +502,7 @@ mastodon.patch('/accounts/update_credentials', async (c) => {
   const contentType = c.req.header('Content-Type') || ''
 
   // P1#10: Support both JSON and multipart/form-data
-  let fieldsData: { name: string; value: string }[] = []
+  const fieldsData: { name: string; value: string }[] = []
   if (contentType.includes('multipart/form-data') || contentType.includes('application/x-www-form-urlencoded')) {
     try {
       const formData = await c.req.formData()
@@ -320,7 +526,7 @@ mastodon.patch('/accounts/update_credentials', async (c) => {
       for (const [, entry] of fieldsMap) {
         if (entry.name || entry.value) fieldsData.push(entry)
       }
-    } catch {}
+    } catch { /* Ignore malformed optional multipart fields. */ }
   } else {
     try { body = await c.req.json() } catch { return c.json({ error: 'invalid body' }, 400) }
   }
@@ -349,57 +555,39 @@ mastodon.patch('/accounts/update_credentials', async (c) => {
   }
   if (body.avatar !== undefined) {
     if (body.avatar instanceof File) {
-      const uploadForm = new FormData()
-      uploadForm.append('file', body.avatar)
-      let res = await fetch(`${IMGBED_HOST}/upload?returnFormat=full`, {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${c.env.IMGBED_UPLOAD_KEY}` },
-        body: uploadForm,
-      })
-      if (!res.ok && c.env.IMGBED_UPLOAD_KEY) {
-        const uploadForm2 = new FormData()
-        uploadForm2.append('file', body.avatar)
-        res = await fetch(`${IMGBED_HOST}/upload?returnFormat=full&authCode=${c.env.IMGBED_UPLOAD_KEY}`, {
-          method: 'POST',
-          body: uploadForm2,
-        })
-      }
-      if (res.ok) {
-        const data = await res.json() as { src: string }[]
-        const url = data[0]?.src
-        if (url) { updates.push('avatar = ?'); params.push(url) }
-      }
-    } else {
+      const bytes = new Uint8Array(await body.avatar.arrayBuffer())
+      const dimensions = inspectMediaImageDimensions(bytes)
+      if (!dimensions) return c.json({ error: 'invalid avatar image' }, 400)
+      const upload = await uploadLegacyObject(c.env, user.sub, 'avatar', body.avatar, shouldUseImgbedFallback(c.req.header(IMGBED_FALLBACK_HEADER)), dimensions)
       updates.push('avatar = ?')
-      params.push(String(body.avatar))
+      params.push(upload.public_url)
+    } else {
+      try {
+        const url = await resolveOptionalProfileImageUpload(c.env.abdl_space_db, body.avatar, user.sub, 'avatar')
+        updates.push('avatar = ?')
+        params.push(url)
+      } catch {
+        return c.json({ error: 'invalid avatar upload' }, 400)
+      }
     }
   }
 
   if (body.header !== undefined) {
     if (body.header instanceof File) {
-      const uploadForm = new FormData()
-      uploadForm.append('file', body.header)
-      let res = await fetch(`${IMGBED_HOST}/upload?returnFormat=full`, {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${c.env.IMGBED_UPLOAD_KEY}` },
-        body: uploadForm,
-      })
-      if (!res.ok && c.env.IMGBED_UPLOAD_KEY) {
-        const uploadForm2 = new FormData()
-        uploadForm2.append('file', body.header)
-        res = await fetch(`${IMGBED_HOST}/upload?returnFormat=full&authCode=${c.env.IMGBED_UPLOAD_KEY}`, {
-          method: 'POST',
-          body: uploadForm2,
-        })
-      }
-      if (res.ok) {
-        const data = await res.json() as { src: string }[]
-        const url = data[0]?.src
-        if (url) { updates.push('header = ?'); params.push(url) }
-      }
-    } else {
+      const bytes = new Uint8Array(await body.header.arrayBuffer())
+      const dimensions = inspectMediaImageDimensions(bytes)
+      if (!dimensions) return c.json({ error: 'invalid header image' }, 400)
+      const upload = await uploadLegacyObject(c.env, user.sub, 'header', body.header, shouldUseImgbedFallback(c.req.header(IMGBED_FALLBACK_HEADER)), dimensions)
       updates.push('header = ?')
-      params.push(String(body.header))
+      params.push(upload.public_url)
+    } else {
+      try {
+        const url = await resolveOptionalProfileImageUpload(c.env.abdl_space_db, body.header, user.sub, 'header')
+        updates.push('header = ?')
+        params.push(url)
+      } catch {
+        return c.json({ error: 'invalid header upload' }, 400)
+      }
     }
   }
 
@@ -813,6 +1001,13 @@ mastodon.post('/statuses', async (c) => {
   const visibility = body.visibility || 'public'
   const spoilerText = body.spoiler_text || ''
   const language = body.language || 'zh'
+  const mediaIds = body.media_ids || []
+  let resolvedMedia: ResolvedStatusMedia[]
+  try {
+    resolvedMedia = await resolveStatusMedia(c.env.abdl_space_db, mediaIds, user.sub, body.media_attributes, mediaOptions(c.env))
+  } catch {
+    return c.json({ error: '无效的媒体 ID，请先完成上传并使用本人媒体' }, 400)
+  }
 
   // Resolve in_reply_to_id (could be p_123 or c_123 format)
   let inReplyToId: number | null = null
@@ -842,45 +1037,29 @@ mastodon.post('/statuses', async (c) => {
   )
   const postId = result.meta.last_row_id as number
 
-  // Create poll if provided (after post so status_id FK is satisfied)
-  if (body.poll && body.poll.options && body.poll.options.length >= 2) {
-    const expiresAt = new Date(Date.now() + (body.poll.expires_in || 300) * 1000).toISOString()
-    const options = body.poll.options.map(title => ({ title, votes_count: 0 }))
-    const pollResult = await run(
-      c.env.abdl_space_db,
-      'INSERT INTO polls (status_id, expires_at, multiple, hide_totals, options) VALUES (?, ?, ?, ?, ?)',
-      [postId, expiresAt, body.poll.multiple ? 1 : 0, body.poll.hide_totals ? 1 : 0, JSON.stringify(options)]
-    )
-    const pollId = pollResult.meta.last_row_id as number
-    // Link poll to post
-    await run(c.env.abdl_space_db, 'UPDATE posts SET poll_id = ? WHERE id = ?', [pollId, postId])
-  }
-
-  // Handle media attachments (images from media_ids)
-  if (body.media_ids && body.media_ids.length > 0) {
-    let sortOrder = 0
-    for (const mediaId of body.media_ids) {
-      if (typeof mediaId !== 'string' || !mediaId) continue
-      if (!mediaId.startsWith(IMGBED_HOST + '/')) {
-        return c.json({ error: `图片 URL 必须来自 ${IMGBED_HOST}，请先通过 /api/v1/media 上传` }, 400)
+  try {
+      // Create poll if provided (after post so status_id FK is satisfied)
+      if (body.poll && body.poll.options && body.poll.options.length >= 2) {
+        const expiresAt = new Date(Date.now() + (body.poll.expires_in || 300) * 1000).toISOString()
+        const options = body.poll.options.map(title => ({ title, votes_count: 0 }))
+        const pollResult = await run(
+          c.env.abdl_space_db,
+          'INSERT INTO polls (status_id, expires_at, multiple, hide_totals, options) VALUES (?, ?, ?, ?, ?)',
+          [postId, expiresAt, body.poll.multiple ? 1 : 0, body.poll.hide_totals ? 1 : 0, JSON.stringify(options)]
+        )
+        const pollId = pollResult.meta.last_row_id as number
+        await run(c.env.abdl_space_db, 'UPDATE posts SET poll_id = ? WHERE id = ?', [pollId, postId])
       }
-      // Find description from media_attributes if provided
-      let altText: string | null = null
-      let blurhash: string | null = null
-      if (body.media_attributes && body.media_attributes.length > 0) {
-        const attr = body.media_attributes.find(a => a.id === mediaId)
-        if (attr && attr.description) altText = attr.description
-        blurhash = sanitizeBlurhash(attr?.blurhash)
-      }
-      try {
-        await run(c.env.abdl_space_db, 'INSERT INTO post_images (post_id, image_url, is_nsfw, sort_order, alt_text, blurhash) VALUES (?, ?, ?, ?, ?, ?)', [postId, mediaId, hasNsfw, sortOrder++, altText, blurhash])
-      } catch {}
-    }
-  }
 
-  // If sensitive, also mark all existing images for this post as nsfw
-  if (hasNsfw) {
-    await run(c.env.abdl_space_db, 'UPDATE post_images SET is_nsfw = 1 WHERE post_id = ?', [postId])
+      await insertStatusMedia(c.env.abdl_space_db, postId, resolvedMedia, hasNsfw)
+
+      if (hasNsfw) {
+        await run(c.env.abdl_space_db, 'UPDATE post_images SET is_nsfw = 1 WHERE post_id = ?', [postId])
+      }
+  } catch (error) {
+    console.error('Status creation failed after post insert', { postId, userId: user.sub, error: String(error) })
+    await run(c.env.abdl_space_db, 'DELETE FROM posts WHERE id = ?', [postId])
+    return c.json({ error: 'Failed to attach media to status' }, 500)
   }
 
   // Fetch the created post with all fields
@@ -897,8 +1076,8 @@ mastodon.post('/statuses', async (c) => {
   if (!post) return c.json({ error: 'Failed to create status' }, 500)
 
   // Load images
-  const images = await query<{ image_url: string; is_nsfw: number; alt_text: string | null; blurhash: string | null }>(
-    c.env.abdl_space_db, 'SELECT image_url, is_nsfw, alt_text, blurhash FROM post_images WHERE post_id = ? ORDER BY sort_order', [postId]
+  const images = await query<PostImageRow>(
+    c.env.abdl_space_db, `${POST_IMAGE_SELECT} FROM post_images WHERE post_id = ? ORDER BY sort_order`, [postId]
   )
 
   // Load poll if exists
@@ -928,7 +1107,7 @@ mastodon.post('/statuses', async (c) => {
     in_reply_to_id: post.in_reply_to_id as number | null,
     in_reply_to_type: post.in_reply_to_type as string | null,
     in_reply_to_account_id: post.in_reply_to_account_id as number | null,
-    poll: poll as any,
+    poll,
   }, account))
 })
 
@@ -973,8 +1152,8 @@ mastodon.get('/statuses/:id', async (c) => {
   )
   if (!post) return c.json({ error: 'Record not found' }, 404)
 
-  const images = await query<{ image_url: string; is_nsfw: number; alt_text: string | null; blurhash: string | null }>(
-    c.env.abdl_space_db, 'SELECT image_url, is_nsfw, alt_text, blurhash FROM post_images WHERE post_id = ? ORDER BY sort_order', [resolved.realId]
+  const images = await query<PostImageRow>(
+    c.env.abdl_space_db, `${POST_IMAGE_SELECT} FROM post_images WHERE post_id = ? ORDER BY sort_order`, [resolved.realId]
   )
 
   const account = toAccount({
@@ -1014,7 +1193,7 @@ mastodon.get('/statuses/:id', async (c) => {
     in_reply_to_id: post.in_reply_to_id as number | null,
     in_reply_to_type: post.in_reply_to_type as string | null,
     in_reply_to_account_id: post.in_reply_to_account_id as number | null,
-    poll: poll as any,
+    poll,
     linkCard,
   }, account, { reblog }))
 })
@@ -1168,7 +1347,7 @@ mastodon.post('/statuses/:id/reblog', async (c) => {
        FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`, [realId])
     if (!post) return c.json({ error: 'Record not found' }, 404)
     const account = toAccount({ id: post.user_id as number, username: post.username as string, avatar: post.avatar as string | null, role: post.role as string, bio: post.bio as string | null, created_at: post.user_created_at as string })
-    const images = await query<{ image_url: string; is_nsfw: number; alt_text: string | null; blurhash: string | null }>(c.env.abdl_space_db, 'SELECT image_url, is_nsfw, alt_text, blurhash FROM post_images WHERE post_id = ? ORDER BY sort_order', [realId])
+    const images = await query<PostImageRow>(c.env.abdl_space_db, `${POST_IMAGE_SELECT} FROM post_images WHERE post_id = ? ORDER BY sort_order`, [realId])
     return c.json(toStatus({ id: post.id as number, user_id: post.user_id as number, content: post.content as string, like_count: post.like_count as number, comment_count: post.comment_count as number, reblogs_count: post.reblogs_count as number, bookmarks_count: post.bookmarks_count as number, shares_count: 0, created_at: post.created_at as string, images }, account, { reblogged: true }))
   }
 
@@ -1197,7 +1376,7 @@ mastodon.post('/statuses/:id/reblog', async (c) => {
      FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`, [realId])
   if (!post) return c.json({ error: 'Record not found' }, 404)
   const account = toAccount({ id: post.user_id as number, username: post.username as string, avatar: post.avatar as string | null, role: post.role as string, bio: post.bio as string | null, created_at: post.user_created_at as string })
-  const images = await query<{ image_url: string; is_nsfw: number; alt_text: string | null; blurhash: string | null }>(c.env.abdl_space_db, 'SELECT image_url, is_nsfw, alt_text, blurhash FROM post_images WHERE post_id = ? ORDER BY sort_order', [realId])
+  const images = await query<PostImageRow>(c.env.abdl_space_db, `${POST_IMAGE_SELECT} FROM post_images WHERE post_id = ? ORDER BY sort_order`, [realId])
   return c.json(toStatus({ id: post.id as number, user_id: post.user_id as number, content: post.content as string, like_count: post.like_count as number, comment_count: post.comment_count as number, reblogs_count: post.reblogs_count as number, bookmarks_count: post.bookmarks_count as number, shares_count: 0, created_at: post.created_at as string, images }, account, { reblogged: true }))
 })
 
@@ -1236,7 +1415,7 @@ mastodon.post('/statuses/:id/unreblog', async (c) => {
      FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`, [realId])
   if (!post) return c.json({ error: 'Record not found' }, 404)
   const account = toAccount({ id: post.user_id as number, username: post.username as string, avatar: post.avatar as string | null, role: post.role as string, bio: post.bio as string | null, created_at: post.user_created_at as string })
-  const images = await query<{ image_url: string; is_nsfw: number; alt_text: string | null; blurhash: string | null }>(c.env.abdl_space_db, 'SELECT image_url, is_nsfw, alt_text, blurhash FROM post_images WHERE post_id = ? ORDER BY sort_order', [realId])
+  const images = await query<PostImageRow>(c.env.abdl_space_db, `${POST_IMAGE_SELECT} FROM post_images WHERE post_id = ? ORDER BY sort_order`, [realId])
   return c.json(toStatus({ id: post.id as number, user_id: post.user_id as number, content: post.content as string, like_count: post.like_count as number, comment_count: post.comment_count as number, reblogs_count: post.reblogs_count as number, bookmarks_count: post.bookmarks_count as number, shares_count: 0, created_at: post.created_at as string, images }, account, { reblogged: false }))
 })
 
@@ -1431,8 +1610,6 @@ async function fetchAbdlPosts(c: Context<{ Bindings: Env }>, limit: number, maxI
   const imagesMap = await loadPostImages(c.env.abdl_space_db, postIds)
   const pollIds = posts.filter(r => r.poll_id).map(r => r.poll_id as number)
   const pollMap = await loadPolls(c.env.abdl_space_db, pollIds)
-  const repostIds = posts.filter(r => r.repost_id).map(r => r.repost_id as number)
-  const reblogMap = await loadReblogTargets(c.env.abdl_space_db, repostIds)
   const cardMap = await generateCardsForPosts(posts.map(r => ({ id: r.id as number, content: r.content as string, diaper_id: r.diaper_id as number | null })))
   return posts.map(r => {
     const account = toAccount({
@@ -1675,8 +1852,136 @@ mastodon.get('/notifications', async (c) => {
 })
 
 // ============================================================
+// GET /api/v1/media/preview/v3/:source — Cached media preview
+// ============================================================
+mastodon.on(['GET', 'HEAD'], '/media/preview/v3/:source', async (c) => {
+  const trustedOrigins = [cosOrigin(mediaOptions(c.env))].filter(Boolean)
+  const source = parseMediaPreviewSource(c.req.path, trustedOrigins)
+  if (!source) return c.json({ error: 'Invalid media preview source' }, 400)
+
+  const cache = caches.default
+  const cacheKey = new Request(canonicalMediaPreviewCacheUrl(c.req.url), { method: 'GET' })
+  const cached = await cache.match(cacheKey)
+  if (cached) {
+    if (c.req.method === 'HEAD') return new Response(null, { status: cached.status, headers: cached.headers })
+    return cached
+  }
+
+  const fallback = () => c.redirect(source, 302)
+  if (c.req.method === 'HEAD') return fallback()
+  try {
+    const sourceBytes = await fetchTrustedMediaSource(source, trustedOrigins)
+    if (!sourceBytes) return fallback()
+    const preview = resizeMediaPreview(sourceBytes)
+    if (!preview) return fallback()
+
+    const response = new Response(preview.bytes, {
+      headers: {
+        'Content-Type': preview.contentType,
+        'Content-Length': String(preview.bytes.byteLength),
+        'Cache-Control': 'public, max-age=2592000, immutable',
+        'X-Image-Width': String(preview.width),
+        'X-Image-Height': String(preview.height),
+      },
+    })
+    c.executionCtx.waitUntil(cache.put(cacheKey, response.clone()))
+    if (c.req.method === 'HEAD') return new Response(null, { status: 200, headers: response.headers })
+    return response
+  } catch {
+    return fallback()
+  }
+})
+
+// ============================================================
 // POST /api/v1/media — Upload media
 // ============================================================
+export async function uploadLegacyMastodonMedia(env: Env, userId: number, file: File, description: unknown, useImgbedFallback: boolean) {
+  const mimeType = file.type.split(';', 1)[0].trim().toLowerCase()
+  const bytes = new Uint8Array(await file.arrayBuffer())
+  const dimensions = inspectMediaImageDimensions(bytes)
+  validateMediaUpload({
+    purpose: 'status_original',
+    mimeType,
+    declaredSize: bytes.byteLength,
+    width: dimensions?.width,
+    height: dimensions?.height,
+  })
+  const blurhash = await generateBlurhash(file)
+  const createdAt = Math.floor(Date.now() / 1000)
+  const expiresAt = createdAt + 300
+
+  if (useImgbedFallback) {
+    const uploadForm = new FormData()
+    uploadForm.append('file', file)
+    let response = await fetch(`${IMGBED_HOST}/upload?returnFormat=full`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${env.IMGBED_UPLOAD_KEY}` },
+      body: uploadForm,
+    })
+    if (!response.ok && env.IMGBED_UPLOAD_KEY) {
+      const retryForm = new FormData()
+      retryForm.append('file', file)
+      response = await fetch(`${IMGBED_HOST}/upload?returnFormat=full&authCode=${env.IMGBED_UPLOAD_KEY}`, { method: 'POST', body: retryForm })
+    }
+    if (!response.ok) throw new Error('Imgbed upload failed')
+    const data = await response.json() as { src: string }[]
+    const url = data[0]?.src
+    if (!url || !isAllowedStatusMediaUrl(url)) throw new Error('Imgbed upload failed')
+    const id = url
+    await run(env.abdl_space_db, `INSERT INTO media_uploads (
+      id, user_id, purpose, object_key, public_url, preview_url, mime_type, declared_size,
+      verified_size, width, height, blurhash, storage_provider, status, created_at, expires_at
+    ) VALUES (?, ?, 'status_original', ?, ?, NULL, ?, ?, ?, ?, ?, ?, 'imgbed', 'complete', ?, ?)`, [
+      id, userId, `legacy/imgbed/${crypto.randomUUID()}`, url, mimeType, bytes.byteLength, bytes.byteLength,
+      dimensions!.width, dimensions!.height, blurhash, createdAt, expiresAt,
+    ])
+    return {
+      id,
+      type: 'image',
+      url,
+      preview_url: buildMediaPreviewUrl(url),
+      remote_url: null,
+      text_url: null,
+      meta: { original: { width: dimensions!.width, height: dimensions!.height, size: `${dimensions!.width}x${dimensions!.height}`, aspect: dimensions!.width / dimensions!.height } },
+      description: typeof description === 'string' ? description || null : null,
+      blurhash,
+      storage_provider: 'imgbed',
+    }
+  }
+
+  const id = crypto.randomUUID()
+  const objectKey = buildMediaObjectKey({ purpose: 'status_original', userId, mimeType })
+  await putObjectToCos({
+    secretId: env.COS_SECRET_ID,
+    secretKey: env.COS_SECRET_KEY,
+    bucket: env.COS_BUCKET,
+    region: env.COS_REGION,
+    objectKey,
+    contentType: mimeType,
+    body: bytes,
+  })
+  const url = buildCosObjectUrl(objectKey, { bucket: env.COS_BUCKET, region: env.COS_REGION, publicOrigin: env.COS_PUBLIC_ORIGIN })
+  await run(env.abdl_space_db, `INSERT INTO media_uploads (
+    id, user_id, purpose, object_key, public_url, preview_url, mime_type, declared_size,
+    verified_size, width, height, blurhash, storage_provider, status, created_at, expires_at
+  ) VALUES (?, ?, 'status_original', ?, ?, NULL, ?, ?, ?, ?, ?, ?, 'cos', 'complete', ?, ?)`, [
+    id, userId, objectKey, url, mimeType, bytes.byteLength, bytes.byteLength,
+    dimensions!.width, dimensions!.height, blurhash, createdAt, expiresAt,
+  ])
+  return {
+    id,
+    type: 'image',
+    url,
+    preview_url: buildMediaPreviewUrl(url, undefined, true),
+    remote_url: null,
+    text_url: null,
+    meta: { original: { width: dimensions!.width, height: dimensions!.height, size: `${dimensions!.width}x${dimensions!.height}`, aspect: dimensions!.width / dimensions!.height } },
+    description: typeof description === 'string' ? description || null : null,
+    blurhash,
+    storage_provider: 'cos',
+  }
+}
+
 mastodon.post('/media', async (c) => {
   const user = await mastodonAuth(c)
   if (!user) return c.json({ error: 'The access token is invalid' }, 401)
@@ -1687,50 +1992,14 @@ mastodon.post('/media', async (c) => {
     return c.json({ error: 'file is required' }, 422)
   }
   const description = formData.get('description') || null
-  const blurhash = await generateBlurhash(file)
-
-  // Forward to img.abdl-space.top
-  const IMGBED_URL = IMGBED_HOST
-  const uploadForm = new FormData()
-  uploadForm.append('file', file)
-
-  let res = await fetch(`${IMGBED_URL}/upload?returnFormat=full`, {
-    method: 'POST',
-    headers: { 'Authorization': `Bearer ${c.env.IMGBED_UPLOAD_KEY}` },
-    body: uploadForm,
-  })
-
-  if (!res.ok && c.env.IMGBED_UPLOAD_KEY) {
-    const uploadForm2 = new FormData()
-    uploadForm2.append('file', file)
-    res = await fetch(`${IMGBED_URL}/upload?returnFormat=full&authCode=${c.env.IMGBED_UPLOAD_KEY}`, {
-      method: 'POST',
-      body: uploadForm2,
-    })
-  }
-
-  if (!res.ok) {
+  // The Android UI must opt in explicitly; COS failures never silently switch providers.
+  const useImgbedFallback = shouldUseImgbedFallback(c.req.header(IMGBED_FALLBACK_HEADER))
+  try {
+    return c.json(await uploadLegacyMastodonMedia(c.env, user.sub, file, description, useImgbedFallback))
+  } catch (error) {
+    console.error('Legacy Mastodon media upload failed', { userId: user.sub, provider: useImgbedFallback ? 'imgbed' : 'cos', error: String(error) })
     return c.json({ error: 'Upload failed' }, 500)
   }
-
-  const data = await res.json() as { src: string }[]
-  const url = data[0]?.src
-  if (!url) return c.json({ error: 'Upload failed' }, 500)
-
-  const mimeType = file.type || 'application/octet-stream'
-  const mediaType = mimeType.startsWith('video/') ? 'video' : 'image'
-
-  return c.json({
-    id: url,
-    type: mediaType,
-    url,
-    preview_url: url,
-    remote_url: null,
-    text_url: null,
-    meta: {},
-    description: description || null,
-    blurhash,
-  })
 })
 
 // ============================================================
@@ -1744,25 +2013,34 @@ mastodon.put('/media/:id', async (c) => {
   let body: { description?: string }
   try { body = await c.req.json() } catch { body = {} }
 
-  // Update alt_text in post_images where image_url matches the media id
-  if (mediaId && body.description !== undefined) {
+  let attachment
+  try {
+    attachment = await resolveMediaAttachment(c.env.abdl_space_db, mediaId, user.sub, mediaOptions(c.env))
+  } catch {
+    return c.json({ error: 'Record not found' }, 404)
+  }
+
+  if (body.description !== undefined) {
     await run(
       c.env.abdl_space_db,
-      'UPDATE post_images SET alt_text = ? WHERE image_url = ?',
-      [body.description || null, mediaId]
+      `UPDATE post_images SET alt_text = ? WHERE image_url = ? AND post_id IN
+       (SELECT id FROM posts WHERE user_id = ?)`,
+      [body.description || null, attachment.url, user.sub]
     ).catch(() => {})
   }
 
   return c.json({
-    id: mediaId,
+    id: attachment.id,
     type: 'image',
-    url: mediaId,
-    preview_url: mediaId,
+    url: attachment.url,
+    preview_url: attachment.previewUrl,
     remote_url: null,
     text_url: null,
-    meta: {},
+    meta: attachment.width && attachment.height ? {
+      original: { width: attachment.width, height: attachment.height, size: `${attachment.width}x${attachment.height}`, aspect: attachment.width / attachment.height },
+    } : {},
     description: body.description || null,
-    blurhash: null,
+    blurhash: attachment.blurhash,
   })
 })
 
@@ -2088,7 +2366,7 @@ mastodon.get('/statuses/:id/context', async (c) => {
   let commentImagesMap = new Map<number, { image_url: string; is_nsfw: number }[]>()
   try {
     commentImagesMap = await loadCommentImages(c.env.abdl_space_db, commentIds)
-  } catch {}
+  } catch { /* Comment images are optional on older schemas. */ }
 
   const commentDescendants = comments.map(r => {
     const account = toAccount({
@@ -2156,7 +2434,6 @@ mastodon.get('/statuses/:id/context', async (c) => {
     )
     if (currentPost?.in_reply_to_id) {
       let parentId = currentPost.in_reply_to_id
-      let parentType = currentPost.in_reply_to_type || 'post'
       while (parentId) {
         const parent = await queryOne<Record<string, unknown>>(
           c.env.abdl_space_db,
@@ -2187,7 +2464,6 @@ mastodon.get('/statuses/:id/context', async (c) => {
           poll: null, linkCard: null,
         }, parentAccount))
         parentId = parent.in_reply_to_id as number
-        parentType = (parent.in_reply_to_type as string) || 'post'
       }
     }
   }
@@ -2272,7 +2548,7 @@ mastodon.post('/markers', async (c) => {
   )`)
 
   let body: Record<string, unknown> = {}
-  try { body = await c.req.json() } catch {}
+  try { body = await c.req.json() } catch { /* Empty marker updates are valid. */ }
 
   const now = new Date().toISOString()
 
@@ -2433,7 +2709,7 @@ mastodon.post('/announcements/:id/dismiss', async (c) => {
       'INSERT OR IGNORE INTO announcement_read_status (user_id, announcement_id) VALUES (?, ?)',
       [user.sub, resolved.realId]
     )
-  } catch {}
+  } catch { /* Read tracking is best-effort for legacy schemas. */ }
 
   return c.json({})
 })
@@ -2559,7 +2835,7 @@ mastodon.get('/trends/statuses', async (c) => {
   const limit = Math.min(40, Math.max(1, parseInt(c.req.query('limit') || '20')))
   const offset = parseInt(c.req.query('offset') || '0') || 0
 
-  let sql = `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
+  const sql = `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
      (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
      (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) + (SELECT COUNT(*) FROM posts WHERE in_reply_to_id = p.id) as comment_count,
      (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count,
@@ -2725,7 +3001,7 @@ mastodon.put('/statuses/:id', async (c) => {
   if (!resolved || resolved.kind !== 'post') return c.json({ error: 'Record not found' }, 404)
 
   // Check ownership
-  const post = await queryOne<{ user_id: number }>(c.env.abdl_space_db, 'SELECT user_id FROM posts WHERE id = ?', [resolved.realId])
+  const post = await queryOne<{ user_id: number; has_nsfw: number }>(c.env.abdl_space_db, 'SELECT user_id, has_nsfw FROM posts WHERE id = ?', [resolved.realId])
   if (!post) return c.json({ error: 'Record not found' }, 404)
   if (post.user_id !== user.sub && user.role !== 'admin') return c.json({ error: 'Forbidden' }, 403)
 
@@ -2736,6 +3012,15 @@ mastodon.put('/statuses/:id', async (c) => {
     poll?: { options?: string[]; expires_in?: number; multiple?: boolean; hide_totals?: boolean };
   }
   try { body = await c.req.json() } catch { return c.json({ error: 'invalid body' }, 400) }
+
+  let resolvedMedia: ResolvedStatusMedia[] | undefined
+  if (body.media_ids !== undefined) {
+    try {
+      resolvedMedia = await resolveStatusMedia(c.env.abdl_space_db, body.media_ids, user.sub, body.media_attributes, mediaOptions(c.env))
+    } catch {
+      return c.json({ error: '无效的媒体 ID，请先完成上传并使用本人媒体' }, 400)
+    }
+  }
 
   const updates: string[] = []
   const params: unknown[] = []
@@ -2761,17 +3046,9 @@ mastodon.put('/statuses/:id', async (c) => {
   }
 
   // Handle media updates (replace all images)
-  if (body.media_ids !== undefined) {
+  if (resolvedMedia !== undefined) {
     await run(c.env.abdl_space_db, 'DELETE FROM post_images WHERE post_id = ?', [resolved.realId])
-    let sortOrder = 0
-    for (const mediaId of body.media_ids) {
-      if (typeof mediaId !== 'string' || !mediaId) continue
-      if (!mediaId.startsWith(IMGBED_HOST + '/')) continue
-      const attr = body.media_attributes?.find(a => a.id === mediaId)
-      const altText = attr?.description || null
-      const blurhash = sanitizeBlurhash(attr?.blurhash)
-      await run(c.env.abdl_space_db, 'INSERT INTO post_images (post_id, image_url, is_nsfw, sort_order, alt_text, blurhash) VALUES (?, ?, ?, ?, ?, ?)', [resolved.realId, mediaId, body.sensitive ? 1 : 0, sortOrder++, altText, blurhash])
-    }
+    await insertStatusMedia(c.env.abdl_space_db, resolved.realId, resolvedMedia, body.sensitive === undefined ? post.has_nsfw : body.sensitive ? 1 : 0)
   }
 
   // Handle poll update
@@ -2808,8 +3085,8 @@ mastodon.put('/statuses/:id', async (c) => {
   )
   if (!updatedPost) return c.json({ error: 'Failed to update status' }, 500)
 
-  const images = await query<{ image_url: string; is_nsfw: number; alt_text: string | null; blurhash: string | null }>(
-    c.env.abdl_space_db, 'SELECT image_url, is_nsfw, alt_text, blurhash FROM post_images WHERE post_id = ? ORDER BY sort_order', [resolved.realId]
+  const images = await query<PostImageRow>(
+    c.env.abdl_space_db, `${POST_IMAGE_SELECT} FROM post_images WHERE post_id = ? ORDER BY sort_order`, [resolved.realId]
   )
   const poll = updatedPost.poll_id ? await loadPoll(c.env.abdl_space_db, updatedPost.poll_id as number) : null
 
@@ -2824,7 +3101,7 @@ mastodon.put('/statuses/:id', async (c) => {
     in_reply_to_id: updatedPost.in_reply_to_id as number | null,
     in_reply_to_type: updatedPost.in_reply_to_type as string | null,
     in_reply_to_account_id: updatedPost.in_reply_to_account_id as number | null,
-    poll: poll as any,
+    poll,
   }, toAccount({
     id: updatedPost.user_id as number, username: updatedPost.username as string, avatar: updatedPost.avatar as string | null,
     role: updatedPost.role as string, bio: updatedPost.bio as string | null, created_at: updatedPost.user_created_at as string,

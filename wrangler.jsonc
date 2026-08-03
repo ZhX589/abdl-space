@@ -18,6 +18,11 @@
 	"compatibility_flags": [
 		"nodejs_compat"
 	],
+	"vars": {
+		"COS_BUCKET": "abdl-1339643562",
+		"COS_REGION": "ap-shanghai",
+		"COS_PUBLIC_ORIGIN": "https://abdl-1339643562.cos.ap-shanghai.myqcloud.com"
+	},
 	"d1_databases": [
 		{
 			"binding": "abdl_space_db",

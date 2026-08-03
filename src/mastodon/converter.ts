@@ -5,6 +5,7 @@
 
 import type { MastodonAccount, MastodonStatus, MastodonMediaAttachment, MastodonNotification, MastodonPoll } from './types.ts'
 import { toMastoId } from './shared.ts'
+import { buildMediaPreviewUrl } from '../lib/media-preview.ts'
 
 const INSTANCE_DOMAIN = 'abdl-space.top'
 const DEFAULT_AVATAR = 'https://img.abdl-space.top/file/system/1781439303787_play_store_512.png'
@@ -93,7 +94,7 @@ export function toStatus(post: {
   shares_count?: number
   has_liked?: boolean
   created_at: string
-  images?: { image_url: string; is_nsfw?: boolean | number; alt_text?: string | null; blurhash?: string | null }[]
+  images?: { image_url: string; is_nsfw?: boolean | number; alt_text?: string | null; blurhash?: string | null; preview_url?: string | null; storage_provider?: string | null }[]
   repost?: unknown
   spoiler_text?: string
   visibility?: string
@@ -138,7 +139,7 @@ export function toStatus(post: {
     reblog: opts?.reblog ?? null,
     application: { name: 'ABDL Space', website: `https://${INSTANCE_DOMAIN}` },
     account,
-    media_attachments: images.map((img, i) => toMediaAttachment(i, img.image_url, img.alt_text, undefined, img.blurhash)),
+    media_attachments: images.map((img, i) => toMediaAttachment(i, img.image_url, img.alt_text, undefined, img.blurhash, img.preview_url, img.storage_provider)),
     mentions: [],
     tags: extractTags(post.content),
     emojis: [],
@@ -173,7 +174,7 @@ export function toStatusFromComment(comment: {
   like_count?: number
   has_liked?: boolean
   created_at: string
-  images?: { image_url: string; is_nsfw?: boolean | number; alt_text?: string | null; blurhash?: string | null }[]
+  images?: { image_url: string; is_nsfw?: boolean | number; alt_text?: string | null; blurhash?: string | null; preview_url?: string | null; storage_provider?: string | null }[]
 }, account: MastodonAccount): MastodonStatus {
   const images = comment.images || []
   const hasNsfwImage = images.some(img => img.is_nsfw)
@@ -201,7 +202,7 @@ export function toStatusFromComment(comment: {
     reblog: null,
     application: { name: 'ABDL Space', website: `https://${INSTANCE_DOMAIN}` },
     account,
-    media_attachments: images.map((img, i) => toMediaAttachment(i, img.image_url, img.alt_text, undefined, img.blurhash)),
+    media_attachments: images.map((img, i) => toMediaAttachment(i, img.image_url, img.alt_text, undefined, img.blurhash, img.preview_url, img.storage_provider)),
     mentions: [],
     tags: [],
     emojis: [],
@@ -211,12 +212,12 @@ export function toStatusFromComment(comment: {
 }
 
 /** Image URL → Mastodon MediaAttachment */
-function toMediaAttachment(id: number, url: string, description?: string | null, width?: number, blurhash?: string | null): MastodonMediaAttachment {
+function toMediaAttachment(id: number, url: string, description?: string | null, width?: number, blurhash?: string | null, previewUrl?: string | null, storageProvider?: string | null): MastodonMediaAttachment {
   return {
     id: String(id),
     type: 'image',
     url,
-    preview_url: url,
+    preview_url: previewUrl ?? buildMediaPreviewUrl(url, undefined, storageProvider === 'cos'),
     remote_url: null,
     text_url: null,
     meta: width ? {
@@ -536,6 +537,7 @@ function formatContent(text: string): string {
   html = html.replace(/(?<!href=")(https?:\/\/[^\s<>]+)/g, '<a href="$1" rel="nofollow noopener noreferrer" target="_blank">$1</a>')
 
   // Convert bare domains with common TLDs
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const URL_TLDS = 'com|net|org|cn|top|xyz|io|dev|app|co|me|cc|info|edu|gov|club|online|site|tech|store|blog|work|live|video|social|design|shop|icu|ltd|fun|space|host|press|link|buzz|pro|vip|wang|ren'
   html = html.replace(/(?<!href=")(?<!:\/\/)(?<![a-zA-Z0-9])((?:[a-zA-Z0-9][a-zA-Z0-9-]*\.){0,2}[a-zA-Z0-9][a-zA-Z0-9-]+\.)(?:${URL_TLDS})(?:\/[^\s<>]*)?/g, (match, domain, tld) => {
     const full = domain + tld
@@ -544,6 +546,7 @@ function formatContent(text: string): string {
   })
 
   // Convert #hashtags
+  // eslint-disable-next-line no-useless-escape
   html = html.replace(/(^|[^\/\w])#([\w\u4e00-\u9fa5]+)/g, `$1<a href="https://${INSTANCE_DOMAIN}/tags/$2" class="mention hashtag" rel="tag">#<span>$2</span></a>`)
   // Convert @mentions
   html = html.replace(/@([\w\u4e00-\u9fa5]+)/g, `<span class="h-card"><a href="https://${INSTANCE_DOMAIN}/@$1" class="u-url mention" rel="nofollow noopener noreferrer" target="_blank">@<span>$1</span></a></span>`)

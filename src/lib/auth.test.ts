@@ -13,7 +13,9 @@ test('accepts a valid signed JWT', async () => {
 test('rejects a malformed or tampered JWT', async () => {
   assert.equal(await verifyJWT('not-a-token', secret), null)
   const token = await signJWT(payload, secret)
-  assert.equal(await verifyJWT(`${token.slice(0, -1)}x`, secret), null)
+  const [header, body, signature] = token.split('.')
+  const tamperedSignature = `${signature[0] === 'A' ? 'B' : 'A'}${signature.slice(1)}`
+  assert.equal(await verifyJWT(`${header}.${body}.${tamperedSignature}`, secret), null)
 })
 
 test('rejects an expired JWT even with a valid signature', async () => {

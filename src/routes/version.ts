@@ -2,7 +2,7 @@ import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import type { Env } from '../types/index.ts'
 import { queryOne, run } from '../lib/db.ts'
-import { authMiddleware } from '../middleware/auth.ts'
+import { getCompletedUploadReference } from '../lib/upload-consumer.ts'
 
 type AppType = { Bindings: Env }
 
@@ -16,6 +16,16 @@ version.use('*', cors({
 }))
 
 const IMGBED_HOST = 'https://img.abdl-space.top'
+const IMGBED_PAGES_HOST = 'https://cloudflare-imgbed-790.pages.dev'
+const IMGBED_APK_UPLOAD_URL = `${IMGBED_HOST}/upload?returnFormat=full&uploadFolder=apk&uploadChannel=huggingface&channelName=abdl-space-img&autoRetry=false`
+
+function toHex(buffer: ArrayBuffer): string {
+  return Array.from(new Uint8Array(buffer), byte => byte.toString(16).padStart(2, '0')).join('')
+}
+
+export function resolveReleaseUpload(db: D1Database, reference: string, userId: number) {
+  return getCompletedUploadReference(db, reference, userId, 'release')
+}
 
 /**
  * GET /api/v1/version — 获取最新版本信息
@@ -56,6 +66,7 @@ version.get('/', async (c) => {
  * - changelog: string (optional)
  */
 version.post('/upload', async (c) => {
+  let stage = 'request'
   try {
   const db = c.env.abdl_space_db
 
@@ -74,33 +85,62 @@ version.post('/upload', async (c) => {
     versionCode = parseInt(formData.get('versionCode') as string) || 0
     changelog = formData.get('changelog') as string || ''
 
-    const apk = formData.get('apk')
-    if (apk && apk instanceof File) {
+    apk = formData.get('apk') instanceof File ? formData.get('apk') as File : null
+    if (apk) {
+      stage = 'imgbed_upload'
+      const sha256 = toHex(await crypto.subtle.digest('SHA-256', await apk.arrayBuffer()))
       const uploadForm = new FormData()
       uploadForm.append('file', apk)
-
-      let res = await fetch(`${IMGBED_HOST}/upload?returnFormat=full&uploadFolder=apk`, {
+      uploadForm.append('sha256', sha256)
+      let response = await fetch(IMGBED_APK_UPLOAD_URL, {
         method: 'POST',
-        headers: { 'Authorization': `Bearer ${c.env.IMGBED_UPLOAD_KEY}` },
+        headers: { Authorization: `Bearer ${c.env.IMGBED_UPLOAD_KEY}` },
         body: uploadForm,
       })
-
-      if (!res.ok && c.env.IMGBED_UPLOAD_KEY) {
-        const uploadForm2 = new FormData()
-        uploadForm2.append('file', apk)
-        res = await fetch(`${IMGBED_HOST}/upload?returnFormat=full&uploadFolder=apk&authCode=${c.env.IMGBED_UPLOAD_KEY}`, {
+      const upstreamStatuses = [response.status]
+      if (!response.ok && c.env.IMGBED_UPLOAD_KEY) {
+        const retryForm = new FormData()
+        retryForm.append('file', apk)
+        retryForm.append('sha256', sha256)
+        response = await fetch(`${IMGBED_APK_UPLOAD_URL}&authCode=${encodeURIComponent(c.env.IMGBED_UPLOAD_KEY)}`, {
           method: 'POST',
-          body: uploadForm2,
+          body: retryForm,
         })
+        upstreamStatuses.push(response.status)
       }
-
-      if (!res.ok) {
-        return c.json({ error: 'APK 上传失败' }, 500)
+      if (!response.ok && c.env.IMGBED_UPLOAD_KEY) {
+        const headerForm = new FormData()
+        headerForm.append('file', apk)
+        headerForm.append('sha256', sha256)
+        response = await fetch(IMGBED_APK_UPLOAD_URL, {
+          method: 'POST',
+          headers: { authCode: c.env.IMGBED_UPLOAD_KEY },
+          body: headerForm,
+        })
+        upstreamStatuses.push(response.status)
       }
-
-      const data = await res.json() as { src: string }[]
-      apkUrl = data[0]?.src || ''
-      if (!apkUrl) return c.json({ error: 'APK 上传返回为空' }, 500)
+      if (!response.ok) return c.json({ error: 'APK 上传失败', upstream_statuses: upstreamStatuses }, 502)
+      const upstreamContentType = response.headers.get('Content-Type') || ''
+      const upstreamBody = await response.text()
+      let data: { src?: string; url?: string } | { src?: string; url?: string }[]
+      try {
+        data = JSON.parse(upstreamBody)
+      } catch {
+        return c.json({
+          error: 'APK 上传失败',
+          upstream_status: response.status,
+          upstream_content_type: upstreamContentType,
+          upstream_body: upstreamBody.slice(0, 200),
+        }, 502)
+      }
+      const uploaded = Array.isArray(data) ? data[0] : data
+      apkUrl = uploaded?.src || uploaded?.url || ''
+      const uploadedUrl = apkUrl ? new URL(apkUrl) : null
+      if (!uploadedUrl || (uploadedUrl.origin !== IMGBED_HOST && uploadedUrl.origin !== IMGBED_PAGES_HOST)) {
+        return c.json({ error: 'APK 上传失败', upstream_status: response.status }, 502)
+      }
+      apkUrl = `${IMGBED_HOST}${uploadedUrl.pathname}${uploadedUrl.search}`
+      apkSize = apk.size
     }
   } else {
     try {
@@ -110,7 +150,7 @@ version.post('/upload', async (c) => {
       changelog = body.changelog || ''
       apkUrl = body.apkUrl || ''
       apkSize = body.apkSize || 0
-    } catch (e) {
+    } catch {
       return c.json({ error: 'Invalid JSON body' }, 400)
     }
   }
@@ -124,6 +164,7 @@ version.post('/upload', async (c) => {
   }
 
   // Ensure kv_store table exists
+  stage = 'version_update'
   await run(db, `CREATE TABLE IF NOT EXISTS kv_store (key TEXT PRIMARY KEY, value TEXT, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP)`)
 
   // Update version info
@@ -133,7 +174,7 @@ version.post('/upload', async (c) => {
     downloadUrl: apkUrl,
     changelog,
     releasedAt: new Date().toISOString(),
-    apkSize: apk ? apk.size : apkSize,
+    apkSize,
   })
 
   await run(db,
@@ -149,8 +190,11 @@ version.post('/upload', async (c) => {
     downloadUrl: apkUrl,
     message: '版本更新成功',
   })
-  } catch (e) {
-    return c.json({ error: String(e) }, 500)
+  } catch (error) {
+    let detail = error instanceof Error ? error.message : 'Unknown error'
+    if (c.env.IMGBED_UPLOAD_KEY) detail = detail.replaceAll(c.env.IMGBED_UPLOAD_KEY, '[redacted]')
+    detail = detail.replace(/authCode=[^&\s]+/gi, 'authCode=[redacted]').slice(0, 200)
+    return c.json({ error: '版本更新失败', stage, detail }, 500)
   }
 })
 

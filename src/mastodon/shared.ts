@@ -9,7 +9,13 @@ import type { MastodonInstance } from './types.ts'
 // ============================================================
 // Auth — shared between routes.ts and v2.ts
 // ============================================================
-export async function mastodonAuth(c: { req: { header: (name: string) => string | undefined }; env: Env }): Promise<JWTPayload | null> {
+export interface MastodonAuthResult {
+  user: JWTPayload
+  tokenType: 'oauth' | 'jwt'
+  scopes: string[]
+}
+
+export async function mastodonAuthDetails(c: { req: { header: (name: string) => string | undefined }; env: Env }): Promise<MastodonAuthResult | null> {
   const auth = c.req.header('Authorization')
   if (!auth) return null
   const match = auth.match(/^Bearer\s+(.+)$/i)
@@ -22,15 +28,31 @@ export async function mastodonAuth(c: { req: { header: (name: string) => string 
       const user = await queryOne<{ id: number; username: string; email: string; role: string }>(
         c.env.abdl_space_db, 'SELECT id, username, email, role FROM users WHERE id = ?', [result.sub]
       )
-      if (user) return { sub: user.id, username: user.username, email: user.email, role: user.role, iat: 0, exp: 0 }
+      if (user) {
+        return {
+          user: { sub: user.id, username: user.username, email: user.email, role: user.role, iat: 0, exp: 0 },
+          tokenType: 'oauth',
+          scopes: (result.scope ?? '').split(/\s+/).filter(Boolean),
+        }
+      }
     }
-  } catch {}
+  } catch {
+    // Fall through to legacy JWT authentication.
+  }
   try {
     const { verifyJWT } = await import('../lib/auth.ts')
     const payload = await verifyJWT(token, c.env.JWT_SECRET)
-    if (payload) return payload
-  } catch {}
+    if (payload) {
+      return { user: payload, tokenType: 'jwt', scopes: [] }
+    }
+  } catch {
+    return null
+  }
   return null
+}
+
+export async function mastodonAuth(c: { req: { header: (name: string) => string | undefined }; env: Env }): Promise<JWTPayload | null> {
+  return (await mastodonAuthDetails(c))?.user ?? null
 }
 
 // ============================================================
