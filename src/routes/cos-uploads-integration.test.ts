@@ -131,7 +131,7 @@ test('version publishing anonymously uploads APK files to the legacy imgbed dist
 			abdl_space_db: d1(sqlite),
 		} as never)
 		assert.equal(response.status, 200, await response.clone().text())
-		assert.equal(uploadUrl, 'https://img.abdl-space.top/upload?returnFormat=full&uploadFolder=apk')
+		assert.equal(uploadUrl, 'https://img.abdl-space.top/upload?returnFormat=full&uploadFolder=apk&uploadChannel=huggingface&channelName=abdl-space-img&autoRetry=false')
 		assert.deepEqual(await response.json(), {
 			success: true,
 			versionName: '2.4.0',

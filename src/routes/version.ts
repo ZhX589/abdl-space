@@ -16,6 +16,7 @@ version.use('*', cors({
 }))
 
 const IMGBED_HOST = 'https://img.abdl-space.top'
+const IMGBED_APK_UPLOAD_URL = `${IMGBED_HOST}/upload?returnFormat=full&uploadFolder=apk&uploadChannel=huggingface&channelName=abdl-space-img&autoRetry=false`
 
 export function resolveReleaseUpload(db: D1Database, reference: string, userId: number) {
   return getCompletedUploadReference(db, reference, userId, 'release')
@@ -82,7 +83,7 @@ version.post('/upload', async (c) => {
     if (apk) {
       const uploadForm = new FormData()
       uploadForm.append('file', apk)
-      let response = await fetch(`${IMGBED_HOST}/upload?returnFormat=full&uploadFolder=apk`, {
+      let response = await fetch(IMGBED_APK_UPLOAD_URL, {
         method: 'POST',
         headers: { Authorization: `Bearer ${c.env.IMGBED_UPLOAD_KEY}` },
         body: uploadForm,
@@ -91,7 +92,7 @@ version.post('/upload', async (c) => {
       if (!response.ok && c.env.IMGBED_UPLOAD_KEY) {
         const retryForm = new FormData()
         retryForm.append('file', apk)
-        response = await fetch(`${IMGBED_HOST}/upload?returnFormat=full&uploadFolder=apk&authCode=${encodeURIComponent(c.env.IMGBED_UPLOAD_KEY)}`, {
+        response = await fetch(`${IMGBED_APK_UPLOAD_URL}&authCode=${encodeURIComponent(c.env.IMGBED_UPLOAD_KEY)}`, {
           method: 'POST',
           body: retryForm,
         })
@@ -100,7 +101,7 @@ version.post('/upload', async (c) => {
       if (!response.ok && c.env.IMGBED_UPLOAD_KEY) {
         const headerForm = new FormData()
         headerForm.append('file', apk)
-        response = await fetch(`${IMGBED_HOST}/upload?returnFormat=full&uploadFolder=apk`, {
+        response = await fetch(IMGBED_APK_UPLOAD_URL, {
           method: 'POST',
           headers: { authCode: c.env.IMGBED_UPLOAD_KEY },
           body: headerForm,
