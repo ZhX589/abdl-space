@@ -182,6 +182,29 @@ test('version publishing accepts the current imgbed object response', async () =
 	}
 })
 
+test('version publishing normalizes the imgbed Pages URL to the public distribution domain', async () => {
+	const app = new Hono()
+	app.route('/api/v1/version', version)
+	const sqlite = database()
+	const originalFetch = globalThis.fetch
+	globalThis.fetch = async () => Response.json([{ src: 'https://cloudflare-imgbed-790.pages.dev/file/apk/current.apk' }])
+	try {
+		const form = new FormData()
+		form.append('apk', new File([new Uint8Array([1])], 'app.apk', { type: 'application/vnd.android.package-archive' }))
+		form.append('versionName', '2.4.0')
+		form.append('versionCode', '22')
+		const response = await app.request('/api/v1/version/upload', { method: 'POST', body: form }, {
+			IMGBED_UPLOAD_KEY: 'test-key',
+			abdl_space_db: d1(sqlite),
+		} as never)
+		assert.equal(response.status, 200, await response.clone().text())
+		assert.equal((await response.json() as { downloadUrl: string }).downloadUrl, 'https://img.abdl-space.top/file/apk/current.apk')
+	} finally {
+		globalThis.fetch = originalFetch
+		sqlite.close()
+	}
+})
+
 test('version publishing reports all imgbed authentication failure statuses', async () => {
 	const app = new Hono()
 	app.route('/api/v1/version', version)

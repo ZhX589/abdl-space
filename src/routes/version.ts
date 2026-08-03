@@ -16,6 +16,7 @@ version.use('*', cors({
 }))
 
 const IMGBED_HOST = 'https://img.abdl-space.top'
+const IMGBED_PAGES_HOST = 'https://cloudflare-imgbed-790.pages.dev'
 const IMGBED_APK_UPLOAD_URL = `${IMGBED_HOST}/upload?returnFormat=full&uploadFolder=apk&uploadChannel=huggingface&channelName=abdl-space-img&autoRetry=false`
 
 function toHex(buffer: ArrayBuffer): string {
@@ -134,9 +135,11 @@ version.post('/upload', async (c) => {
       }
       const uploaded = Array.isArray(data) ? data[0] : data
       apkUrl = uploaded?.src || uploaded?.url || ''
-      if (!apkUrl || new URL(apkUrl).origin !== IMGBED_HOST) {
+      const uploadedUrl = apkUrl ? new URL(apkUrl) : null
+      if (!uploadedUrl || (uploadedUrl.origin !== IMGBED_HOST && uploadedUrl.origin !== IMGBED_PAGES_HOST)) {
         return c.json({ error: 'APK 上传失败', upstream_status: response.status }, 502)
       }
+      apkUrl = `${IMGBED_HOST}${uploadedUrl.pathname}${uploadedUrl.search}`
       apkSize = apk.size
     }
   } else {
