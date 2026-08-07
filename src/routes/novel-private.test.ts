@@ -21,6 +21,8 @@ const env = {
 	NOVEL_PRIVATE_COS_REGION: 'ap-shanghai',
 }
 
+const EMPTY_123_SHA256 = '409a7f83ac6b31dc8c77e3ec18038f209bd2f545e0f4177c2e2381aa4e067b49'
+
 interface BookRow {
 	id: string
 	owner_id: number
@@ -54,7 +56,7 @@ function bookRow(overrides: Partial<BookRow> = {}): BookRow {
 		author: 'Author',
 		format: 'epub',
 		object_key: `novels/private/42/${id}.epub`,
-		content_hash: 'a'.repeat(64),
+		content_hash: EMPTY_123_SHA256,
 		declared_size: 123,
 		verified_size: null,
 		parse_status: 'pending',
@@ -73,6 +75,22 @@ function validHeadHeaders(row: BookRow, overrides: Record<string, string> = {}):
 		'Content-Type': row.format === 'txt' ? 'text/plain' : 'application/epub+zip',
 		'x-cos-meta-sha256': row.content_hash,
 		...overrides,
+	}
+}
+
+function validGetResponse(row: BookRow, overrides: { body?: Uint8Array, headers?: Record<string, string>, status?: number } = {}): Response {
+	const body = overrides.body ?? new Uint8Array(row.declared_size)
+	return new Response(body, {
+		status: overrides.status ?? 200,
+		headers: { 'Content-Length': String(body.byteLength), ...overrides.headers },
+	})
+}
+
+function verifiedObjectFetch(row: BookRow, headOverrides: Record<string, string> = {}) {
+	return async (_input: string | URL | Request, init?: RequestInit) => {
+		if (init?.method === 'HEAD') return new Response(null, { status: 200, headers: validHeadHeaders(row, headOverrides) })
+		if (init?.method === 'GET') return validGetResponse(row)
+		throw new Error(`Unexpected COS method: ${init?.method}`)
 	}
 }
 
@@ -412,28 +430,32 @@ test('conditional INSERT gives one winner for the same hash in real SQLite', () 
 	}
 })
 
-test('complete atomically claims pending before HEAD and concurrent callers do not duplicate HEAD', async () => {
+test('complete atomically claims pending before COS verification and concurrent callers do not duplicate reads', async () => {
 	const row = bookRow()
 	const db = createDb([row])
 	const originalFetch = globalThis.fetch
 	let releaseHead!: () => void
 	const headGate = new Promise<void>(resolve => { releaseHead = resolve })
-	let calls = 0
-	globalThis.fetch = async () => {
-		calls++
-		await headGate
-		return new Response(null, { status: 200, headers: validHeadHeaders(row) })
+	const methods: string[] = []
+	globalThis.fetch = async (_input, init) => {
+		methods.push(String(init?.method))
+		if (init?.method === 'HEAD') {
+			await headGate
+			return new Response(null, { status: 200, headers: validHeadHeaders(row) })
+		}
+		if (init?.method === 'GET') return validGetResponse(row)
+		throw new Error(`Unexpected COS method: ${init?.method}`)
 	}
 	try {
 		const first = request(`/${row.id}/complete`, { db })
 		while (db.rows.get(`42:${row.id}`)?.parse_status !== 'parsing') await new Promise(resolve => setTimeout(resolve, 0))
-		while (calls !== 1) await new Promise(resolve => setTimeout(resolve, 0))
+		while (methods.length !== 1) await new Promise(resolve => setTimeout(resolve, 0))
 		const second = await request(`/${row.id}/complete`, { db })
 		assert.equal(second.response.status, 202)
-		assert.equal(calls, 1)
+		assert.deepEqual(methods, ['HEAD'])
 		releaseHead()
 		assert.equal((await first).response.status, 200)
-		assert.equal(calls, 1)
+		assert.deepEqual(methods, ['HEAD', 'GET'])
 	} finally {
 		globalThis.fetch = originalFetch
 	}
@@ -444,14 +466,14 @@ test('complete returns 202 for a live parsing lease and reclaims one older than 
 	const live = bookRow({ parse_status: 'parsing', verification_started_at: now - 299_000_000 })
 	let calls = 0
 	const originalFetch = globalThis.fetch
-	globalThis.fetch = async () => { calls++; return new Response(null, { status: 200, headers: validHeadHeaders(live) }) }
+	globalThis.fetch = async (input, init) => { calls++; return verifiedObjectFetch(live)(input, init) }
 	try {
 		assert.equal((await request(`/${live.id}/complete`, { db: createDb([live]) })).response.status, 202)
 		assert.equal(calls, 0)
 		const stale = bookRow({ parse_status: 'parsing', verification_started_at: now - 301_000_000 })
 		const { response, db } = await request(`/${stale.id}/complete`, { db: createDb([stale]) })
 		assert.equal(response.status, 200, await response.clone().text())
-		assert.equal(calls, 1)
+		assert.equal(calls, 2)
 		assert.equal(db.rows.get(`42:${stale.id}`)?.parse_status, 'ready')
 	} finally {
 		globalThis.fetch = originalFetch
@@ -525,7 +547,11 @@ test('complete returns ready without HEAD, restores missing objects, and rejects
 	] as const) {
 		const row = bookRow()
 		const db = createDb([row])
-		globalThis.fetch = async () => outcome
+		globalThis.fetch = async (_input, init) => {
+			if (init?.method === 'HEAD') return outcome
+			if (init?.method === 'GET') return validGetResponse(row)
+			return new Response(null, { status: 204 })
+		}
 		try {
 			assert.equal((await request(`/${row.id}/complete`, { db })).response.status, 422)
 			assert.equal(db.rows.get(`42:${row.id}`)?.parse_status, expectedStatus)
@@ -612,7 +638,7 @@ test('complete safely restores its lease after post-HEAD exceptions and final UP
 		assert.equal(firstDb.rows.get(`42:${headersFailure.id}`)?.parse_status, 'pending')
 
 		const updateFailure = bookRow()
-		globalThis.fetch = async () => new Response(null, { status: 200, headers: validHeadHeaders(updateFailure) })
+		globalThis.fetch = verifiedObjectFetch(updateFailure)
 		const secondDb = createDb([updateFailure], { failRun: sql => sql.includes("parse_status = 'ready'") })
 		assert.equal((await request(`/${updateFailure.id}/complete`, { db: secondDb })).response.status, 500)
 		assert.equal(secondDb.rows.get(`42:${updateFailure.id}`)?.parse_status, 'pending')
@@ -626,7 +652,10 @@ test('complete accepts trimmed case-insensitive exact MIME but rejects parameter
 		const row = bookRow()
 		const db = createDb([row])
 		const originalFetch = globalThis.fetch
-		globalThis.fetch = async () => new Response(null, { status: 200, headers: validHeadHeaders(row, { 'Content-Type': contentType }) })
+		globalThis.fetch = async (input, init) => {
+			if (init?.method === 'HEAD') return new Response(null, { status: 200, headers: validHeadHeaders(row, { 'Content-Type': contentType }) })
+			return verifiedObjectFetch(row)(input, init)
+		}
 		try {
 			assert.equal((await request(`/${row.id}/complete`, { db })).response.status, expected)
 		} finally {
@@ -664,21 +693,110 @@ test('complete maps private HEAD status safely and never leaks authorization', a
 	}
 })
 
-test('complete requires an exact SHA-256 object metadata match', async () => {
-	for (const [metadataHash, expected] of [['b'.repeat(64), 422], ['a'.repeat(64), 200]] as const) {
-		const row = bookRow({ content_hash: 'a'.repeat(64) })
+test('complete trusts actual SHA-256 bytes instead of object metadata', async () => {
+	for (const [body, metadataHash, expected] of [
+		[new Uint8Array(123).fill(1), EMPTY_123_SHA256, 422],
+		[new Uint8Array(123), 'f'.repeat(64), 200],
+	] as const) {
+		const row = bookRow()
 		const db = createDb([row])
 		const originalFetch = globalThis.fetch
-		globalThis.fetch = async (_input, init) => init?.method === 'DELETE'
-			? new Response(null, { status: 204 })
-			: new Response(null, { status: 200, headers: validHeadHeaders(row, { 'x-cos-meta-sha256': metadataHash }) })
+		globalThis.fetch = async (_input, init) => {
+			if (init?.method === 'HEAD') return new Response(null, { status: 200, headers: validHeadHeaders(row, { 'x-cos-meta-sha256': metadataHash }) })
+			if (init?.method === 'GET') return validGetResponse(row, { body })
+			if (init?.method === 'DELETE') return new Response(null, { status: 204 })
+			throw new Error(`Unexpected COS method: ${init?.method}`)
+		}
 		try {
 			const response = (await request(`/${row.id}/complete`, { db })).response
 			assert.equal(response.status, expected)
 			assert.doesNotMatch(await response.clone().text(), /Authorization|q-signature|AKIDEXAMPLEFAKE/)
+			assert.equal(db.rows.get(`42:${row.id}`)?.parse_status, expected === 200 ? 'ready' : 'failed')
 		} finally {
 			globalThis.fetch = originalFetch
 		}
+	}
+})
+
+test('complete validates GET lengths before and after reading object bytes', async () => {
+	for (const [headers, body] of [
+		[{ 'Content-Length': '124' }, new Uint8Array(123)],
+		[{}, new Uint8Array(124)],
+	] as const) {
+		const row = bookRow()
+		const db = createDb([row])
+		const originalFetch = globalThis.fetch
+		globalThis.fetch = async (_input, init) => {
+			if (init?.method === 'HEAD') return new Response(null, { status: 200, headers: validHeadHeaders(row) })
+			if (init?.method === 'GET') return new Response(body, { status: 200, headers })
+			if (init?.method === 'DELETE') return new Response(null, { status: 204 })
+			throw new Error(`Unexpected COS method: ${init?.method}`)
+		}
+		try {
+			assert.equal((await request(`/${row.id}/complete`, { db })).response.status, 422)
+			assert.equal(db.rows.get(`42:${row.id}`)?.parse_status, 'failed')
+		} finally {
+			globalThis.fetch = originalFetch
+		}
+	}
+})
+
+test('complete maps private GET failures safely and restores pending', async () => {
+	for (const outcome of [
+		new Response(null, { status: 404 }), new Response(null, { status: 401 }), new Response(null, { status: 403 }),
+		new Response(null, { status: 429 }), new Response(null, { status: 500 }),
+		new Response(null, { status: 302, headers: { Location: 'https://attacker.test/?Authorization=secret' } }),
+	] as const) {
+		const row = bookRow()
+		const db = createDb([row])
+		const originalFetch = globalThis.fetch
+		globalThis.fetch = async (_input, init) => init?.method === 'HEAD'
+			? new Response(null, { status: 200, headers: validHeadHeaders(row) })
+			: outcome
+		try {
+			const response = (await request(`/${row.id}/complete`, { db })).response
+			assert.equal(response.status, outcome.status === 404 ? 422 : 502)
+			assert.equal(db.rows.get(`42:${row.id}`)?.parse_status, 'pending')
+			assert.doesNotMatch(await response.text(), /Authorization|secret|q-signature|AKIDEXAMPLEFAKE|attacker/)
+		} finally {
+			globalThis.fetch = originalFetch
+		}
+	}
+
+	const row = bookRow()
+	const db = createDb([row])
+	const originalFetch = globalThis.fetch
+	globalThis.fetch = async (_input, init) => {
+		if (init?.method === 'HEAD') return new Response(null, { status: 200, headers: validHeadHeaders(row) })
+		throw new Error('network Authorization secret')
+	}
+	try {
+		const response = (await request(`/${row.id}/complete`, { db })).response
+		assert.equal(response.status, 502)
+		assert.equal(db.rows.get(`42:${row.id}`)?.parse_status, 'pending')
+		assert.doesNotMatch(await response.text(), /Authorization|secret/)
+	} finally {
+		globalThis.fetch = originalFetch
+	}
+
+	const readFailure = bookRow()
+	const readFailureDb = createDb([readFailure])
+	globalThis.fetch = async (_input, init) => {
+		if (init?.method === 'HEAD') return new Response(null, { status: 200, headers: validHeadHeaders(readFailure) })
+		return {
+			ok: true,
+			status: 200,
+			headers: new Headers({ 'Content-Length': String(readFailure.declared_size) }),
+			async arrayBuffer() { throw new Error('stream Authorization secret') },
+		} as Response
+	}
+	try {
+		const response = (await request(`/${readFailure.id}/complete`, { db: readFailureDb })).response
+		assert.equal(response.status, 502)
+		assert.equal(readFailureDb.rows.get(`42:${readFailure.id}`)?.parse_status, 'pending')
+		assert.doesNotMatch(await response.text(), /Authorization|secret/)
+	} finally {
+		globalThis.fetch = originalFetch
 	}
 })
 

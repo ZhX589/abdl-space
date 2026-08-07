@@ -8,6 +8,7 @@ import {
 	createCosHeadAuthorization,
 	createCosPutAuthorization,
 	deleteObjectFromCos,
+	getPrivateObjectFromCos,
 	headPrivateObjectFromCos,
 	headObjectFromCos,
 	putObjectToCos,
@@ -127,6 +128,44 @@ test('private HEAD rejects redirects as a safe upstream failure', async () => {
 		)
 	} finally {
 		globalThis.fetch = originalFetch
+	}
+})
+
+test('private GET uses signed headers with manual redirects and returns object bytes', async () => {
+	const originalFetch = globalThis.fetch
+	let request: { input: string | URL | Request, init?: RequestInit } | undefined
+	globalThis.fetch = async (input, init) => {
+		request = { input, init }
+		return new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { 'Content-Length': '3' } })
+	}
+	try {
+		const response = await getPrivateObjectFromCos({ ...credentials, objectKey: 'novels/private/42/book.epub', contentType: 'application/epub+zip', now })
+		assert.deepEqual(new Uint8Array(await response.arrayBuffer()), new Uint8Array([1, 2, 3]))
+		assert.equal(request?.init?.method, 'GET')
+		assert.equal(request?.init?.redirect, 'manual')
+		assert.match((request?.init?.headers as Record<string, string>).Authorization, /q-ak=AKIDEXAMPLEFAKE(?:&|$)/)
+		assert.doesNotMatch(String(request?.input), /q-signature|AKIDEXAMPLEFAKE/)
+	} finally {
+		globalThis.fetch = originalFetch
+	}
+})
+
+test('private GET rejects redirects and exposes only classified status', async () => {
+	for (const [status, expected] of [[302, 502], [404, 404], [403, 403], [500, 500]] as const) {
+		const originalFetch = globalThis.fetch
+		globalThis.fetch = async () => new Response(null, { status, headers: { Location: 'https://attacker.test/?Authorization=secret' } })
+		try {
+			await assert.rejects(
+				getPrivateObjectFromCos({ ...credentials, objectKey: 'novels/private/42/book.epub', contentType: 'application/epub+zip', now }),
+				(error: Error & { status?: number }) => {
+					assert.equal(error.status, expected)
+					assert.doesNotMatch(error.message, /attacker|Authorization|secret|q-signature|AKIDEXAMPLEFAKE/)
+					return true
+				},
+			)
+		} finally {
+			globalThis.fetch = originalFetch
+		}
 	}
 })
 

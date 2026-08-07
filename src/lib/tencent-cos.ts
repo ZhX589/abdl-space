@@ -197,6 +197,19 @@ export async function headPrivateObjectFromCos(options: CosAuthorizationOptions)
 	return response
 }
 
+export async function getPrivateObjectFromCos(options: CosAuthorizationOptions): Promise<Response> {
+	const signed = await createCosAuthorization('get', options)
+	const response = await fetch(signed.url, {
+		method: 'GET',
+		headers: signed.headers,
+		redirect: 'manual',
+	})
+	if (!response.ok) {
+		throw new CosHttpError(response.status >= 300 && response.status < 400 ? 502 : response.status)
+	}
+	return response
+}
+
 export async function deleteObjectFromCos(options: CosAuthorizationOptions): Promise<Response> {
 	const signed = await createCosDeleteAuthorization(options)
 	const response = await fetch(signed.url, {

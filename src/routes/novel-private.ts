@@ -2,7 +2,7 @@ import { Hono } from 'hono'
 import type { Context } from 'hono'
 import { cors } from 'hono/cors'
 
-import { CosHttpError, createCosGetAuthorization, createCosPutAuthorization, deleteObjectFromCos, headPrivateObjectFromCos } from '../lib/tencent-cos.ts'
+import { CosHttpError, createCosGetAuthorization, createCosPutAuthorization, deleteObjectFromCos, getPrivateObjectFromCos, headPrivateObjectFromCos } from '../lib/tencent-cos.ts'
 import { mastodonAuthDetails } from '../mastodon/shared.ts'
 import { assertSessionNotStale } from '../middleware/auth.ts'
 import type { Env } from '../types/index.ts'
@@ -93,6 +93,10 @@ async function parseJsonObject(c: Context<AppType>): Promise<Record<string, unkn
 
 function matchesContentType(value: string | null, expected: string): boolean {
 	return value !== null && value.trim().toLowerCase() === expected
+}
+
+function toHex(bytes: ArrayBuffer): string {
+	return Array.from(new Uint8Array(bytes), byte => byte.toString(16).padStart(2, '0')).join('')
 }
 
 function bookResponse(book: PrivateBookRow) {
@@ -396,9 +400,7 @@ novelPrivate.post('/:id/complete', async c => {
 		const contentLength = head.headers.get('Content-Length')
 		const verifiedSize = contentLength === null ? Number.NaN : Number(contentLength)
 		const expectedMime = book.format === 'txt' ? 'text/plain' : 'application/epub+zip'
-		const metadataSha256 = head.headers.get('x-cos-meta-sha256')
-		if (!Number.isSafeInteger(verifiedSize) || verifiedSize !== book.declared_size || !matchesContentType(head.headers.get('Content-Type'), expectedMime)
-			|| metadataSha256 !== book.content_hash) {
+		if (!Number.isSafeInteger(verifiedSize) || verifiedSize !== book.declared_size || !matchesContentType(head.headers.get('Content-Type'), expectedMime)) {
 			const cleanupToken = newCleanupToken()
 			if (!await failAndDeleteBook(c.env.abdl_space_db, book, verificationNow, cleanupToken)) {
 				const current = await getOwnedBook(c.env.abdl_space_db, book.id, auth.user.sub)
@@ -409,6 +411,50 @@ novelPrivate.post('/:id/complete', async c => {
 			shouldRestore = false
 			await cleanupPrivateObject(c.env.abdl_space_db, book, cos, cleanupToken)
 			return c.json({ error: 'Private object metadata mismatch', code: 'verification_mismatch' }, 422)
+		}
+
+		let objectResponse: Response
+		try {
+			objectResponse = await getPrivateObjectFromCos({ ...cos, objectKey: book.object_key, contentType: expectedMime })
+		} catch (error) {
+			if (error instanceof CosHttpError && error.status === 404) return c.json({ error: 'Private object not found', code: 'verification_failed' }, 422)
+			return c.json({ error: 'Private storage verification unavailable', code: 'verification_unavailable' }, 502)
+		}
+
+		const getContentLength = objectResponse.headers.get('Content-Length')
+		const declaredGetSize = getContentLength === null ? null : Number(getContentLength)
+		if (declaredGetSize !== null && (!Number.isSafeInteger(declaredGetSize) || declaredGetSize !== book.declared_size)) {
+			const cleanupToken = newCleanupToken()
+			if (!await failAndDeleteBook(c.env.abdl_space_db, book, verificationNow, cleanupToken)) {
+				const current = await getOwnedBook(c.env.abdl_space_db, book.id, auth.user.sub)
+				if (current?.parse_status === 'ready' && current.verified_size !== null) return c.json(bookResponse(current))
+				if (current?.parse_status === 'parsing') return c.json(bookResponse(current), 202)
+				return c.json({ error: 'Private book state changed', code: 'book_conflict' }, 409)
+			}
+			shouldRestore = false
+			await cleanupPrivateObject(c.env.abdl_space_db, book, cos, cleanupToken)
+			return c.json({ error: 'Private object content mismatch', code: 'verification_mismatch' }, 422)
+		}
+
+		// WebCrypto has no streaming digest; the full read is bounded by MAX_PRIVATE_BOOK_SIZE (50 MiB).
+		let objectBytes: ArrayBuffer
+		try {
+			objectBytes = await objectResponse.arrayBuffer()
+		} catch {
+			return c.json({ error: 'Private storage verification unavailable', code: 'verification_unavailable' }, 502)
+		}
+		const actualHash = toHex(await crypto.subtle.digest('SHA-256', objectBytes))
+		if (objectBytes.byteLength !== book.declared_size || actualHash !== book.content_hash) {
+			const cleanupToken = newCleanupToken()
+			if (!await failAndDeleteBook(c.env.abdl_space_db, book, verificationNow, cleanupToken)) {
+				const current = await getOwnedBook(c.env.abdl_space_db, book.id, auth.user.sub)
+				if (current?.parse_status === 'ready' && current.verified_size !== null) return c.json(bookResponse(current))
+				if (current?.parse_status === 'parsing') return c.json(bookResponse(current), 202)
+				return c.json({ error: 'Private book state changed', code: 'book_conflict' }, 409)
+			}
+			shouldRestore = false
+			await cleanupPrivateObject(c.env.abdl_space_db, book, cos, cleanupToken)
+			return c.json({ error: 'Private object content mismatch', code: 'verification_mismatch' }, 422)
 		}
 
 		const result = await c.env.abdl_space_db.prepare(`
