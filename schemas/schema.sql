@@ -550,7 +550,7 @@ CREATE INDEX IF NOT EXISTS idx_friend_request_snapshots_original ON friend_reque
 -- 私人小说云书架
 -- ============================================================
 
-CREATE TABLE IF NOT EXISTS novel_books (
+CREATE TABLE IF NOT EXISTS private_books (
   id TEXT NOT NULL,
   owner_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   title TEXT NOT NULL,
@@ -568,8 +568,8 @@ CREATE TABLE IF NOT EXISTS novel_books (
   UNIQUE (owner_id, object_key)
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_novel_books_owner_content_hash
-  ON novel_books(owner_id, content_hash);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_private_books_owner_content_hash
+  ON private_books(owner_id, content_hash);
 
 CREATE TABLE IF NOT EXISTS novel_sync_items (
   book_id TEXT NOT NULL,
@@ -580,7 +580,7 @@ CREATE TABLE IF NOT EXISTS novel_sync_items (
   updated_at INTEGER NOT NULL,
   deleted_at INTEGER,
   PRIMARY KEY (owner_id, item_type, item_id),
-  FOREIGN KEY (owner_id, book_id) REFERENCES novel_books(owner_id, id) ON DELETE CASCADE
+  FOREIGN KEY (owner_id, book_id) REFERENCES private_books(owner_id, id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_novel_sync_items_owner_book_updated

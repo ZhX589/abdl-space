@@ -1,4 +1,4 @@
-CREATE TABLE novel_books (
+CREATE TABLE private_books (
   id TEXT NOT NULL,
   owner_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   title TEXT NOT NULL,
@@ -16,8 +16,8 @@ CREATE TABLE novel_books (
   UNIQUE (owner_id, object_key)
 );
 
-CREATE UNIQUE INDEX idx_novel_books_owner_content_hash
-  ON novel_books(owner_id, content_hash);
+CREATE UNIQUE INDEX idx_private_books_owner_content_hash
+  ON private_books(owner_id, content_hash);
 
 CREATE TABLE novel_sync_items (
   book_id TEXT NOT NULL,
@@ -28,7 +28,7 @@ CREATE TABLE novel_sync_items (
   updated_at INTEGER NOT NULL,
   deleted_at INTEGER,
   PRIMARY KEY (owner_id, item_type, item_id),
-  FOREIGN KEY (owner_id, book_id) REFERENCES novel_books(owner_id, id) ON DELETE CASCADE
+  FOREIGN KEY (owner_id, book_id) REFERENCES private_books(owner_id, id) ON DELETE CASCADE
 );
 
 CREATE INDEX idx_novel_sync_items_owner_book_updated

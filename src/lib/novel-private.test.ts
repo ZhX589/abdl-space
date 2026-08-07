@@ -30,11 +30,16 @@ function createDatabase(useCompleteSchema = false): DatabaseSync {
 
 function insertBook(database: DatabaseSync, id: string, ownerId: number, contentHash: string, objectKey = `novels/${ownerId}/${id}`): void {
 	database.prepare(`
-		INSERT INTO novel_books (
+		INSERT INTO private_books (
 			id, owner_id, title, author, format, object_key, content_hash,
 			declared_size, verified_size, parse_status
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`).run(id, ownerId, `Book ${id}`, 'Author', 'epub', objectKey, contentHash, 100, 100, 'ready')
+}
+
+function assertPrivateBooksTableContract(database: DatabaseSync): void {
+	const tableNames = database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('private_books', 'novel_books') ORDER BY name").all() as unknown as Array<{ name: string }>
+	assert.deepEqual(tableNames.map(({ name }) => name), ['private_books'])
 }
 
 function insertSyncItem(database: DatabaseSync, bookId: string, ownerId: number, itemId: string): void {
@@ -48,7 +53,8 @@ function insertSyncItem(database: DatabaseSync, bookId: string, ownerId: number,
 test('creates the complete private novel metadata schema with explicit non-null primary keys', () => {
 	const database = createDatabase()
 	try {
-		const bookColumns = database.prepare('PRAGMA table_info(novel_books)').all() as unknown as TableColumn[]
+		assertPrivateBooksTableContract(database)
+		const bookColumns = database.prepare('PRAGMA table_info(private_books)').all() as unknown as TableColumn[]
 		assert.deepEqual(bookColumns.map(({ name }) => name), [
 			'id', 'owner_id', 'title', 'author', 'format', 'object_key', 'content_hash',
 			'declared_size', 'verified_size', 'parse_status', 'created_at', 'updated_at', 'deleted_at',
@@ -74,6 +80,7 @@ test('creates the complete private novel metadata schema with explicit non-null 
 test('keeps the complete schema aligned with the private novel migration', () => {
 	const database = createDatabase(true)
 	try {
+		assertPrivateBooksTableContract(database)
 		insertBook(database, 'book-1', 1, 'same-hash', 'shared-object-key')
 		assert.throws(() => insertBook(database, 'book-2', 1, 'same-hash'), /UNIQUE constraint failed/)
 		assert.doesNotThrow(() => insertBook(database, 'book-1', 2, 'same-hash', 'shared-object-key'))
@@ -119,9 +126,9 @@ test('cascades private books and sync items without affecting another owner', ()
 		insertSyncItem(database, 'owner-2-book', 2, 'owner-2-item')
 
 		database.exec('DELETE FROM users WHERE id = 1')
-		assert.equal(database.prepare('SELECT COUNT(*) AS count FROM novel_books WHERE owner_id = 1').get()?.count, 0)
+		assert.equal(database.prepare('SELECT COUNT(*) AS count FROM private_books WHERE owner_id = 1').get()?.count, 0)
 		assert.equal(database.prepare('SELECT COUNT(*) AS count FROM novel_sync_items WHERE owner_id = 1').get()?.count, 0)
-		assert.equal(database.prepare('SELECT COUNT(*) AS count FROM novel_books WHERE owner_id = 2').get()?.count, 1)
+		assert.equal(database.prepare('SELECT COUNT(*) AS count FROM private_books WHERE owner_id = 2').get()?.count, 1)
 		assert.equal(database.prepare('SELECT COUNT(*) AS count FROM novel_sync_items WHERE owner_id = 2').get()?.count, 1)
 	} finally {
 		database.close()
