@@ -10,15 +10,21 @@ interface TableColumn {
 }
 
 const migrationUrl = new URL('../../migrations/0050_novel_private_library.sql', import.meta.url)
+const schemaUrl = new URL('../../schemas/schema.sql', import.meta.url)
 
-function createDatabase(): DatabaseSync {
+function createDatabase(useCompleteSchema = false): DatabaseSync {
 	const database = new DatabaseSync(':memory:')
-	database.exec(`
-		PRAGMA foreign_keys = ON;
-		CREATE TABLE users (id INTEGER PRIMARY KEY NOT NULL);
-		INSERT INTO users (id) VALUES (1), (2);
-	`)
-	database.exec(readFileSync(migrationUrl, 'utf8'))
+	database.exec('PRAGMA foreign_keys = ON;')
+	if (useCompleteSchema) {
+		database.exec(readFileSync(schemaUrl, 'utf8'))
+		database.exec('INSERT INTO users (email, password_hash, username) VALUES (\'one@example.com\', \'hash\', \'one\'), (\'two@example.com\', \'hash\', \'two\')')
+	} else {
+		database.exec(`
+			CREATE TABLE users (id INTEGER PRIMARY KEY NOT NULL);
+			INSERT INTO users (id) VALUES (1), (2);
+		`)
+		database.exec(readFileSync(migrationUrl, 'utf8'))
+	}
 	return database
 }
 
@@ -60,6 +66,19 @@ test('creates the complete private novel metadata schema with explicit non-null 
 			syncColumns.filter(({ pk }) => pk > 0).sort((a, b) => a.pk - b.pk).map(({ name, notnull }) => [name, notnull]),
 			[['owner_id', 1], ['item_type', 1], ['item_id', 1]],
 		)
+	} finally {
+		database.close()
+	}
+})
+
+test('keeps the complete schema aligned with the private novel migration', () => {
+	const database = createDatabase(true)
+	try {
+		insertBook(database, 'book-1', 1, 'same-hash', 'shared-object-key')
+		assert.throws(() => insertBook(database, 'book-2', 1, 'same-hash'), /UNIQUE constraint failed/)
+		assert.doesNotThrow(() => insertBook(database, 'book-1', 2, 'same-hash', 'shared-object-key'))
+		insertSyncItem(database, 'book-1', 1, 'stable-item')
+		assert.doesNotThrow(() => insertSyncItem(database, 'book-1', 2, 'stable-item'))
 	} finally {
 		database.close()
 	}
