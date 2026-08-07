@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
 import test from 'node:test'
 
@@ -276,6 +277,62 @@ async function request(path: string, options: { body?: unknown, sub?: number, au
 		body: options.body === undefined ? undefined : JSON.stringify(options.body),
 	}, { ...env, ...options.env, abdl_space_db: db } as never)
 	return { response, db }
+}
+
+function createSqliteD1() {
+	const database = new DatabaseSync(':memory:')
+	database.exec('PRAGMA foreign_keys = ON;')
+	database.exec(readFileSync(new URL('../../schemas/schema.sql', import.meta.url), 'utf8'))
+	database.exec(readFileSync(new URL('../../migrations/oauth.sql', import.meta.url), 'utf8'))
+	database.prepare(`INSERT INTO users (id, email, password_hash, username) VALUES
+		(42, 'user42@example.test', 'hash', 'user42'),
+		(7, 'user7@example.test', 'hash', 'user7')`).run()
+
+	const prepare = (sql: string) => ({
+		bind: (...params: unknown[]) => ({
+			async all() {
+				const results = database.prepare(sql).all(...params)
+				return { success: true, results }
+			},
+			async first() {
+				return database.prepare(sql).get(...params) ?? null
+			},
+			async run() {
+				const result = database.prepare(sql).run(...params)
+				return { success: true, meta: { changes: Number(result.changes) } }
+			},
+		}),
+	})
+
+	return { database, prepare }
+}
+
+async function phase2Request(db: ReturnType<typeof createSqliteD1>, method: string, path: string, options: {
+	body?: unknown
+	sub?: number
+	authorization?: string
+	headers?: Record<string, string>
+} = {}) {
+	const headers: Record<string, string> = { Authorization: options.authorization ?? await bearer(options.sub), ...options.headers }
+	if (options.body !== undefined) headers['Content-Type'] = 'application/json'
+	return createApp().request(`/api/v1/novels/private${path}`, {
+		method,
+		headers,
+		body: options.body === undefined ? undefined : JSON.stringify(options.body),
+	}, { ...env, abdl_space_db: db } as never)
+}
+
+function insertReadyBook(db: ReturnType<typeof createSqliteD1>, overrides: Partial<BookRow & { created_at: number, updated_at: number }> = {}) {
+	const row = bookRow({ parse_status: 'ready', verified_size: 123, ...overrides })
+	db.database.prepare(`
+		INSERT INTO private_books (
+			id, owner_id, title, author, format, object_key, content_hash, declared_size,
+			verified_size, parse_status, upload_expires_at, cleanup_status, created_at, updated_at, deleted_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`).run(row.id, row.owner_id, row.title, row.author, row.format, row.object_key, row.content_hash,
+		row.declared_size, row.verified_size, row.parse_status, row.upload_expires_at, row.cleanup_status,
+		overrides.created_at ?? 100, overrides.updated_at ?? 100, row.deleted_at)
+	return row
 }
 
 const validAuthorize = {
@@ -877,4 +934,171 @@ test('download authorization returns a short-lived private signed GET URL', asyn
 	assert.match(String(result.download_url), /^https:\/\/private-books-123\.cos\.ap-shanghai\.myqcloud\.com\//)
 	assert.match(String(result.download_url), /q-ak=AKIDEXAMPLEFAKE(?:&|$)/)
 	assert.doesNotMatch(String(result.download_url), /PUBLIC-KEY-MUST-NOT-BE-USED|public\.example/)
+})
+
+test('Phase 2 read and write endpoints enforce OAuth scopes and stale JWT rejection', async () => {
+	const db = createSqliteD1()
+	insertReadyBook(db, { id: 'book' })
+	db.database.prepare(`INSERT INTO oauth_tokens (access_token, refresh_token, client_id, user_id, scopes, access_expires_at, refresh_expires_at, created_at)
+		VALUES ('read-token', 'rr', 'client', 42, 'read', ?, ?, 1), ('write-token', 'rw', 'client', 42, 'write', ?, ?, 1)`)
+		.run(2_000_000_000, 2_000_000_000, 2_000_000_000, 2_000_000_000)
+	for (const [method, path, token, expected] of [
+		['GET', '/books', 'write-token', 403], ['GET', '/books', 'read-token', 200],
+		['GET', '/books/book', 'write-token', 403], ['GET', '/sync', 'read-token', 200],
+		['DELETE', '/books/book', 'read-token', 403], ['PUT', '/sync/items/item', 'read-token', 403],
+	] as const) {
+		const response = await phase2Request(db, method, path, { authorization: `Bearer ${token}`, body: method === 'PUT' ? { book_id: 'book', item_type: 'bookmark', payload: {}, updated_at: 1 } : undefined })
+		assert.equal(response.status, expected, `${method} ${path}`)
+	}
+	const oldJwt = await bearer()
+	db.database.prepare('UPDATE users SET password_changed_at = ? WHERE id = 42').run(new Date(Date.now() + 60_000).toISOString())
+	assert.equal((await phase2Request(db, 'GET', '/books', { authorization: oldJwt })).status, 401)
+	db.database.close()
+})
+
+test('GET books is owner-only, excludes deleted books, returns safe DTOs, and paginates equal timestamps without gaps', async () => {
+	const db = createSqliteD1()
+	for (const [id, ownerId, updatedAt, deletedAt] of [
+		['a', 42, 300, null], ['b', 42, 300, null], ['c', 42, 200, null], ['deleted', 42, 400, 1], ['other', 7, 500, null],
+	] as const) insertReadyBook(db, { id, owner_id: ownerId, content_hash: id.padEnd(64, '0'), updated_at: updatedAt, deleted_at: deletedAt })
+
+	const first = await phase2Request(db, 'GET', '/books?limit=1')
+	assert.equal(first.status, 200)
+	const firstBody = await first.json() as { items: Array<Record<string, unknown>>, next_cursor: string | null }
+	assert.equal(firstBody.items.length, 1)
+	assert.equal(firstBody.items[0].id, 'b')
+	assert.deepEqual(Object.keys(firstBody.items[0]).sort(), ['author', 'content_hash', 'created_at', 'format', 'id', 'parse_status', 'title', 'updated_at', 'verified_size'])
+	assert.ok(firstBody.next_cursor)
+	const second = await phase2Request(db, 'GET', `/books?limit=2&cursor=${encodeURIComponent(firstBody.next_cursor!)}`)
+	assert.deepEqual((await second.json() as { items: Array<{ id: string }> }).items.map(item => item.id), ['a', 'c'])
+	assert.equal((await phase2Request(db, 'GET', '/books?limit=51')).status, 400)
+	assert.equal((await phase2Request(db, 'GET', '/books?cursor=not-a-cursor')).status, 400)
+	db.database.close()
+})
+
+test('GET book and DELETE book never cross owners; delete is idempotent, immediately invisible, and failed COS cleanup is retryable', async () => {
+	const db = createSqliteD1()
+	const row = insertReadyBook(db, { id: 'owned', declared_size: 2_000_000_000, content_hash: 'd'.repeat(64) })
+	assert.equal((await phase2Request(db, 'GET', '/books/owned', { sub: 7 })).status, 404)
+	assert.equal((await phase2Request(db, 'DELETE', '/books/owned', { sub: 7 })).status, 404)
+
+	const originalFetch = globalThis.fetch
+	globalThis.fetch = async (_input, init) => {
+		assert.equal(init?.method, 'DELETE')
+		return new Response(null, { status: 500 })
+	}
+	try {
+		const deleted = await phase2Request(db, 'DELETE', '/books/owned', { headers: { 'Idempotency-Key': 'delete-owned' } })
+		assert.equal(deleted.status, 200)
+		assert.equal((await phase2Request(db, 'GET', '/books/owned')).status, 404)
+		const stored = db.database.prepare('SELECT deleted_at, cleanup_status FROM private_books WHERE owner_id = 42 AND id = ?').get(row.id) as { deleted_at: number | null, cleanup_status: string }
+		assert.notEqual(stored.deleted_at, null)
+		assert.equal(stored.cleanup_status, 'failed')
+		assert.equal((await phase2Request(db, 'DELETE', '/books/owned', { headers: { 'Idempotency-Key': 'delete-owned' } })).status, 200)
+		assert.equal((await phase2Request(db, 'POST', '/authorize', { body: { ...validAuthorize, declared_size: 40_000_000, content_hash: 'e'.repeat(64) } })).status, 200)
+	} finally {
+		globalThis.fetch = originalFetch
+		db.database.close()
+	}
+})
+
+test('POST paste validates JSON and text, normalizes content, deduplicates by hash, writes private COS without overwrite, and never returns a URL', async () => {
+	const db = createSqliteD1()
+	for (const body of [[], { title: 'x', author: 'y', text: '' }, { title: 'x', author: 'y', text: 'ok\u0000bad' }, { title: 'x', author: 'y', text: 'a'.repeat(200_001) }]) {
+		const response = await createApp().request('/api/v1/novels/private/paste', {
+			method: 'POST', headers: { Authorization: await bearer(), 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+		}, { ...env, abdl_space_db: db } as never)
+		assert.equal(response.status, 400)
+	}
+
+	const originalFetch = globalThis.fetch
+	const calls: Array<{ method: string, body?: string, headers: Headers }> = []
+	globalThis.fetch = async (_input, init) => {
+		const headers = new Headers(init?.headers)
+		calls.push({ method: String(init?.method), body: typeof init?.body === 'string' ? init.body : undefined, headers })
+		if (init?.method === 'PUT') return new Response(null, { status: 200 })
+		if (init?.method === 'HEAD') return new Response(null, { status: 200, headers: { 'Content-Length': '12', 'Content-Type': 'text/plain' } })
+		if (init?.method === 'GET') return new Response('hello\nworld\n', { status: 200, headers: { 'Content-Length': '12' } })
+		throw new Error(`unexpected ${init?.method}`)
+	}
+	try {
+		const input = { title: '  Pasted  ', author: '  Writer  ', text: 'hello\r\nworld  ' }
+		const first = await phase2Request(db, 'POST', '/paste', { body: input, headers: { 'Idempotency-Key': 'paste-1' } })
+		assert.equal(first.status, 200, await first.clone().text())
+		const firstBody = await first.json() as Record<string, unknown>
+		assert.equal(firstBody.parse_status, 'ready')
+		assert.equal(firstBody.verified_size, 12)
+		assert.equal('url' in firstBody || 'upload_url' in firstBody || 'object_key' in firstBody, false)
+		assert.equal(calls[0].method, 'PUT')
+		assert.equal(calls[0].body, 'hello\nworld\n')
+		assert.equal(calls[0].headers.get('x-cos-forbid-overwrite'), 'true')
+		assert.match(calls[0].headers.get('Authorization') ?? '', /q-ak=AKIDEXAMPLEFAKE/)
+		const duplicate = await phase2Request(db, 'POST', '/paste', { body: { ...input, text: 'hello\nworld\n' }, headers: { 'Idempotency-Key': 'paste-2' } })
+		assert.equal(duplicate.status, 200)
+		assert.equal((await duplicate.json() as { id: string }).id, firstBody.id)
+		assert.equal(calls.filter(call => call.method === 'PUT').length, 1)
+	} finally {
+		globalThis.fetch = originalFetch
+		db.database.close()
+	}
+})
+
+test('sync PUT validates stable identity and payload, enforces owner book, and applies LWW with tombstone priority', async () => {
+	const db = createSqliteD1()
+	insertReadyBook(db, { id: 'book' })
+	insertReadyBook(db, { id: 'other-book', owner_id: 7, content_hash: 'f'.repeat(64) })
+	for (const [id, body, expected] of [
+		['item', [], 400], ['item', { book_id: 'book', item_type: 'bad', payload: {}, updated_at: 1 }, 400],
+		['item', { book_id: 'book', item_type: 'bookmark', payload: [], updated_at: 1 }, 400],
+		['item', { book_id: 'book', item_type: 'bookmark', payload: { value: 'x'.repeat(70_000) }, updated_at: 1 }, 400],
+		['item', { book_id: 'other-book', item_type: 'bookmark', payload: {}, updated_at: 1 }, 404],
+		['url-id', { book_id: 'book', item_type: 'bookmark', item_id: 'body-id', payload: {}, updated_at: 1 }, 400],
+	] as const) assert.equal((await phase2Request(db, 'PUT', `/sync/items/${id}`, { body })).status, expected)
+
+	const base = { book_id: 'book', item_type: 'bookmark', payload: { chapter: 2 }, updated_at: 100 }
+	assert.equal((await phase2Request(db, 'PUT', '/sync/items/stable', { body: base })).status, 200)
+	assert.equal((await phase2Request(db, 'PUT', '/sync/items/stable', { body: { ...base, payload: { chapter: 1 }, updated_at: 99 } })).status, 200)
+	assert.equal((await phase2Request(db, 'PUT', '/sync/items/stable', { body: { ...base, payload: {}, deleted_at: 100 } })).status, 200)
+	assert.equal((await phase2Request(db, 'PUT', '/sync/items/stable', { body: { ...base, payload: { chapter: 3 } } })).status, 200)
+	const row = db.database.prepare("SELECT payload_json, updated_at, deleted_at FROM novel_sync_items WHERE owner_id = 42 AND item_type = 'bookmark' AND item_id = 'stable'").get() as { payload_json: string, updated_at: number, deleted_at: number | null }
+	assert.deepEqual(JSON.parse(row.payload_json), {})
+	assert.equal(row.updated_at, 100)
+	assert.equal(row.deleted_at, 100)
+	db.database.close()
+})
+
+test('GET sync returns owner tombstones and paginates equal timestamps by type and id without omissions', async () => {
+	const db = createSqliteD1()
+	insertReadyBook(db, { id: 'book' })
+	insertReadyBook(db, { id: 'other-book', owner_id: 7, content_hash: '9'.repeat(64) })
+	for (const [owner, book, type, id, updated, deleted] of [
+		[42, 'book', 'bookmark', 'a', 100, null], [42, 'book', 'bookmark', 'b', 100, 100],
+		[42, 'book', 'note', 'a', 100, null], [42, 'book', 'progress', 'z', 90, null],
+		[7, 'other-book', 'bookmark', 'secret', 200, null],
+	] as const) db.database.prepare('INSERT INTO novel_sync_items (book_id, owner_id, item_type, item_id, payload_json, updated_at, deleted_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(book, owner, type, id, '{}', updated, deleted)
+
+	const seen: string[] = []
+	let cursor: string | null = null
+	do {
+		const response = await phase2Request(db, 'GET', `/sync?limit=1${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`)
+		assert.equal(response.status, 200)
+		const body = await response.json() as { items: Array<{ item_type: string, item_id: string, deleted_at: number | null }>, next_cursor: string | null }
+		seen.push(...body.items.map(item => `${item.item_type}:${item.item_id}:${item.deleted_at ?? ''}`))
+		cursor = body.next_cursor
+	} while (cursor)
+	assert.deepEqual(seen, ['note:a:', 'bookmark:b:100', 'bookmark:a:', 'progress:z:'])
+	assert.equal((await phase2Request(db, 'GET', '/sync?limit=201')).status, 400)
+	assert.equal((await phase2Request(db, 'GET', '/sync?cursor=bad')).status, 400)
+	db.database.close()
+})
+
+test('Phase 2 CORS preflight allows GET, DELETE, PUT, and Idempotency-Key', async () => {
+	for (const method of ['GET', 'DELETE', 'PUT']) {
+		const response = await createApp().request('/api/v1/novels/private/books', {
+			method: 'OPTIONS', headers: { Origin: 'https://client.test', 'Access-Control-Request-Method': method, 'Access-Control-Request-Headers': 'Idempotency-Key' },
+		}, { ...env, abdl_space_db: createDb() } as never)
+		assert.equal(response.status, 204)
+		assert.match(response.headers.get('Access-Control-Allow-Methods') ?? '', new RegExp(method))
+		assert.match(response.headers.get('Access-Control-Allow-Headers') ?? '', /Idempotency-Key/i)
+	}
 })
