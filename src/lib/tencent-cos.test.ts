@@ -281,3 +281,25 @@ test('deletes an object with a method-specific signature and no overwrite header
 		globalThis.fetch = originalFetch
 	}
 })
+
+test('DELETE failures expose only a safe status', async () => {
+	const originalFetch = globalThis.fetch
+	globalThis.fetch = async () => new Response(null, { status: 500, headers: { Authorization: 'must-not-leak' } })
+	try {
+		await assert.rejects(
+			deleteObjectFromCos({
+				...credentials,
+				objectKey: 'novels/private/42/book.epub',
+				contentType: 'application/epub+zip',
+				now,
+			}),
+			(error: Error & { status?: number }) => {
+				assert.equal(error.status, 500)
+				assert.doesNotMatch(error.message, /Authorization|AKIDEXAMPLEFAKE|q-signature|must-not-leak/)
+				return true
+			},
+		)
+	} finally {
+		globalThis.fetch = originalFetch
+	}
+})

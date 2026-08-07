@@ -34,6 +34,8 @@ interface BookRow {
 	parse_status: 'pending' | 'parsing' | 'ready' | 'failed'
 	upload_expires_at: number
 	verification_started_at: number | null
+	cleanup_status: 'pending' | 'deleting' | 'done' | 'failed'
+	cleanup_attempted_at: number | null
 	deleted_at: number | null
 }
 
@@ -58,6 +60,8 @@ function bookRow(overrides: Partial<BookRow> = {}): BookRow {
 		parse_status: 'pending',
 		upload_expires_at: Math.floor(Date.now() / 1000) + 300,
 		verification_started_at: null,
+		cleanup_status: 'pending',
+		cleanup_attempted_at: null,
 		deleted_at: null,
 		...overrides,
 	}
@@ -67,6 +71,7 @@ function createDb(initialRows: BookRow[] = [], options: {
 	oauthTokens?: OAuthToken[]
 	passwordChangedAt?: Record<number, string | null>
 	failRun?: (sql: string, call: number) => boolean
+	beforeRun?: (sql: string, params: unknown[], rows: Map<string, BookRow>) => void
 } = {}) {
 	const rows = new Map(initialRows.map(row => [`${row.owner_id}:${row.id}`, { ...row }]))
 	const oauthTokens = new Map((options.oauthTokens ?? []).map(token => [token.accessToken, token]))
@@ -113,6 +118,7 @@ function createDb(initialRows: BookRow[] = [], options: {
 						},
 						async run() {
 							runCalls++
+							options.beforeRun?.(sql, params, rows)
 							if (options.failRun?.(sql, runCalls)) return { success: false, meta: { changes: 0 } }
 							if (sql.includes('INSERT INTO private_books')) {
 								const [id, ownerId, title, author, format, objectKey, contentHash, declaredSize, uploadExpiresAt] = params
@@ -125,21 +131,24 @@ function createDb(initialRows: BookRow[] = [], options: {
 									declared_size: Number(declaredSize), verified_size: null, parse_status: 'pending',
 									upload_expires_at: Number(uploadExpiresAt), deleted_at: null,
 									verification_started_at: null,
+									cleanup_status: 'pending', cleanup_attempted_at: null,
 								})
 								return { success: true, meta: { changes: 1 } }
 							}
 							if (sql.includes('SET upload_expires_at = ?')) {
-								const [expiresAt, id, ownerId] = params
+								const [expiresAt, id, ownerId, previousExpiresAt] = params
 								const row = rows.get(`${ownerId}:${id}`)
-								if (!row || row.deleted_at !== null) return { success: true, meta: { changes: 0 } }
+								if (!row || row.deleted_at !== null || row.parse_status !== 'pending'
+									|| (previousExpiresAt !== undefined && row.upload_expires_at !== Number(previousExpiresAt))) return { success: true, meta: { changes: 0 } }
 								row.upload_expires_at = Number(expiresAt)
 								return { success: true, meta: { changes: 1 } }
 							}
 							if (sql.includes("SET parse_status = 'parsing'")) {
-								const [verificationStartedAt, id, ownerId, staleBefore] = params
+								const [verificationStartedAt, id, ownerId, expectedStatus, expectedToken, , staleBefore] = params
 								const row = rows.get(`${ownerId}:${id}`)
-								if (!row || row.deleted_at !== null || (row.parse_status !== 'pending'
-									&& !(row.parse_status === 'parsing' && (row.verification_started_at === null || row.verification_started_at <= Number(staleBefore))))) return { success: true, meta: { changes: 0 } }
+								if (!row || row.deleted_at !== null || row.parse_status !== expectedStatus
+									|| (expectedStatus === 'pending' && row.upload_expires_at !== Number(expectedToken))
+									|| (expectedStatus === 'parsing' && (row.verification_started_at !== Number(expectedToken) || Number(expectedToken) > Number(staleBefore)))) return { success: true, meta: { changes: 0 } }
 								row.parse_status = 'parsing'
 								row.verification_started_at = Number(verificationStartedAt)
 								return { success: true, meta: { changes: 1 } }
@@ -153,12 +162,21 @@ function createDb(initialRows: BookRow[] = [], options: {
 								return { success: true, meta: { changes: 1 } }
 							}
 							if (sql.includes("parse_status = 'failed'") && sql.includes('deleted_at')) {
-								const [id, ownerId] = params
+								const [id, ownerId, verificationStartedAt] = params
 								const row = rows.get(`${ownerId}:${id}`)
-								if (!row || row.deleted_at !== null) return { success: true, meta: { changes: 0 } }
+								if (!row || row.deleted_at !== null || row.parse_status !== 'parsing' || row.verification_started_at !== Number(verificationStartedAt)) return { success: true, meta: { changes: 0 } }
 								row.parse_status = 'failed'
 								row.deleted_at = Math.floor(Date.now() / 1000)
 								row.verification_started_at = null
+								row.cleanup_status = 'deleting'
+								row.cleanup_attempted_at = Math.floor(Date.now() / 1000)
+								return { success: true, meta: { changes: 1 } }
+							}
+							if (sql.includes('SET cleanup_status = ?')) {
+								const [cleanupStatus, id, ownerId] = params
+								const row = rows.get(`${ownerId}:${id}`)
+								if (!row || row.deleted_at === null || row.cleanup_status !== 'deleting') return { success: true, meta: { changes: 0 } }
+								row.cleanup_status = String(cleanupStatus) as BookRow['cleanup_status']
 								return { success: true, meta: { changes: 1 } }
 							}
 							if (sql.includes('SET verified_size = ?') && sql.includes("parse_status = 'ready'")) {
@@ -292,6 +310,21 @@ test('authorize re-signs only an exactly matching pending hash and rejects metad
 	}
 })
 
+test('authorize renewal uses the previous expiry as a lease token', async () => {
+	const row = bookRow({ id: 'renewed-book', title: validAuthorize.title, author: validAuthorize.author, content_hash: validAuthorize.content_hash, upload_expires_at: 1 })
+	const renewedExpiry = Math.floor(Date.now() / 1000) + 600
+	let raced = false
+	const db = createDb([row], { beforeRun(sql, _params, rows) {
+		if (!raced && sql.includes('SET upload_expires_at = ?')) {
+			raced = true
+			rows.get(`42:${row.id}`)!.upload_expires_at = renewedExpiry
+		}
+	} })
+	const { response } = await request('/authorize', { body: validAuthorize, db })
+	assert.equal(response.status, 409)
+	assert.equal(db.rows.get(`42:${row.id}`)?.upload_expires_at, renewedExpiry)
+})
+
 test('authorize enforces 500 active books and 2 GiB declared-size quotas', async () => {
 	const fiveHundred = Array.from({ length: 500 }, (_, index) => bookRow({ id: `book-${index}`, content_hash: index.toString(16).padStart(64, '0'), declared_size: 1 }))
 	assert.equal((await request('/authorize', { body: validAuthorize, db: createDb(fiveHundred) })).response.status, 429)
@@ -386,16 +419,46 @@ test('complete expires uploads before HEAD and soft-deletes them for reauthoriza
 	const expired = bookRow({ content_hash: validAuthorize.content_hash, upload_expires_at: Math.floor(Date.now() / 1000) - 1 })
 	let calls = 0
 	const originalFetch = globalThis.fetch
-	globalThis.fetch = async () => { calls++; throw new Error('must not run') }
+	globalThis.fetch = async (_input, init) => {
+		calls++
+		assert.equal(init?.method, 'DELETE')
+		return new Response(null, { status: 204 })
+	}
 	try {
 		const { response, db } = await request(`/${expired.id}/complete`, { db: createDb([expired]) })
 		assert.equal(response.status, 410)
-		assert.equal(calls, 0)
+		assert.equal(calls, 1)
 		assert.equal(db.rows.get(`42:${expired.id}`)?.parse_status, 'failed')
 		assert.notEqual(db.rows.get(`42:${expired.id}`)?.deleted_at, null)
+		assert.equal(db.rows.get(`42:${expired.id}`)?.cleanup_status, 'done')
 		const reauthorized = await request('/authorize', { body: validAuthorize, db })
 		assert.equal(reauthorized.response.status, 200)
 		assert.notEqual((await reauthorized.response.json() as { upload_id: string }).upload_id, expired.id)
+	} finally {
+		globalThis.fetch = originalFetch
+	}
+})
+
+test('expired complete cannot delete an upload concurrently renewed by authorize', async () => {
+	const expired = bookRow({ upload_expires_at: Math.floor(Date.now() / 1000) - 1 })
+	const renewedExpiry = Math.floor(Date.now() / 1000) + 300
+	let raced = false
+	const db = createDb([expired], { beforeRun(sql, _params, rows) {
+		if (!raced && sql.includes("SET parse_status = 'parsing'")) {
+			raced = true
+			rows.get(`42:${expired.id}`)!.upload_expires_at = renewedExpiry
+		}
+	} })
+	let calls = 0
+	const originalFetch = globalThis.fetch
+	globalThis.fetch = async () => { calls++; throw new Error('must not delete') }
+	try {
+		const { response } = await request(`/${expired.id}/complete`, { db })
+		assert.equal(response.status, 409)
+		assert.equal(calls, 0)
+		assert.equal(db.rows.get(`42:${expired.id}`)?.parse_status, 'pending')
+		assert.equal(db.rows.get(`42:${expired.id}`)?.deleted_at, null)
+		assert.equal(db.rows.get(`42:${expired.id}`)?.upload_expires_at, renewedExpiry)
 	} finally {
 		globalThis.fetch = originalFetch
 	}
@@ -445,6 +508,54 @@ test('complete soft-deletes a record when an existing object has the wrong metad
 		assert.notEqual(replacement.upload_url, `https://${env.NOVEL_PRIVATE_COS_BUCKET}.cos.${env.NOVEL_PRIVATE_COS_REGION}.myqcloud.com/${row.object_key}`)
 	} finally {
 		globalThis.fetch = originalFetch
+	}
+})
+
+test('an old verification lease cannot soft-delete a newer ready result', async () => {
+	const row = bookRow()
+	const db = createDb([row])
+	const originalFetch = globalThis.fetch
+	globalThis.fetch = async (_input, init) => {
+		assert.equal(init?.method, 'HEAD')
+		const current = db.rows.get(`42:${row.id}`)!
+		current.parse_status = 'ready'
+		current.verified_size = 123
+		current.verification_started_at = null
+		return new Response(null, { status: 200, headers: { 'Content-Length': '124', 'Content-Type': 'application/epub+zip' } })
+	}
+	try {
+		const { response } = await request(`/${row.id}/complete`, { db })
+		assert.equal(response.status, 200, await response.clone().text())
+		assert.equal(db.rows.get(`42:${row.id}`)?.parse_status, 'ready')
+		assert.equal(db.rows.get(`42:${row.id}`)?.deleted_at, null)
+	} finally {
+		globalThis.fetch = originalFetch
+	}
+})
+
+test('metadata cleanup treats DELETE success and 404 as done, but retains 5xx for retry with NOVEL credentials', async () => {
+	for (const [deleteStatus, cleanupStatus] of [[204, 'done'], [404, 'done'], [500, 'failed']] as const) {
+		const row = bookRow()
+		const db = createDb([row])
+		const originalFetch = globalThis.fetch
+		let deleteAuthorization = ''
+		globalThis.fetch = async (_input, init) => {
+			if (init?.method === 'HEAD') return new Response(null, { status: 200, headers: { 'Content-Length': '124', 'Content-Type': 'application/epub+zip' } })
+			assert.equal(init?.method, 'DELETE')
+			deleteAuthorization = (init.headers as Record<string, string>).Authorization
+			return new Response(null, { status: deleteStatus })
+		}
+		try {
+			const { response } = await request(`/${row.id}/complete`, { db })
+			assert.equal(response.status, 422)
+			assert.equal(db.rows.get(`42:${row.id}`)?.deleted_at !== null, true)
+			assert.equal(db.rows.get(`42:${row.id}`)?.cleanup_status, cleanupStatus)
+			assert.notEqual(db.rows.get(`42:${row.id}`)?.cleanup_attempted_at, null)
+			assert.match(deleteAuthorization, /q-ak=AKIDEXAMPLEFAKE(?:&|$)/)
+			assert.doesNotMatch(deleteAuthorization, /PUBLIC-KEY-MUST-NOT-BE-USED|public-secret-must-not-be-used/)
+		} finally {
+			globalThis.fetch = originalFetch
+		}
 	}
 })
 

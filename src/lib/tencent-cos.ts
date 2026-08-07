@@ -32,8 +32,8 @@ export interface CosAuthorization {
 export class CosHttpError extends Error {
 	readonly status: number
 
-	constructor(status: number) {
-		super(`COS request failed: ${status}`)
+	constructor(status: number, operation?: string) {
+		super(operation ? `COS ${operation} failed: ${status}` : `COS request failed: ${status}`)
 		this.name = 'CosHttpError'
 		this.status = status
 	}
@@ -199,8 +199,7 @@ export async function deleteObjectFromCos(options: CosAuthorizationOptions): Pro
 		redirect: 'manual',
 	})
 	if (!response.ok) {
-		const requestId = response.headers.get('x-cos-request-id')
-		throw new Error(`COS DELETE failed: ${response.status}${requestId ? ` (request ${requestId})` : ''}`)
+		throw new CosHttpError(response.status >= 300 && response.status < 400 ? 502 : response.status, 'DELETE')
 	}
 	return response
 }

@@ -58,7 +58,7 @@ test('creates the complete private novel metadata schema with explicit non-null 
 			const bookColumns = database.prepare('PRAGMA table_info(private_books)').all() as unknown as TableColumn[]
 			assert.deepEqual(bookColumns.map(({ name }) => name), [
 				'id', 'owner_id', 'title', 'author', 'format', 'object_key', 'content_hash',
-				'declared_size', 'verified_size', 'parse_status', 'upload_expires_at', 'verification_started_at', 'created_at', 'updated_at', 'deleted_at',
+				'declared_size', 'verified_size', 'parse_status', 'upload_expires_at', 'verification_started_at', 'cleanup_status', 'cleanup_attempted_at', 'created_at', 'updated_at', 'deleted_at',
 			])
 			assert.deepEqual(
 				bookColumns.filter(({ pk }) => pk > 0).sort((a, b) => a.pk - b.pk).map(({ name, notnull }) => [name, notnull]),

@@ -11,6 +11,8 @@ CREATE TABLE private_books (
   parse_status TEXT NOT NULL DEFAULT 'pending' CHECK (parse_status IN ('pending', 'parsing', 'ready', 'failed')),
   upload_expires_at INTEGER NOT NULL,
   verification_started_at INTEGER,
+  cleanup_status TEXT NOT NULL DEFAULT 'pending' CHECK (cleanup_status IN ('pending', 'deleting', 'done', 'failed')),
+  cleanup_attempted_at INTEGER,
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
   updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
   deleted_at INTEGER,
