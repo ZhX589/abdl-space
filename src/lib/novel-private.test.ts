@@ -32,9 +32,9 @@ function insertBook(database: DatabaseSync, id: string, ownerId: number, content
 	database.prepare(`
 		INSERT INTO private_books (
 			id, owner_id, title, author, format, object_key, content_hash,
-			declared_size, verified_size, parse_status
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`).run(id, ownerId, `Book ${id}`, 'Author', 'epub', objectKey, contentHash, 100, 100, 'ready')
+			declared_size, verified_size, parse_status, upload_expires_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`).run(id, ownerId, `Book ${id}`, 'Author', 'epub', objectKey, contentHash, 100, 100, 'ready', 1)
 }
 
 function assertPrivateBooksTableContract(database: DatabaseSync): void {
@@ -57,7 +57,7 @@ test('creates the complete private novel metadata schema with explicit non-null 
 		const bookColumns = database.prepare('PRAGMA table_info(private_books)').all() as unknown as TableColumn[]
 		assert.deepEqual(bookColumns.map(({ name }) => name), [
 			'id', 'owner_id', 'title', 'author', 'format', 'object_key', 'content_hash',
-			'declared_size', 'verified_size', 'parse_status', 'created_at', 'updated_at', 'deleted_at',
+			'declared_size', 'verified_size', 'parse_status', 'upload_expires_at', 'created_at', 'updated_at', 'deleted_at',
 		])
 		assert.deepEqual(
 			bookColumns.filter(({ pk }) => pk > 0).sort((a, b) => a.pk - b.pk).map(({ name, notnull }) => [name, notnull]),
@@ -100,6 +100,19 @@ test('scopes book deduplication and object keys to the owner', () => {
 		assert.doesNotThrow(() => insertBook(database, 'book-1', 2, 'same-hash', 'shared-object-key'))
 	} finally {
 		database.close()
+	}
+})
+
+test('deduplicates only active books so a soft-deleted hash can be imported again', () => {
+	for (const useCompleteSchema of [false, true]) {
+		const database = createDatabase(useCompleteSchema)
+		try {
+			insertBook(database, 'deleted-book', 1, 'same-hash')
+			database.prepare('UPDATE private_books SET deleted_at = 1 WHERE owner_id = 1 AND id = ?').run('deleted-book')
+			assert.doesNotThrow(() => insertBook(database, 'replacement-book', 1, 'same-hash'))
+		} finally {
+			database.close()
+		}
 	}
 })
 

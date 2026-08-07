@@ -8,6 +8,7 @@ import {
 	createCosHeadAuthorization,
 	createCosPutAuthorization,
 	deleteObjectFromCos,
+	headPrivateObjectFromCos,
 	headObjectFromCos,
 	putObjectToCos,
 } from './tencent-cos.ts'
@@ -74,10 +75,45 @@ test('creates a short-lived GET URL with authorization in the query string', asy
 	})
 
 	assert.equal(result.expiresAt, 1785312300)
-	assert.match(result.url, /^https:\/\/abdl-1339643562\.cos\.ap-shanghai\.myqcloud\.com\/novels\/private\/42\/book\.epub\?q-sign-algorithm=sha1&/)
-	assert.match(result.headers.Authorization, /q-header-list=host(?:&|$)/)
+	const expectedAuthorization = 'q-sign-algorithm=sha1&q-ak=AKIDEXAMPLEFAKE&q-sign-time=1785312000;1785312300&q-key-time=1785312000;1785312300&q-header-list=host&q-url-param-list=&q-signature=adf9c7eb17e66eda9b353f45c735935fb85fe778'
+	assert.equal(result.headers.Authorization, expectedAuthorization)
+	assert.equal(result.url, `https://abdl-1339643562.cos.ap-shanghai.myqcloud.com/novels/private/42/book.epub?${expectedAuthorization}`)
 	assert.equal(Object.hasOwn(result.headers, 'Content-Type'), false)
 	assert.equal(Object.hasOwn(result.headers, 'x-cos-forbid-overwrite'), false)
+})
+
+test('private HEAD exposes safe HTTP status without leaking authorization', async () => {
+	const originalFetch = globalThis.fetch
+	globalThis.fetch = async () => new Response(null, { status: 403, headers: { Authorization: 'must-not-leak' } })
+	try {
+		await assert.rejects(
+			headPrivateObjectFromCos({ ...credentials, objectKey: 'novels/private/42/book.epub', contentType: 'application/epub+zip', now }),
+			(error: Error & { status?: number }) => {
+				assert.equal(error.status, 403)
+				assert.doesNotMatch(error.message, /Authorization|AKIDEXAMPLEFAKE|q-signature/)
+				return true
+			},
+		)
+	} finally {
+		globalThis.fetch = originalFetch
+	}
+})
+
+test('private HEAD rejects redirects as a safe upstream failure', async () => {
+	const originalFetch = globalThis.fetch
+	globalThis.fetch = async () => new Response(null, { status: 302, headers: { Location: 'https://attacker.test/' } })
+	try {
+		await assert.rejects(
+			headPrivateObjectFromCos({ ...credentials, objectKey: 'novels/private/42/book.epub', contentType: 'application/epub+zip', now }),
+			(error: Error & { status?: number }) => {
+				assert.equal(error.status, 502)
+				assert.doesNotMatch(error.message, /attacker|Authorization|q-signature/)
+				return true
+			},
+		)
+	} finally {
+		globalThis.fetch = originalFetch
+	}
 })
 
 test('builds encoded default and custom public object URLs', () => {

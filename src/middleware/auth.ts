@@ -69,7 +69,7 @@ export async function extractUser(c: Context<AppType>): Promise<JWTPayload | nul
  * BUG-177: 密码修改后旧 JWT 失效（仅 JWT，跳过 OAuth token）
  * 抽取为共享函数，authMiddleware 和 adminMiddleware 都调用
  */
-async function assertSessionNotStale(payload: JWTPayload, db: D1Database): Promise<string | null> {
+export async function assertSessionNotStale(payload: JWTPayload, db: D1Database): Promise<string | null> {
   if (payload.iat <= 0) return null // OAuth token, skip check
   const user = await queryOne<{ password_changed_at: string | null }>(
     db,

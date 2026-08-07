@@ -2,11 +2,13 @@ import { Hono } from 'hono'
 import type { Context } from 'hono'
 import { cors } from 'hono/cors'
 
-import { createCosGetAuthorization, createCosPutAuthorization, headPrivateObjectFromCos } from '../lib/tencent-cos.ts'
-import { mastodonAuth } from '../mastodon/shared.ts'
+import { CosHttpError, createCosGetAuthorization, createCosPutAuthorization, headPrivateObjectFromCos } from '../lib/tencent-cos.ts'
+import { mastodonAuthDetails } from '../mastodon/shared.ts'
+import { assertSessionNotStale } from '../middleware/auth.ts'
 import type { Env } from '../types/index.ts'
 
 type AppType = { Bindings: Env }
+type AuthDetails = NonNullable<Awaited<ReturnType<typeof mastodonAuthDetails>>>
 
 interface PrivateBookRow {
 	id: string
@@ -19,7 +21,13 @@ interface PrivateBookRow {
 	declared_size: number
 	verified_size: number | null
 	parse_status: 'pending' | 'parsing' | 'ready' | 'failed'
+	upload_expires_at: number
 	deleted_at: number | null
+}
+
+interface PrivateBookUsage {
+	book_count: number
+	total_size: number
 }
 
 const MIME_FORMATS = {
@@ -28,6 +36,8 @@ const MIME_FORMATS = {
 } as const
 
 export const MAX_PRIVATE_BOOK_SIZE = 50 * 1024 * 1024
+const MAX_PRIVATE_BOOK_COUNT = 500
+const MAX_PRIVATE_BOOK_TOTAL_SIZE = 2 * 1024 * 1024 * 1024
 
 const novelPrivate = new Hono<AppType>()
 
@@ -41,6 +51,18 @@ function unauthorized(c: Context<AppType>) {
 	return c.json({ error: 'The access token is invalid', code: 'unauthorized' }, 401)
 }
 
+function forbidden(c: Context<AppType>) {
+	return c.json({ error: 'Insufficient OAuth scope', code: 'insufficient_scope' }, 403)
+}
+
+async function authenticate(c: Context<AppType>, scope: 'read' | 'write'): Promise<AuthDetails | Response> {
+	const auth = await mastodonAuthDetails(c)
+	if (!auth) return unauthorized(c)
+	if (auth.tokenType === 'oauth' && !auth.scopes.includes(scope)) return forbidden(c)
+	if (auth.tokenType === 'jwt' && await assertSessionNotStale(auth.user, c.env.abdl_space_db)) return unauthorized(c)
+	return auth
+}
+
 async function parseJsonObject(c: Context<AppType>): Promise<Record<string, unknown> | null> {
 	try {
 		const text = await c.req.text()
@@ -51,41 +73,57 @@ async function parseJsonObject(c: Context<AppType>): Promise<Record<string, unkn
 	}
 }
 
-function normalizeContentType(value: string | null): string {
-	return (value ?? '').split(';', 1)[0].trim().toLowerCase()
+function matchesContentType(value: string | null, expected: string): boolean {
+	return value !== null && value.trim().toLowerCase() === expected
 }
 
 function bookResponse(book: PrivateBookRow) {
-	return {
-		id: book.id,
-		format: book.format,
-		verified_size: book.verified_size,
-		parse_status: book.parse_status,
-	}
+	return { id: book.id, format: book.format, verified_size: book.verified_size, parse_status: book.parse_status }
 }
 
 async function getOwnedBook(db: D1Database, id: string, ownerId: number): Promise<PrivateBookRow | null> {
 	const result = await db.prepare(`
 		SELECT id, owner_id, title, author, format, object_key, content_hash,
-			declared_size, verified_size, parse_status, deleted_at
+			declared_size, verified_size, parse_status, upload_expires_at, deleted_at
 		FROM private_books WHERE id = ? AND owner_id = ?
 	`).bind(id, ownerId).all<PrivateBookRow>()
 	if (!result.success) throw new Error('Database query failed')
 	return result.results[0] ?? null
 }
 
-function cosOptions(env: Env) {
-	return {
-		secretId: env.COS_SECRET_ID,
-		secretKey: env.COS_SECRET_KEY,
-		bucket: env.NOVEL_PRIVATE_COS_BUCKET,
-		region: env.NOVEL_PRIVATE_COS_REGION,
-	}
+async function getActiveBookByHash(db: D1Database, ownerId: number, contentHash: string): Promise<PrivateBookRow | null> {
+	const result = await db.prepare(`
+		SELECT id, owner_id, title, author, format, object_key, content_hash,
+			declared_size, verified_size, parse_status, upload_expires_at, deleted_at
+		FROM private_books
+		WHERE owner_id = ? AND content_hash = ? AND deleted_at IS NULL
+		LIMIT 1
+	`).bind(ownerId, contentHash).all<PrivateBookRow>()
+	if (!result.success) throw new Error('Database query failed')
+	return result.results[0] ?? null
+}
+
+function privateCosOptions(env: Env) {
+	const secretId = env.NOVEL_COS_SECRET_ID?.trim()
+	const secretKey = env.NOVEL_COS_SECRET_KEY?.trim()
+	const bucket = env.NOVEL_PRIVATE_COS_BUCKET?.trim()
+	const region = env.NOVEL_PRIVATE_COS_REGION?.trim()
+	if (!secretId || !secretKey || !bucket || !region || bucket === env.COS_BUCKET?.trim()) return null
+	return { secretId, secretKey, bucket, region }
+}
+
+async function restorePending(db: D1Database, book: PrivateBookRow): Promise<void> {
+	await db.prepare(`
+		UPDATE private_books SET parse_status = 'pending', updated_at = unixepoch()
+		WHERE id = ? AND owner_id = ? AND parse_status = 'parsing' AND deleted_at IS NULL
+	`).bind(book.id, book.owner_id).run()
 }
 
 novelPrivate.post('/authorize', async c => {
-	const user = await mastodonAuth(c)
-	if (!user) return unauthorized(c)
+	const auth = await authenticate(c, 'write')
+	if (auth instanceof Response) return auth
+	const cos = privateCosOptions(c.env)
+	if (!cos) return c.json({ error: 'Private storage is unavailable', code: 'private_storage_unavailable' }, 503)
 
 	const input = await parseJsonObject(c)
 	if (!input) return c.json({ error: 'Invalid private book request', code: 'invalid_book' }, 400)
@@ -97,85 +135,105 @@ novelPrivate.post('/authorize', async c => {
 	const title = typeof input.title === 'string' ? input.title.trim() : ''
 	const author = typeof input.author === 'string' ? input.author.trim() : ''
 	const contentHash = typeof input.content_hash === 'string' ? input.content_hash.trim().toLowerCase() : ''
-	if (!mime
-		|| !Number.isSafeInteger(declaredSize)
-		|| Number(declaredSize) <= 0
-		|| Number(declaredSize) > MAX_PRIVATE_BOOK_SIZE
-		|| !title || title.length > 500
-		|| !author || author.length > 500
-		|| !/^[a-f0-9]{64}$/.test(contentHash)) {
+	if (!mime || !Number.isSafeInteger(declaredSize) || Number(declaredSize) <= 0 || Number(declaredSize) > MAX_PRIVATE_BOOK_SIZE
+		|| !title || title.length > 500 || !author || author.length > 500 || !/^[a-f0-9]{64}$/.test(contentHash)) {
 		return c.json({ error: 'Invalid private book request', code: 'invalid_book' }, 400)
 	}
 
 	try {
-		const id = crypto.randomUUID()
-		const objectKey = `novels/private/${user.sub}/${id}.${mime.extension}`
-		const authorization = await createCosPutAuthorization({
-			...cosOptions(c.env),
-			objectKey,
-			contentType: mimeType,
-		})
-		const result = await c.env.abdl_space_db.prepare(`
-			INSERT INTO private_books (
-				id, owner_id, title, author, format, object_key, content_hash,
-				declared_size, verified_size, parse_status
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'pending')
-		`).bind(id, user.sub, title, author, mime.format, objectKey, contentHash, declaredSize).run()
-		if (!result.success) throw new Error('Database operation failed')
+		const existing = await getActiveBookByHash(c.env.abdl_space_db, auth.user.sub, contentHash)
+		if (existing && existing.parse_status !== 'pending' && existing.parse_status !== 'ready') {
+			return c.json({ error: 'Private book is being processed', code: 'invalid_book_status' }, 409)
+		}
+		let id: string
+		let objectKey: string
+		if (existing) {
+			id = existing.id
+			objectKey = existing.object_key
+		} else {
+			const usageResult = await c.env.abdl_space_db.prepare(`
+				SELECT COUNT(*) AS book_count, COALESCE(SUM(declared_size), 0) AS total_size
+				FROM private_books WHERE owner_id = ? AND deleted_at IS NULL
+			`).bind(auth.user.sub).all<PrivateBookUsage>()
+			if (!usageResult.success) throw new Error('Database query failed')
+			const usage = usageResult.results[0] ?? { book_count: 0, total_size: 0 }
+			if (usage.book_count >= MAX_PRIVATE_BOOK_COUNT || usage.total_size + Number(declaredSize) > MAX_PRIVATE_BOOK_TOTAL_SIZE) {
+				return c.json({ error: 'Private library quota exceeded', code: 'private_library_quota' }, 429)
+			}
+			id = crypto.randomUUID()
+			objectKey = `novels/private/${auth.user.sub}/${id}.${mime.extension}`
+		}
 
-		return c.json({
-			upload_id: id,
-			upload_url: authorization.url,
-			expires_at: authorization.expiresAt,
-			required_headers: authorization.headers,
-		})
+		const authorization = await createCosPutAuthorization({ ...cos, objectKey, contentType: mimeType })
+		if (existing) {
+			const result = await c.env.abdl_space_db.prepare(`
+				UPDATE private_books SET upload_expires_at = ?, updated_at = unixepoch()
+				WHERE id = ? AND owner_id = ? AND deleted_at IS NULL
+			`).bind(authorization.expiresAt, id, auth.user.sub).run()
+			if (!result.success || result.meta.changes !== 1) throw new Error('Database operation failed')
+		} else {
+			const result = await c.env.abdl_space_db.prepare(`
+				INSERT INTO private_books (
+					id, owner_id, title, author, format, object_key, content_hash,
+					declared_size, verified_size, parse_status, upload_expires_at
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'pending', ?)
+			`).bind(id, auth.user.sub, title, author, mime.format, objectKey, contentHash, declaredSize, authorization.expiresAt).run()
+			if (!result.success) throw new Error('Database operation failed')
+		}
+
+		return c.json({ upload_id: id, upload_url: authorization.url, expires_at: authorization.expiresAt, required_headers: authorization.headers })
 	} catch {
 		return c.json({ error: 'Private book authorization failed', code: 'authorize_failed' }, 500)
 	}
 })
 
 novelPrivate.post('/:id/complete', async c => {
-	const user = await mastodonAuth(c)
-	if (!user) return unauthorized(c)
+	const auth = await authenticate(c, 'write')
+	if (auth instanceof Response) return auth
+	const cos = privateCosOptions(c.env)
+	if (!cos) return c.json({ error: 'Private storage is unavailable', code: 'private_storage_unavailable' }, 503)
 
 	try {
-		const book = await getOwnedBook(c.env.abdl_space_db, c.req.param('id'), user.sub)
+		const book = await getOwnedBook(c.env.abdl_space_db, c.req.param('id'), auth.user.sub)
 		if (!book || book.deleted_at !== null) return c.json({ error: 'Private book not found', code: 'book_not_found' }, 404)
 		if (book.parse_status === 'ready' && book.verified_size !== null) return c.json(bookResponse(book))
+		if (book.parse_status === 'parsing') return c.json(bookResponse(book), 202)
 		if (book.parse_status !== 'pending') return c.json({ error: 'Private book is not pending', code: 'invalid_book_status' }, 409)
+
+		const claim = await c.env.abdl_space_db.prepare(`
+			UPDATE private_books SET parse_status = 'parsing', updated_at = unixepoch()
+			WHERE id = ? AND owner_id = ? AND parse_status = 'pending' AND deleted_at IS NULL
+		`).bind(book.id, auth.user.sub).run()
+		if (!claim.success) throw new Error('Database operation failed')
+		if (claim.meta.changes !== 1) {
+			const current = await getOwnedBook(c.env.abdl_space_db, book.id, auth.user.sub)
+			if (current?.parse_status === 'ready' && current.verified_size !== null) return c.json(bookResponse(current))
+			if (current?.parse_status === 'parsing') return c.json(bookResponse(current), 202)
+			return c.json({ error: 'Private book state changed', code: 'book_conflict' }, 409)
+		}
 
 		let head: Response
 		try {
-			head = await headPrivateObjectFromCos({
-				...cosOptions(c.env),
-				objectKey: book.object_key,
-				contentType: book.format === 'txt' ? 'text/plain' : 'application/epub+zip',
-			})
-		} catch {
-			return c.json({ error: 'Private object verification failed', code: 'verification_failed' }, 422)
+			head = await headPrivateObjectFromCos({ ...cos, objectKey: book.object_key, contentType: book.format === 'txt' ? 'text/plain' : 'application/epub+zip' })
+		} catch (error) {
+			await restorePending(c.env.abdl_space_db, book)
+			if (error instanceof CosHttpError && error.status === 404) return c.json({ error: 'Private object not found', code: 'verification_failed' }, 422)
+			return c.json({ error: 'Private storage verification unavailable', code: 'verification_unavailable' }, 502)
 		}
 
 		const contentLength = head.headers.get('Content-Length')
 		const verifiedSize = contentLength === null ? Number.NaN : Number(contentLength)
 		const expectedMime = book.format === 'txt' ? 'text/plain' : 'application/epub+zip'
-		if (!Number.isSafeInteger(verifiedSize)
-			|| verifiedSize !== book.declared_size
-			|| normalizeContentType(head.headers.get('Content-Type')) !== expectedMime) {
+		if (!Number.isSafeInteger(verifiedSize) || verifiedSize !== book.declared_size || !matchesContentType(head.headers.get('Content-Type'), expectedMime)) {
+			await restorePending(c.env.abdl_space_db, book)
 			return c.json({ error: 'Private object metadata mismatch', code: 'verification_mismatch' }, 422)
 		}
 
 		const result = await c.env.abdl_space_db.prepare(`
-			UPDATE private_books
-			SET verified_size = ?, parse_status = 'ready', updated_at = unixepoch()
-			WHERE id = ? AND owner_id = ? AND parse_status = 'pending' AND deleted_at IS NULL
-		`).bind(verifiedSize, book.id, user.sub).run()
-		if (!result.success) throw new Error('Database operation failed')
-		if (result.meta.changes !== 1) {
-			const current = await getOwnedBook(c.env.abdl_space_db, book.id, user.sub)
-			if (current?.parse_status === 'ready' && current.verified_size !== null) return c.json(bookResponse(current))
-			return c.json({ error: 'Private book state changed', code: 'book_conflict' }, 409)
-		}
-
+			UPDATE private_books SET verified_size = ?, parse_status = 'ready', updated_at = unixepoch()
+			WHERE id = ? AND owner_id = ? AND parse_status = 'parsing' AND deleted_at IS NULL
+		`).bind(verifiedSize, book.id, auth.user.sub).run()
+		if (!result.success || result.meta.changes !== 1) throw new Error('Database operation failed')
 		return c.json(bookResponse({ ...book, verified_size: verifiedSize, parse_status: 'ready' }))
 	} catch {
 		return c.json({ error: 'Private book completion failed', code: 'complete_failed' }, 500)
@@ -183,19 +241,17 @@ novelPrivate.post('/:id/complete', async c => {
 })
 
 novelPrivate.post('/:id/download/authorize', async c => {
-	const user = await mastodonAuth(c)
-	if (!user) return unauthorized(c)
+	const auth = await authenticate(c, 'read')
+	if (auth instanceof Response) return auth
+	const cos = privateCosOptions(c.env)
+	if (!cos) return c.json({ error: 'Private storage is unavailable', code: 'private_storage_unavailable' }, 503)
 
 	try {
-		const book = await getOwnedBook(c.env.abdl_space_db, c.req.param('id'), user.sub)
+		const book = await getOwnedBook(c.env.abdl_space_db, c.req.param('id'), auth.user.sub)
 		if (!book || book.deleted_at !== null || book.parse_status !== 'ready' || book.verified_size === null) {
 			return c.json({ error: 'Private book not found', code: 'book_not_found' }, 404)
 		}
-		const authorization = await createCosGetAuthorization({
-			...cosOptions(c.env),
-			objectKey: book.object_key,
-			contentType: book.format === 'txt' ? 'text/plain' : 'application/epub+zip',
-		})
+		const authorization = await createCosGetAuthorization({ ...cos, objectKey: book.object_key, contentType: book.format === 'txt' ? 'text/plain' : 'application/epub+zip' })
 		return c.json({ download_url: authorization.url, expires_at: authorization.expiresAt })
 	} catch {
 		return c.json({ error: 'Download authorization failed', code: 'download_authorize_failed' }, 500)

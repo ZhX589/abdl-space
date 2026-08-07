@@ -9,6 +9,7 @@ CREATE TABLE private_books (
   declared_size INTEGER NOT NULL CHECK (declared_size > 0),
   verified_size INTEGER CHECK (verified_size IS NULL OR verified_size >= 0),
   parse_status TEXT NOT NULL DEFAULT 'pending' CHECK (parse_status IN ('pending', 'parsing', 'ready', 'failed')),
+  upload_expires_at INTEGER NOT NULL,
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
   updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
   deleted_at INTEGER,
@@ -17,7 +18,8 @@ CREATE TABLE private_books (
 );
 
 CREATE UNIQUE INDEX idx_private_books_owner_content_hash
-  ON private_books(owner_id, content_hash);
+  ON private_books(owner_id, content_hash)
+  WHERE deleted_at IS NULL;
 
 CREATE TABLE novel_sync_items (
   book_id TEXT NOT NULL,
