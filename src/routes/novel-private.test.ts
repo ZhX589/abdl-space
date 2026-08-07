@@ -5,7 +5,7 @@ import test from 'node:test'
 import { Hono } from 'hono'
 
 import { signJWT } from '../lib/auth.ts'
-import novelPrivate, { MAX_PRIVATE_BOOK_SIZE, PRIVATE_BOOK_INSERT_SQL } from './novel-private.ts'
+import novelPrivate, { cleanupPrivateNovelObjects, MAX_PRIVATE_BOOK_SIZE, PRIVATE_BOOK_INSERT_SQL } from './novel-private.ts'
 
 const jwtSecret = 'test-jwt-secret'
 const env = {
@@ -67,6 +67,15 @@ function bookRow(overrides: Partial<BookRow> = {}): BookRow {
 	}
 }
 
+function validHeadHeaders(row: BookRow, overrides: Record<string, string> = {}): Record<string, string> {
+	return {
+		'Content-Length': String(row.declared_size),
+		'Content-Type': row.format === 'txt' ? 'text/plain' : 'application/epub+zip',
+		'x-cos-meta-sha256': row.content_hash,
+		...overrides,
+	}
+}
+
 function createDb(initialRows: BookRow[] = [], options: {
 	oauthTokens?: OAuthToken[]
 	passwordChangedAt?: Record<number, string | null>
@@ -101,6 +110,19 @@ function createDb(initialRows: BookRow[] = [], options: {
 								const ownerId = Number(params[0])
 								const active = [...rows.values()].filter(row => row.owner_id === ownerId && row.deleted_at === null)
 								return { success: true, results: [{ book_count: active.length, total_size: active.reduce((sum, row) => sum + row.declared_size, 0) }] }
+							}
+							if (sql.includes('cleanup_status IN') && sql.includes('upload_expires_at <= ?')) {
+								const [now, staleCleanupBefore, limit] = params.map(Number)
+								return {
+									success: true,
+									results: [...rows.values()]
+										.filter(row => (row.deleted_at === null && row.parse_status === 'pending' && row.upload_expires_at <= now)
+											|| (row.deleted_at !== null && ['failed', 'pending'].includes(row.cleanup_status))
+											|| (row.deleted_at !== null && row.cleanup_status === 'deleting'
+												&& (row.cleanup_attempted_at === null || row.cleanup_attempted_at <= staleCleanupBefore)))
+										.slice(0, limit)
+										.map(row => ({ ...row })),
+								}
 							}
 							if (sql.includes('content_hash = ?') && sql.includes('deleted_at IS NULL')) {
 								const ownerId = Number(params[0])
@@ -161,21 +183,40 @@ function createDb(initialRows: BookRow[] = [], options: {
 								row.verification_started_at = null
 								return { success: true, meta: { changes: 1 } }
 							}
-							if (sql.includes("parse_status = 'failed'") && sql.includes('deleted_at')) {
-								const [id, ownerId, verificationStartedAt] = params
+							if (sql.includes("parse_status = 'failed'") && sql.includes('deleted_at = unixepoch()')) {
+								const [cleanupToken, id, ownerId, verificationStartedAt] = params
 								const row = rows.get(`${ownerId}:${id}`)
 								if (!row || row.deleted_at !== null || row.parse_status !== 'parsing' || row.verification_started_at !== Number(verificationStartedAt)) return { success: true, meta: { changes: 0 } }
 								row.parse_status = 'failed'
 								row.deleted_at = Math.floor(Date.now() / 1000)
 								row.verification_started_at = null
 								row.cleanup_status = 'deleting'
-								row.cleanup_attempted_at = Math.floor(Date.now() / 1000)
+								row.cleanup_attempted_at = Number(cleanupToken)
+								return { success: true, meta: { changes: 1 } }
+							}
+							if (sql.includes("SET parse_status = 'failed', deleted_at = ?") && sql.includes("cleanup_status = 'deleting'")) {
+								const [deletedAt, cleanupToken, id, ownerId, uploadExpiresAt] = params
+								const row = rows.get(`${ownerId}:${id}`)
+								if (!row || row.deleted_at !== null || row.parse_status !== 'pending' || row.upload_expires_at !== Number(uploadExpiresAt) || row.upload_expires_at > Number(deletedAt)) return { success: true, meta: { changes: 0 } }
+								row.parse_status = 'failed'
+								row.deleted_at = Number(deletedAt)
+								row.cleanup_status = 'deleting'
+								row.cleanup_attempted_at = Number(cleanupToken)
+								return { success: true, meta: { changes: 1 } }
+							}
+							if (sql.includes("SET cleanup_status = 'deleting'") && sql.includes('cleanup_attempted_at = ?')) {
+								const [cleanupToken, id, ownerId, expectedStatus, expectedToken] = params
+								const row = rows.get(`${ownerId}:${id}`)
+								if (!row || row.deleted_at === null || row.cleanup_status !== expectedStatus || row.cleanup_attempted_at !== expectedToken) return { success: true, meta: { changes: 0 } }
+								row.cleanup_status = 'deleting'
+								row.cleanup_attempted_at = Number(cleanupToken)
 								return { success: true, meta: { changes: 1 } }
 							}
 							if (sql.includes('SET cleanup_status = ?')) {
-								const [cleanupStatus, id, ownerId] = params
+								const [cleanupStatus, id, ownerId, cleanupToken] = params
 								const row = rows.get(`${ownerId}:${id}`)
-								if (!row || row.deleted_at === null || row.cleanup_status !== 'deleting') return { success: true, meta: { changes: 0 } }
+								if (!row || row.deleted_at === null || row.cleanup_status !== 'deleting'
+									|| (cleanupToken !== undefined && row.cleanup_attempted_at !== Number(cleanupToken))) return { success: true, meta: { changes: 0 } }
 								row.cleanup_status = String(cleanupStatus) as BookRow['cleanup_status']
 								return { success: true, meta: { changes: 1 } }
 							}
@@ -282,6 +323,8 @@ test('authorize validates format and size and creates a pending upload with expi
 	assert.equal(row?.upload_expires_at, result.expires_at)
 	assert.match((result.required_headers as Record<string, string>).Authorization, /q-ak=AKIDEXAMPLEFAKE(?:&|$)/)
 	assert.doesNotMatch((result.required_headers as Record<string, string>).Authorization, /PUBLIC-KEY-MUST-NOT-BE-USED/)
+	assert.equal((result.required_headers as Record<string, string>)['x-cos-meta-sha256'], validAuthorize.content_hash)
+	assert.match((result.required_headers as Record<string, string>).Authorization, /q-header-list=content-type;host;x-cos-forbid-overwrite;x-cos-meta-sha256(?:&|$)/)
 })
 
 test('authorize returns ready hash idempotently without PUT authorization', async () => {
@@ -379,7 +422,7 @@ test('complete atomically claims pending before HEAD and concurrent callers do n
 	globalThis.fetch = async () => {
 		calls++
 		await headGate
-		return new Response(null, { status: 200, headers: { 'Content-Length': '123', 'Content-Type': 'application/epub+zip' } })
+		return new Response(null, { status: 200, headers: validHeadHeaders(row) })
 	}
 	try {
 		const first = request(`/${row.id}/complete`, { db })
@@ -401,7 +444,7 @@ test('complete returns 202 for a live parsing lease and reclaims one older than 
 	const live = bookRow({ parse_status: 'parsing', verification_started_at: now - 299_000_000 })
 	let calls = 0
 	const originalFetch = globalThis.fetch
-	globalThis.fetch = async () => { calls++; return new Response(null, { status: 200, headers: { 'Content-Length': '123', 'Content-Type': 'application/epub+zip' } }) }
+	globalThis.fetch = async () => { calls++; return new Response(null, { status: 200, headers: validHeadHeaders(live) }) }
 	try {
 		assert.equal((await request(`/${live.id}/complete`, { db: createDb([live]) })).response.status, 202)
 		assert.equal(calls, 0)
@@ -478,7 +521,7 @@ test('complete returns ready without HEAD, restores missing objects, and rejects
 
 	for (const [outcome, expectedStatus] of [
 		[new Response(null, { status: 404 }), 'pending'],
-		[new Response(null, { status: 200, headers: { 'Content-Length': '123', 'Content-Type': 'application/epub+zip; charset=utf-8' } }), 'failed'],
+		[new Response(null, { status: 200, headers: validHeadHeaders(bookRow(), { 'Content-Type': 'application/epub+zip; charset=utf-8' }) }), 'failed'],
 	] as const) {
 		const row = bookRow()
 		const db = createDb([row])
@@ -521,7 +564,7 @@ test('an old verification lease cannot soft-delete a newer ready result', async 
 		current.parse_status = 'ready'
 		current.verified_size = 123
 		current.verification_started_at = null
-		return new Response(null, { status: 200, headers: { 'Content-Length': '124', 'Content-Type': 'application/epub+zip' } })
+		return new Response(null, { status: 200, headers: validHeadHeaders(row, { 'Content-Length': '124' }) })
 	}
 	try {
 		const { response } = await request(`/${row.id}/complete`, { db })
@@ -540,7 +583,7 @@ test('metadata cleanup treats DELETE success and 404 as done, but retains 5xx fo
 		const originalFetch = globalThis.fetch
 		let deleteAuthorization = ''
 		globalThis.fetch = async (_input, init) => {
-			if (init?.method === 'HEAD') return new Response(null, { status: 200, headers: { 'Content-Length': '124', 'Content-Type': 'application/epub+zip' } })
+			if (init?.method === 'HEAD') return new Response(null, { status: 200, headers: validHeadHeaders(row, { 'Content-Length': '124' }) })
 			assert.equal(init?.method, 'DELETE')
 			deleteAuthorization = (init.headers as Record<string, string>).Authorization
 			return new Response(null, { status: deleteStatus })
@@ -569,7 +612,7 @@ test('complete safely restores its lease after post-HEAD exceptions and final UP
 		assert.equal(firstDb.rows.get(`42:${headersFailure.id}`)?.parse_status, 'pending')
 
 		const updateFailure = bookRow()
-		globalThis.fetch = async () => new Response(null, { status: 200, headers: { 'Content-Length': '123', 'Content-Type': 'application/epub+zip' } })
+		globalThis.fetch = async () => new Response(null, { status: 200, headers: validHeadHeaders(updateFailure) })
 		const secondDb = createDb([updateFailure], { failRun: sql => sql.includes("parse_status = 'ready'") })
 		assert.equal((await request(`/${updateFailure.id}/complete`, { db: secondDb })).response.status, 500)
 		assert.equal(secondDb.rows.get(`42:${updateFailure.id}`)?.parse_status, 'pending')
@@ -583,7 +626,7 @@ test('complete accepts trimmed case-insensitive exact MIME but rejects parameter
 		const row = bookRow()
 		const db = createDb([row])
 		const originalFetch = globalThis.fetch
-		globalThis.fetch = async () => new Response(null, { status: 200, headers: { 'Content-Length': '123', 'Content-Type': contentType } })
+		globalThis.fetch = async () => new Response(null, { status: 200, headers: validHeadHeaders(row, { 'Content-Type': contentType }) })
 		try {
 			assert.equal((await request(`/${row.id}/complete`, { db })).response.status, expected)
 		} finally {
@@ -616,6 +659,84 @@ test('complete maps private HEAD status safely and never leaks authorization', a
 		const { response } = await request(`/${row.id}/complete`, { db: createDb([row]) })
 		assert.equal(response.status, 502)
 		assert.doesNotMatch(await response.text(), /Authorization|secret/)
+	} finally {
+		globalThis.fetch = originalFetch
+	}
+})
+
+test('complete requires an exact SHA-256 object metadata match', async () => {
+	for (const [metadataHash, expected] of [['b'.repeat(64), 422], ['a'.repeat(64), 200]] as const) {
+		const row = bookRow({ content_hash: 'a'.repeat(64) })
+		const db = createDb([row])
+		const originalFetch = globalThis.fetch
+		globalThis.fetch = async (_input, init) => init?.method === 'DELETE'
+			? new Response(null, { status: 204 })
+			: new Response(null, { status: 200, headers: validHeadHeaders(row, { 'x-cos-meta-sha256': metadataHash }) })
+		try {
+			const response = (await request(`/${row.id}/complete`, { db })).response
+			assert.equal(response.status, expected)
+			assert.doesNotMatch(await response.clone().text(), /Authorization|q-signature|AKIDEXAMPLEFAKE/)
+		} finally {
+			globalThis.fetch = originalFetch
+		}
+	}
+})
+
+test('scheduled cleanup soft-deletes expired pending books before object deletion', async () => {
+	const now = Math.floor(Date.now() / 1000)
+	const row = bookRow({ upload_expires_at: now - 1 })
+	const db = createDb([row])
+	const originalFetch = globalThis.fetch
+	globalThis.fetch = async (_input, init) => {
+		assert.notEqual(db.rows.get(`42:${row.id}`)?.deleted_at, null)
+		assert.equal(init?.method, 'DELETE')
+		return new Response(null, { status: 204 })
+	}
+	try {
+		assert.equal(await cleanupPrivateNovelObjects({ ...env, abdl_space_db: db } as never, now, 50), 1)
+		assert.equal(db.rows.get(`42:${row.id}`)?.parse_status, 'failed')
+		assert.equal(db.rows.get(`42:${row.id}`)?.cleanup_status, 'done')
+	} finally {
+		globalThis.fetch = originalFetch
+	}
+})
+
+test('scheduled cleanup retries failed objects and maps DELETE 404 and 5xx', async () => {
+	for (const [status, expected] of [[404, 'done'], [500, 'failed']] as const) {
+		const row = bookRow({ deleted_at: 1, cleanup_status: 'failed', cleanup_attempted_at: 10 })
+		const db = createDb([row])
+		const originalFetch = globalThis.fetch
+		let authorization = ''
+		globalThis.fetch = async (_input, init) => {
+			authorization = (init?.headers as Record<string, string>).Authorization
+			return new Response(null, { status })
+		}
+		try {
+			assert.equal(await cleanupPrivateNovelObjects({ ...env, abdl_space_db: db } as never, 100, 50), 1)
+			assert.equal(db.rows.get(`42:${row.id}`)?.cleanup_status, expected)
+			assert.match(authorization, /q-ak=AKIDEXAMPLEFAKE(?:&|$)/)
+			assert.doesNotMatch(authorization, /PUBLIC-KEY-MUST-NOT-BE-USED|public-secret-must-not-be-used/)
+		} finally {
+			globalThis.fetch = originalFetch
+		}
+	}
+})
+
+test('scheduled cleanup conditionally claims each object once', async () => {
+	const row = bookRow({ deleted_at: 1, cleanup_status: 'failed', cleanup_attempted_at: 10 })
+	const db = createDb([row])
+	const originalFetch = globalThis.fetch
+	let releaseDelete!: () => void
+	const deleteGate = new Promise<void>(resolve => { releaseDelete = resolve })
+	let calls = 0
+	globalThis.fetch = async () => { calls++; await deleteGate; return new Response(null, { status: 204 }) }
+	try {
+		const first = cleanupPrivateNovelObjects({ ...env, abdl_space_db: db } as never, 100, 50)
+		while (calls !== 1) await new Promise(resolve => setTimeout(resolve, 0))
+		assert.equal(await cleanupPrivateNovelObjects({ ...env, abdl_space_db: db } as never, 100, 50), 0)
+		assert.equal(calls, 1)
+		releaseDelete()
+		assert.equal(await first, 1)
 	} finally {
 		globalThis.fetch = originalFetch
 	}

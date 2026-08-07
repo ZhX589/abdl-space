@@ -15,6 +15,7 @@ interface CosAuthorizationOptions extends CosObjectOptions {
 	secretKey: string
 	objectKey: string
 	contentType: string
+	metadataSha256?: string
 	now?: Date
 }
 
@@ -26,6 +27,7 @@ export interface CosAuthorization {
 		Authorization: string
 		'Content-Type'?: string
 		'x-cos-forbid-overwrite'?: 'true'
+		'x-cos-meta-sha256'?: string
 	}
 }
 
@@ -101,9 +103,12 @@ async function createCosAuthorization(method: 'put' | 'head' | 'get' | 'delete',
 	const expiresAt = start + AUTHORIZATION_TTL_SECONDS
 	const signTime = `${start};${expiresAt}`
 	const forbidOverwrite = method === 'put'
-	const headerList = forbidOverwrite ? 'content-type;host;x-cos-forbid-overwrite' : 'host'
+	const metadataSha256 = forbidOverwrite ? options.metadataSha256 : undefined
+	const headerList = forbidOverwrite
+		? `content-type;host;x-cos-forbid-overwrite${metadataSha256 === undefined ? '' : ';x-cos-meta-sha256'}`
+		: 'host'
 	const canonicalHeaders = forbidOverwrite
-		? `content-type=${encodeRfc3986(options.contentType)}&host=${encodeRfc3986(host)}&x-cos-forbid-overwrite=true`
+		? `content-type=${encodeRfc3986(options.contentType)}&host=${encodeRfc3986(host)}&x-cos-forbid-overwrite=true${metadataSha256 === undefined ? '' : `&x-cos-meta-sha256=${encodeRfc3986(metadataSha256)}`}`
 		: `host=${encodeRfc3986(host)}`
 	const httpString = `${method}\n/${options.objectKey}\n\n${canonicalHeaders}\n`
 	const stringToSign = `sha1\n${signTime}\n${await sha1(httpString)}\n`
@@ -127,6 +132,7 @@ async function createCosAuthorization(method: 'put' | 'head' | 'get' | 'delete',
 			Authorization: authorization,
 			...(method === 'put' ? { 'Content-Type': options.contentType } : {}),
 			...(forbidOverwrite ? { 'x-cos-forbid-overwrite': 'true' as const } : {}),
+			...(metadataSha256 === undefined ? {} : { 'x-cos-meta-sha256': metadataSha256 }),
 		},
 	}
 }

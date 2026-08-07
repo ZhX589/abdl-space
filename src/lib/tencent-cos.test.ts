@@ -24,6 +24,7 @@ test('creates a stable five-minute PUT authorization that forbids overwrites', a
 		...credentials,
 		objectKey: 'media/a b.jpg',
 		contentType: 'image/jpeg',
+		metadataSha256: 'a'.repeat(64),
 		now,
 	})
 
@@ -32,11 +33,24 @@ test('creates a stable five-minute PUT authorization that forbids overwrites', a
 		host: 'abdl-1339643562.cos.ap-shanghai.myqcloud.com',
 		expiresAt: 1785312300,
 		headers: {
-			Authorization: 'q-sign-algorithm=sha1&q-ak=AKIDEXAMPLEFAKE&q-sign-time=1785312000;1785312300&q-key-time=1785312000;1785312300&q-header-list=content-type;host;x-cos-forbid-overwrite&q-url-param-list=&q-signature=b2fb4b3f7c8565e43fc3f55fdd212d82b61c51ea',
+			Authorization: 'q-sign-algorithm=sha1&q-ak=AKIDEXAMPLEFAKE&q-sign-time=1785312000;1785312300&q-key-time=1785312000;1785312300&q-header-list=content-type;host;x-cos-forbid-overwrite;x-cos-meta-sha256&q-url-param-list=&q-signature=aa36a36326e77b3508ab92142d5b824ca395ea22',
 			'Content-Type': 'image/jpeg',
 			'x-cos-forbid-overwrite': 'true',
+			'x-cos-meta-sha256': 'a'.repeat(64),
 		},
 	})
+})
+
+test('keeps the existing PUT vector when SHA-256 metadata is omitted', async () => {
+	const result = await createCosPutAuthorization({
+		...credentials,
+		objectKey: 'media/a b.jpg',
+		contentType: 'image/jpeg',
+		now,
+	})
+
+	assert.equal(result.headers.Authorization, 'q-sign-algorithm=sha1&q-ak=AKIDEXAMPLEFAKE&q-sign-time=1785312000;1785312300&q-key-time=1785312000;1785312300&q-header-list=content-type;host;x-cos-forbid-overwrite&q-url-param-list=&q-signature=b2fb4b3f7c8565e43fc3f55fdd212d82b61c51ea')
+	assert.equal(Object.hasOwn(result.headers, 'x-cos-meta-sha256'), false)
 })
 
 test('signs a decoded Unicode canonical path while keeping the request URL encoded', async () => {

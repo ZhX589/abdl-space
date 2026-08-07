@@ -7,6 +7,7 @@
 import app from './index'
 import type { Env, JWTPayload } from './types/index'
 import { handleOutboxBatch } from './lib/outbox-dispatcher'
+import { handleScheduled } from './lib/scheduled'
 
 export { UserPresence } from './durable-objects/UserPresence'
 
@@ -22,17 +23,7 @@ export default {
   },
 
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    // 每分钟扫描未完成 outbox 并重新入队
-    const db = env.abdl_space_db
-    const rows = await db.prepare(
-      `SELECT event_id FROM message_outbox
-       WHERE dispatched_at IS NULL AND next_attempt_at <= unixepoch()
-       LIMIT 50`,
-    ).all<{ event_id: number }>()
-
-    for (const row of rows.results) {
-      await env.MESSAGE_OUTBOX_QUEUE.send({ eventId: row.event_id })
-    }
+    await handleScheduled(controller, env, ctx)
   },
 }
 
