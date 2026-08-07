@@ -47,6 +47,7 @@ import jpush from './routes/jpush.ts'
 import push from './routes/push.ts'
 import webauthn from './routes/webauthn.ts'
 import friendRequests from './routes/friend_requests.ts'
+import novelPrivate from './routes/novel-private.ts'
 import mastodon from './mastodon/routes.ts'
 import mastodonV2 from './mastodon/v2.ts'
 import mastodonPush from './mastodon/push.ts'
@@ -244,6 +245,7 @@ app.route('/api/captcha', captcha)
 app.route('/api/captcha/keys', captchaKeys)
 app.route('/api/v1/captcha', captchaV1)
 app.route('/api/v1/uploads', uploads)
+app.route('/api/v1/novels/private', novelPrivate)
 app.route('/api/v1', mastodon)
 app.route('/api/v1/push', mastodonPush)
 app.route('/api/v1/abdl', mastodonAbdl)

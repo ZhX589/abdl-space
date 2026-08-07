@@ -24,7 +24,7 @@ export interface CosAuthorization {
 	expiresAt: number
 	headers: {
 		Authorization: string
-		'Content-Type': string
+		'Content-Type'?: string
 		'x-cos-forbid-overwrite'?: 'true'
 	}
 }
@@ -84,7 +84,7 @@ export function buildCosObjectUrl(objectKey: string, options: CosObjectOptions =
 	return `${origin}/${encodedKey}`
 }
 
-async function createCosAuthorization(method: 'put' | 'head' | 'delete', options: CosAuthorizationOptions): Promise<CosAuthorization> {
+async function createCosAuthorization(method: 'put' | 'head' | 'get' | 'delete', options: CosAuthorizationOptions): Promise<CosAuthorization> {
 	const encodedKey = encodeObjectKey(options.objectKey)
 	const host = getCosHost(options.bucket, options.region)
 	const start = Math.floor((options.now ?? new Date()).getTime() / 1000)
@@ -129,6 +129,15 @@ export function createCosHeadAuthorization(options: CosAuthorizationOptions): Pr
 	return createCosAuthorization('head', options)
 }
 
+export async function createCosGetAuthorization(options: CosAuthorizationOptions): Promise<CosAuthorization> {
+	const authorization = await createCosAuthorization('get', options)
+	return {
+		...authorization,
+		url: `${authorization.url}?${authorization.headers.Authorization}`,
+		headers: { Authorization: authorization.headers.Authorization },
+	}
+}
+
 export function createCosDeleteAuthorization(options: CosAuthorizationOptions): Promise<CosAuthorization> {
 	return createCosAuthorization('delete', options)
 }
@@ -150,6 +159,20 @@ export async function putObjectToCos(options: PutObjectToCosOptions): Promise<Re
 export async function headObjectFromCos(options: CosAuthorizationOptions): Promise<Response> {
 	const response = await fetch(buildCosObjectUrl(options.objectKey, options), {
 		method: 'HEAD',
+		redirect: 'manual',
+	})
+	if (!response.ok) {
+		const requestId = response.headers.get('x-cos-request-id')
+		throw new Error(`COS HEAD failed: ${response.status}${requestId ? ` (request ${requestId})` : ''}`)
+	}
+	return response
+}
+
+export async function headPrivateObjectFromCos(options: CosAuthorizationOptions): Promise<Response> {
+	const signed = await createCosHeadAuthorization(options)
+	const response = await fetch(signed.url, {
+		method: 'HEAD',
+		headers: signed.headers,
 		redirect: 'manual',
 	})
 	if (!response.ok) {

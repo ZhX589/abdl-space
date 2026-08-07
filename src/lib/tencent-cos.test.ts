@@ -4,6 +4,7 @@ import test from 'node:test'
 import {
 	buildCosObjectUrl,
 	createCosDeleteAuthorization,
+	createCosGetAuthorization,
 	createCosHeadAuthorization,
 	createCosPutAuthorization,
 	deleteObjectFromCos,
@@ -62,6 +63,21 @@ test('creates HEAD authorization with a method-specific signature', async () => 
 	assert.equal(Object.hasOwn(result.headers, 'Content-Type'), false)
 	assert.equal(Object.hasOwn(result.headers, 'x-cos-forbid-overwrite'), false)
 	assert.match(result.headers.Authorization, /q-header-list=host(?:&|$)/)
+})
+
+test('creates a short-lived GET URL with authorization in the query string', async () => {
+	const result = await createCosGetAuthorization({
+		...credentials,
+		objectKey: 'novels/private/42/book.epub',
+		contentType: 'application/epub+zip',
+		now,
+	})
+
+	assert.equal(result.expiresAt, 1785312300)
+	assert.match(result.url, /^https:\/\/abdl-1339643562\.cos\.ap-shanghai\.myqcloud\.com\/novels\/private\/42\/book\.epub\?q-sign-algorithm=sha1&/)
+	assert.match(result.headers.Authorization, /q-header-list=host(?:&|$)/)
+	assert.equal(Object.hasOwn(result.headers, 'Content-Type'), false)
+	assert.equal(Object.hasOwn(result.headers, 'x-cos-forbid-overwrite'), false)
 })
 
 test('builds encoded default and custom public object URLs', () => {
