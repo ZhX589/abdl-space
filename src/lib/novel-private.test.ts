@@ -51,29 +51,31 @@ function insertSyncItem(database: DatabaseSync, bookId: string, ownerId: number,
 }
 
 test('creates the complete private novel metadata schema with explicit non-null primary keys', () => {
-	const database = createDatabase()
-	try {
-		assertPrivateBooksTableContract(database)
-		const bookColumns = database.prepare('PRAGMA table_info(private_books)').all() as unknown as TableColumn[]
-		assert.deepEqual(bookColumns.map(({ name }) => name), [
-			'id', 'owner_id', 'title', 'author', 'format', 'object_key', 'content_hash',
-			'declared_size', 'verified_size', 'parse_status', 'upload_expires_at', 'created_at', 'updated_at', 'deleted_at',
-		])
-		assert.deepEqual(
-			bookColumns.filter(({ pk }) => pk > 0).sort((a, b) => a.pk - b.pk).map(({ name, notnull }) => [name, notnull]),
-			[['owner_id', 1], ['id', 1]],
-		)
+	for (const useCompleteSchema of [false, true]) {
+		const database = createDatabase(useCompleteSchema)
+		try {
+			assertPrivateBooksTableContract(database)
+			const bookColumns = database.prepare('PRAGMA table_info(private_books)').all() as unknown as TableColumn[]
+			assert.deepEqual(bookColumns.map(({ name }) => name), [
+				'id', 'owner_id', 'title', 'author', 'format', 'object_key', 'content_hash',
+				'declared_size', 'verified_size', 'parse_status', 'upload_expires_at', 'verification_started_at', 'created_at', 'updated_at', 'deleted_at',
+			])
+			assert.deepEqual(
+				bookColumns.filter(({ pk }) => pk > 0).sort((a, b) => a.pk - b.pk).map(({ name, notnull }) => [name, notnull]),
+				[['owner_id', 1], ['id', 1]],
+			)
 
-		const syncColumns = database.prepare('PRAGMA table_info(novel_sync_items)').all() as unknown as TableColumn[]
-		assert.deepEqual(syncColumns.map(({ name }) => name), [
-			'book_id', 'owner_id', 'item_type', 'item_id', 'payload_json', 'updated_at', 'deleted_at',
-		])
-		assert.deepEqual(
-			syncColumns.filter(({ pk }) => pk > 0).sort((a, b) => a.pk - b.pk).map(({ name, notnull }) => [name, notnull]),
-			[['owner_id', 1], ['item_type', 1], ['item_id', 1]],
-		)
-	} finally {
-		database.close()
+			const syncColumns = database.prepare('PRAGMA table_info(novel_sync_items)').all() as unknown as TableColumn[]
+			assert.deepEqual(syncColumns.map(({ name }) => name), [
+				'book_id', 'owner_id', 'item_type', 'item_id', 'payload_json', 'updated_at', 'deleted_at',
+			])
+			assert.deepEqual(
+				syncColumns.filter(({ pk }) => pk > 0).sort((a, b) => a.pk - b.pk).map(({ name, notnull }) => [name, notnull]),
+				[['owner_id', 1], ['item_type', 1], ['item_id', 1]],
+			)
+		} finally {
+			database.close()
+		}
 	}
 })
 

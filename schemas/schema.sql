@@ -562,6 +562,7 @@ CREATE TABLE IF NOT EXISTS private_books (
   verified_size INTEGER CHECK (verified_size IS NULL OR verified_size >= 0),
   parse_status TEXT NOT NULL DEFAULT 'pending' CHECK (parse_status IN ('pending', 'parsing', 'ready', 'failed')),
   upload_expires_at INTEGER NOT NULL,
+  verification_started_at INTEGER,
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
   updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
   deleted_at INTEGER,

@@ -80,7 +80,8 @@ export async function assertSessionNotStale(payload: JWTPayload, db: D1Database)
   if (user?.password_changed_at) {
     const pwdChangedSec = Math.floor(new Date(user.password_changed_at).getTime() / 1000)
     const tokenIat = payload.iat > 1e12 ? Math.floor(payload.iat / 1000) : payload.iat
-    if (tokenIat < pwdChangedSec) {
+    // Second-resolution timestamps cannot prove ordering within the same second, so fail closed.
+    if (tokenIat <= pwdChangedSec) {
       return 'Session expired, please login again'
     }
   }

@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { signJWT } from '../lib/auth.ts'
-import { authMiddleware } from './auth.ts'
+import { assertSessionNotStale, authMiddleware } from './auth.ts'
 
 test('authMiddleware installs a valid current user payload', async () => {
   const secret = 'test-secret'
@@ -38,4 +38,20 @@ test('authMiddleware installs a valid current user payload', async () => {
   assert.equal(nextCalled, true)
   assert.equal((installedUser as { sub: number }).sub, 1)
   assert.equal((installedUser as { role: string }).role, 'user')
+})
+
+test('assertSessionNotStale rejects a token issued in the password-change second', async () => {
+  const issuedAt = 1_786_111_234
+  const db = {
+    prepare() {
+      return {
+        bind() {
+          return { all: async () => ({ success: true, results: [{ password_changed_at: new Date(issuedAt * 1000).toISOString() }] }) }
+        },
+      }
+    },
+  }
+
+  const error = await assertSessionNotStale({ sub: 1, username: 'alice', email: 'alice@example.com', role: 'user', iat: issuedAt, exp: issuedAt + 300 }, db as never)
+  assert.equal(error, 'Session expired, please login again')
 })

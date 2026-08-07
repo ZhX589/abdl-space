@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict'
+import { DatabaseSync } from 'node:sqlite'
 import test from 'node:test'
 
 import { Hono } from 'hono'
 
 import { signJWT } from '../lib/auth.ts'
-import novelPrivate, { MAX_PRIVATE_BOOK_SIZE } from './novel-private.ts'
+import novelPrivate, { MAX_PRIVATE_BOOK_SIZE, PRIVATE_BOOK_INSERT_SQL } from './novel-private.ts'
 
 const jwtSecret = 'test-jwt-secret'
 const env = {
@@ -32,6 +33,7 @@ interface BookRow {
 	verified_size: number | null
 	parse_status: 'pending' | 'parsing' | 'ready' | 'failed'
 	upload_expires_at: number
+	verification_started_at: number | null
 	deleted_at: number | null
 }
 
@@ -55,15 +57,21 @@ function bookRow(overrides: Partial<BookRow> = {}): BookRow {
 		verified_size: null,
 		parse_status: 'pending',
 		upload_expires_at: Math.floor(Date.now() / 1000) + 300,
+		verification_started_at: null,
 		deleted_at: null,
 		...overrides,
 	}
 }
 
-function createDb(initialRows: BookRow[] = [], options: { oauthTokens?: OAuthToken[], passwordChangedAt?: Record<number, string | null> } = {}) {
+function createDb(initialRows: BookRow[] = [], options: {
+	oauthTokens?: OAuthToken[]
+	passwordChangedAt?: Record<number, string | null>
+	failRun?: (sql: string, call: number) => boolean
+} = {}) {
 	const rows = new Map(initialRows.map(row => [`${row.owner_id}:${row.id}`, { ...row }]))
 	const oauthTokens = new Map((options.oauthTokens ?? []).map(token => [token.accessToken, token]))
 	const passwordChangedAt = new Map(Object.entries(options.passwordChangedAt ?? {}).map(([id, value]) => [Number(id), value]))
+	let runCalls = 0
 
 	return {
 		rows,
@@ -104,13 +112,19 @@ function createDb(initialRows: BookRow[] = [], options: { oauthTokens?: OAuthTok
 							return { success: true, results: [] }
 						},
 						async run() {
+							runCalls++
+							if (options.failRun?.(sql, runCalls)) return { success: false, meta: { changes: 0 } }
 							if (sql.includes('INSERT INTO private_books')) {
 								const [id, ownerId, title, author, format, objectKey, contentHash, declaredSize, uploadExpiresAt] = params
+								const active = [...rows.values()].filter(row => row.owner_id === Number(ownerId) && row.deleted_at === null)
+								if (active.length >= 500 || active.reduce((sum, row) => sum + row.declared_size, 0) + Number(declaredSize) > 2 * 1024 * 1024 * 1024
+									|| active.some(row => row.content_hash === String(contentHash))) return { success: true, meta: { changes: 0 } }
 								rows.set(`${ownerId}:${id}`, {
 									id: String(id), owner_id: Number(ownerId), title: String(title), author: String(author),
 									format: String(format) as BookRow['format'], object_key: String(objectKey), content_hash: String(contentHash),
 									declared_size: Number(declaredSize), verified_size: null, parse_status: 'pending',
 									upload_expires_at: Number(uploadExpiresAt), deleted_at: null,
+									verification_started_at: null,
 								})
 								return { success: true, meta: { changes: 1 } }
 							}
@@ -122,25 +136,38 @@ function createDb(initialRows: BookRow[] = [], options: { oauthTokens?: OAuthTok
 								return { success: true, meta: { changes: 1 } }
 							}
 							if (sql.includes("SET parse_status = 'parsing'")) {
-								const [id, ownerId] = params
+								const [verificationStartedAt, id, ownerId, staleBefore] = params
 								const row = rows.get(`${ownerId}:${id}`)
-								if (!row || row.parse_status !== 'pending' || row.deleted_at !== null) return { success: true, meta: { changes: 0 } }
+								if (!row || row.deleted_at !== null || (row.parse_status !== 'pending'
+									&& !(row.parse_status === 'parsing' && (row.verification_started_at === null || row.verification_started_at <= Number(staleBefore))))) return { success: true, meta: { changes: 0 } }
 								row.parse_status = 'parsing'
+								row.verification_started_at = Number(verificationStartedAt)
 								return { success: true, meta: { changes: 1 } }
 							}
 							if (sql.includes("SET parse_status = 'pending'")) {
+								const [id, ownerId, verificationStartedAt] = params
+								const row = rows.get(`${ownerId}:${id}`)
+								if (!row || row.parse_status !== 'parsing' || row.verification_started_at !== Number(verificationStartedAt)) return { success: true, meta: { changes: 0 } }
+								row.parse_status = 'pending'
+								row.verification_started_at = null
+								return { success: true, meta: { changes: 1 } }
+							}
+							if (sql.includes("parse_status = 'failed'") && sql.includes('deleted_at')) {
 								const [id, ownerId] = params
 								const row = rows.get(`${ownerId}:${id}`)
-								if (!row || row.parse_status !== 'parsing') return { success: true, meta: { changes: 0 } }
-								row.parse_status = 'pending'
+								if (!row || row.deleted_at !== null) return { success: true, meta: { changes: 0 } }
+								row.parse_status = 'failed'
+								row.deleted_at = Math.floor(Date.now() / 1000)
+								row.verification_started_at = null
 								return { success: true, meta: { changes: 1 } }
 							}
 							if (sql.includes('SET verified_size = ?') && sql.includes("parse_status = 'ready'")) {
-								const [verifiedSize, id, ownerId] = params
+								const [verifiedSize, id, ownerId, verificationStartedAt] = params
 								const row = rows.get(`${ownerId}:${id}`)
-								if (!row || row.parse_status !== 'parsing' || row.deleted_at !== null) return { success: true, meta: { changes: 0 } }
+								if (!row || row.parse_status !== 'parsing' || row.verification_started_at !== Number(verificationStartedAt) || row.deleted_at !== null) return { success: true, meta: { changes: 0 } }
 								row.verified_size = Number(verifiedSize)
 								row.parse_status = 'ready'
+								row.verification_started_at = null
 								return { success: true, meta: { changes: 1 } }
 							}
 							return { success: true, meta: { changes: 0 } }
@@ -214,6 +241,7 @@ test('private COS configuration fails closed and never falls back to public cred
 	for (const override of [
 		{ NOVEL_COS_SECRET_ID: '' }, { NOVEL_COS_SECRET_KEY: '' }, { NOVEL_PRIVATE_COS_BUCKET: '' },
 		{ NOVEL_PRIVATE_COS_REGION: '' }, { NOVEL_PRIVATE_COS_BUCKET: env.COS_BUCKET },
+		{ NOVEL_COS_SECRET_ID: env.COS_SECRET_ID }, { NOVEL_COS_SECRET_KEY: env.COS_SECRET_KEY },
 	]) {
 		const { response } = await request('/authorize', { body: validAuthorize, env: override })
 		assert.equal(response.status, 503, JSON.stringify(override))
@@ -238,17 +266,29 @@ test('authorize validates format and size and creates a pending upload with expi
 	assert.doesNotMatch((result.required_headers as Record<string, string>).Authorization, /PUBLIC-KEY-MUST-NOT-BE-USED/)
 })
 
-test('authorize reuses an active owner/hash record and refreshes its upload expiry', async () => {
-	for (const parse_status of ['pending', 'ready'] as const) {
-		const row = bookRow({ id: `${parse_status}-book`, content_hash: validAuthorize.content_hash, parse_status, verified_size: parse_status === 'ready' ? 123 : null, upload_expires_at: 1 })
-		const db = createDb([row])
-		const { response } = await request('/authorize', { body: validAuthorize, db })
-		assert.equal(response.status, 200, await response.clone().text())
-		const result = await response.json() as Record<string, unknown>
-		assert.equal(result.upload_id, row.id)
-		assert.equal(result.upload_url, `https://${env.NOVEL_PRIVATE_COS_BUCKET}.cos.${env.NOVEL_PRIVATE_COS_REGION}.myqcloud.com/${row.object_key}`)
-		assert.equal(db.rows.size, 1)
-		assert.equal(db.rows.get(`42:${row.id}`)?.upload_expires_at, result.expires_at)
+test('authorize returns ready hash idempotently without PUT authorization', async () => {
+	const row = bookRow({ id: 'ready-book', title: validAuthorize.title, author: validAuthorize.author, content_hash: validAuthorize.content_hash, parse_status: 'ready', verified_size: 123 })
+	const { response, db } = await request('/authorize', { body: validAuthorize, db: createDb([row]) })
+	assert.equal(response.status, 200, await response.clone().text())
+	assert.deepEqual(await response.json(), { upload_id: row.id, already_uploaded: true, parse_status: 'ready' })
+	assert.equal(db.rows.get(`42:${row.id}`)?.upload_expires_at, row.upload_expires_at)
+})
+
+test('authorize re-signs only an exactly matching pending hash and rejects metadata conflicts', async () => {
+	const matching = bookRow({ id: 'pending-book', title: validAuthorize.title, author: validAuthorize.author, content_hash: validAuthorize.content_hash, upload_expires_at: 1 })
+	const { response, db } = await request('/authorize', { body: validAuthorize, db: createDb([matching]) })
+	assert.equal(response.status, 200, await response.clone().text())
+	const result = await response.json() as Record<string, unknown>
+	assert.equal(result.upload_id, matching.id)
+	assert.equal(result.upload_url, `https://${env.NOVEL_PRIVATE_COS_BUCKET}.cos.${env.NOVEL_PRIVATE_COS_REGION}.myqcloud.com/${matching.object_key}`)
+	assert.equal(db.rows.get(`42:${matching.id}`)?.upload_expires_at, result.expires_at)
+
+	for (const override of [
+		{ title: 'Other title' }, { author: 'Other author' }, { declared_size: 124 },
+		{ mime_type: 'text/plain' },
+	]) {
+		const conflict = bookRow({ title: validAuthorize.title, author: validAuthorize.author, content_hash: validAuthorize.content_hash })
+		assert.equal((await request('/authorize', { body: { ...validAuthorize, ...override }, db: createDb([conflict]) })).response.status, 409)
 	}
 })
 
@@ -257,6 +297,43 @@ test('authorize enforces 500 active books and 2 GiB declared-size quotas', async
 	assert.equal((await request('/authorize', { body: validAuthorize, db: createDb(fiveHundred) })).response.status, 429)
 	const nearLimit = bookRow({ declared_size: 2 * 1024 * 1024 * 1024 - 100 })
 	assert.equal((await request('/authorize', { body: validAuthorize, db: createDb([nearLimit]) })).response.status, 429)
+})
+
+test('concurrent authorize calls for the same hash converge without a server error', async () => {
+	const db = createDb()
+	const [first, second] = await Promise.all([
+		request('/authorize', { body: validAuthorize, db }),
+		request('/authorize', { body: validAuthorize, db }),
+	])
+	assert.equal(first.response.status, 200, await first.response.clone().text())
+	assert.equal(second.response.status, 200, await second.response.clone().text())
+	const firstBody = await first.response.json() as { upload_id: string }
+	const secondBody = await second.response.json() as { upload_id: string }
+	assert.equal(firstBody.upload_id, secondBody.upload_id)
+	assert.equal(db.rows.size, 1)
+})
+
+test('conditional INSERT gives one winner for the same hash in real SQLite', () => {
+	const database = new DatabaseSync(':memory:')
+	try {
+		database.exec(`
+			CREATE TABLE private_books (
+				id TEXT NOT NULL, owner_id INTEGER NOT NULL, title TEXT NOT NULL, author TEXT NOT NULL,
+				format TEXT NOT NULL, object_key TEXT NOT NULL, content_hash TEXT NOT NULL,
+				declared_size INTEGER NOT NULL, verified_size INTEGER, parse_status TEXT NOT NULL,
+				upload_expires_at INTEGER NOT NULL, verification_started_at INTEGER, deleted_at INTEGER,
+				PRIMARY KEY (owner_id, id)
+			);
+			CREATE UNIQUE INDEX active_hash ON private_books(owner_id, content_hash) WHERE deleted_at IS NULL;
+		`)
+		const statement = database.prepare(PRIVATE_BOOK_INSERT_SQL)
+		const bind = (id: string, key: string) => [id, 42, validAuthorize.title, validAuthorize.author, 'epub', key, validAuthorize.content_hash, validAuthorize.declared_size, 12345]
+		assert.equal(statement.run(...bind('first', 'first.epub')).changes, 1)
+		assert.equal(statement.run(...bind('second', 'second.epub')).changes, 0)
+		assert.equal(database.prepare('SELECT COUNT(*) AS count FROM private_books').get()?.count, 1)
+	} finally {
+		database.close()
+	}
 })
 
 test('complete atomically claims pending before HEAD and concurrent callers do not duplicate HEAD', async () => {
@@ -286,7 +363,45 @@ test('complete atomically claims pending before HEAD and concurrent callers do n
 	}
 })
 
-test('complete returns ready without HEAD and restores pending after HEAD or metadata failure', async () => {
+test('complete returns 202 for a live parsing lease and reclaims one older than five minutes', async () => {
+	const now = Date.now() * 1000
+	const live = bookRow({ parse_status: 'parsing', verification_started_at: now - 299_000_000 })
+	let calls = 0
+	const originalFetch = globalThis.fetch
+	globalThis.fetch = async () => { calls++; return new Response(null, { status: 200, headers: { 'Content-Length': '123', 'Content-Type': 'application/epub+zip' } }) }
+	try {
+		assert.equal((await request(`/${live.id}/complete`, { db: createDb([live]) })).response.status, 202)
+		assert.equal(calls, 0)
+		const stale = bookRow({ parse_status: 'parsing', verification_started_at: now - 301_000_000 })
+		const { response, db } = await request(`/${stale.id}/complete`, { db: createDb([stale]) })
+		assert.equal(response.status, 200, await response.clone().text())
+		assert.equal(calls, 1)
+		assert.equal(db.rows.get(`42:${stale.id}`)?.parse_status, 'ready')
+	} finally {
+		globalThis.fetch = originalFetch
+	}
+})
+
+test('complete expires uploads before HEAD and soft-deletes them for reauthorization', async () => {
+	const expired = bookRow({ content_hash: validAuthorize.content_hash, upload_expires_at: Math.floor(Date.now() / 1000) - 1 })
+	let calls = 0
+	const originalFetch = globalThis.fetch
+	globalThis.fetch = async () => { calls++; throw new Error('must not run') }
+	try {
+		const { response, db } = await request(`/${expired.id}/complete`, { db: createDb([expired]) })
+		assert.equal(response.status, 410)
+		assert.equal(calls, 0)
+		assert.equal(db.rows.get(`42:${expired.id}`)?.parse_status, 'failed')
+		assert.notEqual(db.rows.get(`42:${expired.id}`)?.deleted_at, null)
+		const reauthorized = await request('/authorize', { body: validAuthorize, db })
+		assert.equal(reauthorized.response.status, 200)
+		assert.notEqual((await reauthorized.response.json() as { upload_id: string }).upload_id, expired.id)
+	} finally {
+		globalThis.fetch = originalFetch
+	}
+})
+
+test('complete returns ready without HEAD, restores missing objects, and rejects bad metadata permanently', async () => {
 	const ready = bookRow({ parse_status: 'ready', verified_size: 123 })
 	let calls = 0
 	const originalFetch = globalThis.fetch
@@ -298,16 +413,57 @@ test('complete returns ready without HEAD and restores pending after HEAD or met
 		globalThis.fetch = originalFetch
 	}
 
-	for (const outcome of [new Response(null, { status: 404 }), new Response(null, { status: 200, headers: { 'Content-Length': '123', 'Content-Type': 'application/epub+zip; charset=utf-8' } })]) {
+	for (const [outcome, expectedStatus] of [
+		[new Response(null, { status: 404 }), 'pending'],
+		[new Response(null, { status: 200, headers: { 'Content-Length': '123', 'Content-Type': 'application/epub+zip; charset=utf-8' } }), 'failed'],
+	] as const) {
 		const row = bookRow()
 		const db = createDb([row])
 		globalThis.fetch = async () => outcome
 		try {
 			assert.equal((await request(`/${row.id}/complete`, { db })).response.status, 422)
-			assert.equal(db.rows.get(`42:${row.id}`)?.parse_status, 'pending')
+			assert.equal(db.rows.get(`42:${row.id}`)?.parse_status, expectedStatus)
 		} finally {
 			globalThis.fetch = originalFetch
 		}
+	}
+})
+
+test('complete soft-deletes a record when an existing object has the wrong metadata and a retry gets a new key', async () => {
+	const row = bookRow({ title: validAuthorize.title, author: validAuthorize.author, content_hash: validAuthorize.content_hash })
+	const db = createDb([row])
+	const originalFetch = globalThis.fetch
+	globalThis.fetch = async () => new Response(null, { status: 200, headers: { 'Content-Length': '124', 'Content-Type': 'application/epub+zip' } })
+	try {
+		assert.equal((await request(`/${row.id}/complete`, { db })).response.status, 422)
+		assert.equal(db.rows.get(`42:${row.id}`)?.parse_status, 'failed')
+		assert.notEqual(db.rows.get(`42:${row.id}`)?.deleted_at, null)
+		const response = (await request('/authorize', { body: validAuthorize, db })).response
+		assert.equal(response.status, 200)
+		const replacement = await response.json() as { upload_id: string, upload_url: string }
+		assert.notEqual(replacement.upload_id, row.id)
+		assert.notEqual(replacement.upload_url, `https://${env.NOVEL_PRIVATE_COS_BUCKET}.cos.${env.NOVEL_PRIVATE_COS_REGION}.myqcloud.com/${row.object_key}`)
+	} finally {
+		globalThis.fetch = originalFetch
+	}
+})
+
+test('complete safely restores its lease after post-HEAD exceptions and final UPDATE failure', async () => {
+	const originalFetch = globalThis.fetch
+	try {
+		const headersFailure = bookRow()
+		globalThis.fetch = async () => ({ ok: true, headers: { get() { throw new Error('header failure') } } }) as Response
+		const firstDb = createDb([headersFailure])
+		assert.equal((await request(`/${headersFailure.id}/complete`, { db: firstDb })).response.status, 500)
+		assert.equal(firstDb.rows.get(`42:${headersFailure.id}`)?.parse_status, 'pending')
+
+		const updateFailure = bookRow()
+		globalThis.fetch = async () => new Response(null, { status: 200, headers: { 'Content-Length': '123', 'Content-Type': 'application/epub+zip' } })
+		const secondDb = createDb([updateFailure], { failRun: sql => sql.includes("parse_status = 'ready'") })
+		assert.equal((await request(`/${updateFailure.id}/complete`, { db: secondDb })).response.status, 500)
+		assert.equal(secondDb.rows.get(`42:${updateFailure.id}`)?.parse_status, 'pending')
+	} finally {
+		globalThis.fetch = originalFetch
 	}
 })
 
