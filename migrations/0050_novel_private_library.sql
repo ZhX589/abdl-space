@@ -12,7 +12,7 @@ CREATE TABLE private_books (
   parse_status TEXT NOT NULL DEFAULT 'pending' CHECK (parse_status IN ('pending', 'parsing', 'ready', 'failed')),
   upload_expires_at INTEGER NOT NULL,
   verification_started_at INTEGER,
-  cleanup_status TEXT NOT NULL DEFAULT 'pending' CHECK (cleanup_status IN ('pending', 'deleting', 'done', 'failed')),
+  cleanup_status TEXT NOT NULL DEFAULT 'pending' CHECK (cleanup_status IN ('pending', 'deleting', 'monitoring', 'failed')),
   cleanup_attempted_at INTEGER,
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
   updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
@@ -24,7 +24,7 @@ CREATE TABLE private_books (
 CREATE TABLE novel_object_cleanup_jobs (
   object_key TEXT PRIMARY KEY NOT NULL,
   not_before INTEGER NOT NULL,
-  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'claimed', 'failed', 'done')),
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'deleting', 'monitoring', 'failed')),
   attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
   next_attempt_at INTEGER NOT NULL,
   claim_token TEXT,
@@ -41,12 +41,13 @@ CREATE TRIGGER private_books_cleanup_before_delete
 BEFORE DELETE ON private_books
 BEGIN
   INSERT INTO novel_object_cleanup_jobs (object_key, not_before, status, next_attempt_at)
-  VALUES (OLD.object_key, OLD.upload_expires_at + 900, 'pending', OLD.upload_expires_at + 900)
+  VALUES (OLD.object_key, OLD.upload_expires_at, 'pending', OLD.upload_expires_at)
   ON CONFLICT(object_key) DO UPDATE SET
-    not_before = MAX(novel_object_cleanup_jobs.not_before, excluded.not_before),
-    status = 'pending',
-    next_attempt_at = MAX(novel_object_cleanup_jobs.not_before, excluded.not_before),
-    claim_token = NULL,
+    not_before = MIN(novel_object_cleanup_jobs.not_before, excluded.not_before),
+    status = CASE WHEN novel_object_cleanup_jobs.status IN ('deleting', 'monitoring') THEN novel_object_cleanup_jobs.status ELSE 'pending' END,
+    next_attempt_at = CASE WHEN novel_object_cleanup_jobs.status IN ('deleting', 'monitoring')
+      THEN novel_object_cleanup_jobs.next_attempt_at ELSE MIN(novel_object_cleanup_jobs.next_attempt_at, excluded.next_attempt_at) END,
+    claim_token = CASE WHEN novel_object_cleanup_jobs.status = 'deleting' THEN novel_object_cleanup_jobs.claim_token ELSE NULL END,
     updated_at = unixepoch();
 END;
 
@@ -55,12 +56,13 @@ AFTER UPDATE OF deleted_at ON private_books
 WHEN OLD.deleted_at IS NULL AND NEW.deleted_at IS NOT NULL
 BEGIN
   INSERT INTO novel_object_cleanup_jobs (object_key, not_before, status, next_attempt_at)
-  VALUES (NEW.object_key, NEW.upload_expires_at + 900, 'pending', NEW.upload_expires_at + 900)
+  VALUES (NEW.object_key, NEW.upload_expires_at, 'pending', NEW.upload_expires_at)
   ON CONFLICT(object_key) DO UPDATE SET
-    not_before = MAX(novel_object_cleanup_jobs.not_before, excluded.not_before),
-    status = 'pending',
-    next_attempt_at = MAX(novel_object_cleanup_jobs.not_before, excluded.not_before),
-    claim_token = NULL,
+    not_before = MIN(novel_object_cleanup_jobs.not_before, excluded.not_before),
+    status = CASE WHEN novel_object_cleanup_jobs.status IN ('deleting', 'monitoring') THEN novel_object_cleanup_jobs.status ELSE 'pending' END,
+    next_attempt_at = CASE WHEN novel_object_cleanup_jobs.status IN ('deleting', 'monitoring')
+      THEN novel_object_cleanup_jobs.next_attempt_at ELSE MIN(novel_object_cleanup_jobs.next_attempt_at, excluded.next_attempt_at) END,
+    claim_token = CASE WHEN novel_object_cleanup_jobs.status = 'deleting' THEN novel_object_cleanup_jobs.claim_token ELSE NULL END,
     updated_at = unixepoch();
 END;
 

@@ -25,7 +25,7 @@ interface PrivateBookRow {
 	parse_status: 'pending' | 'parsing' | 'ready' | 'failed'
 	upload_expires_at: number
 	verification_started_at: number | null
-	cleanup_status: 'pending' | 'deleting' | 'done' | 'failed'
+	cleanup_status: 'pending' | 'deleting' | 'monitoring' | 'failed'
 	cleanup_attempted_at: number | null
 	created_at: number
 	updated_at: number
@@ -54,8 +54,8 @@ const MIME_FORMATS = {
 } as const
 
 export const MAX_PRIVATE_BOOK_SIZE = 50 * 1024 * 1024
-// Content-Length caps uploads at 50 MiB; settle protects PUTs started before signature expiry.
-export const PRIVATE_UPLOAD_SETTLE_SECONDS = 15 * 60
+const CLEANUP_MONITOR_SECONDS = 24 * 60 * 60
+const MAX_CLEANUP_BATCH_SIZE = 50
 const MAX_PRIVATE_BOOK_COUNT = 500
 const MAX_PRIVATE_BOOK_TOTAL_SIZE = 2 * 1024 * 1024 * 1024
 const VERIFICATION_LEASE_MICROSECONDS = 5 * 60 * 1_000_000
@@ -77,6 +77,9 @@ export const PRIVATE_BOOK_INSERT_SQL = `
 		AND (SELECT COALESCE(SUM(declared_size), 0) FROM private_books WHERE owner_id = ?2 AND deleted_at IS NULL) + ?9 <= ${MAX_PRIVATE_BOOK_TOTAL_SIZE}
 		AND NOT EXISTS (
 			SELECT 1 FROM private_books WHERE owner_id = ?2 AND content_hash = ?7 AND deleted_at IS NULL
+		)
+		AND NOT EXISTS (
+			SELECT 1 FROM novel_object_cleanup_jobs WHERE object_key = ?6
 		)
 `
 
@@ -254,9 +257,12 @@ async function enqueueCleanupJob(db: D1Database, objectKey: string, notBefore: n
 		INSERT INTO novel_object_cleanup_jobs (object_key, not_before, status, next_attempt_at)
 		VALUES (?, ?, 'pending', ?)
 		ON CONFLICT(object_key) DO UPDATE SET
-			not_before = MAX(novel_object_cleanup_jobs.not_before, excluded.not_before),
-			status = 'pending', next_attempt_at = MAX(novel_object_cleanup_jobs.not_before, excluded.not_before),
-			claim_token = NULL, updated_at = unixepoch()
+			not_before = MIN(novel_object_cleanup_jobs.not_before, excluded.not_before),
+			status = CASE WHEN novel_object_cleanup_jobs.status IN ('deleting', 'monitoring') THEN novel_object_cleanup_jobs.status ELSE 'pending' END,
+			next_attempt_at = CASE WHEN novel_object_cleanup_jobs.status IN ('deleting', 'monitoring')
+				THEN novel_object_cleanup_jobs.next_attempt_at ELSE MIN(novel_object_cleanup_jobs.next_attempt_at, excluded.next_attempt_at) END,
+			claim_token = CASE WHEN novel_object_cleanup_jobs.status = 'deleting' THEN novel_object_cleanup_jobs.claim_token ELSE NULL END,
+			updated_at = unixepoch()
 	`).bind(objectKey, notBefore, notBefore).run()
 	if (!result.success) throw new Error('Database operation failed')
 }
@@ -273,20 +279,21 @@ async function failAndDeleteBook(db: D1Database, book: PrivateBookRow, verificat
 		WHERE id = ? AND owner_id = ? AND parse_status = 'parsing'
 			AND verification_started_at = ? AND deleted_at IS NULL
 	`).bind(cleanupToken, book.id, book.owner_id, verificationStartedAt).run()
-	if (result.success && result.meta.changes === 1) await enqueueCleanupJob(db, book.object_key, book.upload_expires_at + PRIVATE_UPLOAD_SETTLE_SECONDS)
+	if (result.success && result.meta.changes === 1) await enqueueCleanupJob(db, book.object_key, book.upload_expires_at)
 	return result.success && result.meta.changes === 1
 }
 
 export async function cleanupPrivateNovelObjects(env: Env, now: number, limit: number): Promise<number> {
 	const cos = privateCosOptions(env)
 	if (!cos || !Number.isSafeInteger(now) || !Number.isSafeInteger(limit) || limit <= 0) return 0
+	const batchSize = Math.min(limit, MAX_CLEANUP_BATCH_SIZE)
 	const staleVerificationBefore = (now * 1_000_000) - VERIFICATION_LEASE_MICROSECONDS
 	const expired = await env.abdl_space_db.prepare(`
 		SELECT id, owner_id, object_key, upload_expires_at FROM private_books
 		WHERE deleted_at IS NULL AND ((parse_status = 'pending' AND upload_expires_at <= ?)
 			OR (parse_status = 'parsing' AND verification_started_at <= ?))
 		ORDER BY upload_expires_at ASC LIMIT ?
-	`).bind(now, staleVerificationBefore, limit).all<Pick<PrivateBookRow, 'id' | 'owner_id' | 'object_key' | 'upload_expires_at'>>()
+	`).bind(now, staleVerificationBefore, batchSize).all<Pick<PrivateBookRow, 'id' | 'owner_id' | 'object_key' | 'upload_expires_at'>>()
 	if (!expired.success) throw new Error('Database query failed')
 	for (const book of expired.results) {
 		const removed = await env.abdl_space_db.prepare(`
@@ -296,7 +303,7 @@ export async function cleanupPrivateNovelObjects(env: Env, now: number, limit: n
 					OR (parse_status = 'parsing' AND verification_started_at <= ?))
 		`).bind(now, book.id, book.owner_id, now, staleVerificationBefore).run()
 		if (!removed.success) throw new Error('Database operation failed')
-		if (removed.meta.changes === 1) await enqueueCleanupJob(env.abdl_space_db, book.object_key, book.upload_expires_at + PRIVATE_UPLOAD_SETTLE_SECONDS)
+		if (removed.meta.changes === 1) await enqueueCleanupJob(env.abdl_space_db, book.object_key, book.upload_expires_at)
 	}
 
 	const staleClaimBefore = now - Math.floor(CLEANUP_LEASE_MICROSECONDS / 1_000_000)
@@ -304,15 +311,15 @@ export async function cleanupPrivateNovelObjects(env: Env, now: number, limit: n
 		SELECT object_key, not_before, status, attempt_count, claim_token, attempted_at
 		FROM novel_object_cleanup_jobs
 		WHERE not_before <= ? AND next_attempt_at <= ?
-			AND (status IN ('pending', 'failed') OR (status = 'claimed' AND attempted_at <= ?))
+			AND (status IN ('pending', 'monitoring', 'failed') OR (status = 'deleting' AND attempted_at <= ?))
 		ORDER BY next_attempt_at ASC, COALESCE(attempted_at, 0) ASC, object_key ASC LIMIT ?
-	`).bind(now, now, staleClaimBefore, limit).all<{ object_key: string, not_before: number, status: string, attempt_count: number, claim_token: string | null, attempted_at: number | null }>()
+	`).bind(now, now, staleClaimBefore, batchSize).all<{ object_key: string, not_before: number, status: string, attempt_count: number, claim_token: string | null, attempted_at: number | null }>()
 	if (!jobs.success) throw new Error('Database query failed')
 	let claimed = 0
 	for (const job of jobs.results) {
 		const claimToken = crypto.randomUUID()
 		const claim = await env.abdl_space_db.prepare(`
-			UPDATE novel_object_cleanup_jobs SET status = 'claimed', claim_token = ?, attempted_at = ?, updated_at = unixepoch()
+			UPDATE novel_object_cleanup_jobs SET status = 'deleting', claim_token = ?, attempted_at = ?, updated_at = unixepoch()
 			WHERE object_key = ? AND status = ? AND next_attempt_at <= ? AND not_before <= ?
 				AND (claim_token = ? OR (claim_token IS NULL AND ? IS NULL))
 				AND (attempted_at = ? OR (attempted_at IS NULL AND ? IS NULL))
@@ -320,7 +327,7 @@ export async function cleanupPrivateNovelObjects(env: Env, now: number, limit: n
 		if (!claim.success) throw new Error('Database operation failed')
 		if (claim.meta.changes !== 1) continue
 		claimed++
-		let status = 'done'
+		let status = 'monitoring'
 		let errorStatus: number | null = null
 		try {
 			await deleteObjectFromCos({ ...cos, objectKey: job.object_key, contentType: 'application/octet-stream' })
@@ -335,8 +342,8 @@ export async function cleanupPrivateNovelObjects(env: Env, now: number, limit: n
 		const final = await env.abdl_space_db.prepare(`
 			UPDATE novel_object_cleanup_jobs
 			SET status = ?, attempt_count = ?, next_attempt_at = ?, last_error_status = ?, claim_token = NULL, updated_at = unixepoch()
-			WHERE object_key = ? AND status = 'claimed' AND claim_token = ?
-		`).bind(status, attemptCount, status === 'done' ? now : now + retryDelay, errorStatus, job.object_key, claimToken).run()
+			WHERE object_key = ? AND status = 'deleting' AND claim_token = ?
+		`).bind(status, attemptCount, now + (status === 'monitoring' ? CLEANUP_MONITOR_SECONDS : retryDelay), errorStatus, job.object_key, claimToken).run()
 		if (!final.success || final.meta.changes !== 1) throw new Error('Database operation failed')
 	}
 	return claimed
@@ -410,7 +417,7 @@ novelPrivate.delete('/books/:id', async c => {
 			WHERE owner_id = ? AND id = ? AND deleted_at IS NULL
 		`).bind(auth.user.sub, book.id).run()
 		if (!result.success) throw new Error('Database operation failed')
-		if (result.meta.changes === 1) await enqueueCleanupJob(c.env.abdl_space_db, book.object_key, book.upload_expires_at + PRIVATE_UPLOAD_SETTLE_SECONDS)
+		if (result.meta.changes === 1) await enqueueCleanupJob(c.env.abdl_space_db, book.object_key, book.upload_expires_at)
 		return c.json({ id: book.id, deleted: true })
 	} catch {
 		return c.json({ error: 'Private book deletion failed', code: 'delete_failed' }, 500)
@@ -487,7 +494,7 @@ novelPrivate.post('/paste', async c => {
 				UPDATE private_books SET parse_status = 'failed', deleted_at = unixepoch(), cleanup_status = 'pending', updated_at = unixepoch()
 				WHERE owner_id = ? AND id = ? AND deleted_at IS NULL
 			`).bind(auth.user.sub, book.id).run()
-			if (failed.success && failed.meta.changes === 1) await enqueueCleanupJob(c.env.abdl_space_db, book.object_key, book.upload_expires_at + PRIVATE_UPLOAD_SETTLE_SECONDS)
+			if (failed.success && failed.meta.changes === 1) await enqueueCleanupJob(c.env.abdl_space_db, book.object_key, book.upload_expires_at)
 		}
 		return c.json({ error: 'Private paste failed', code: 'paste_failed' }, 502)
 	}

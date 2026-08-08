@@ -169,7 +169,7 @@ async function createCosAuthorization(method: 'put' | 'head' | 'get' | 'delete',
 	const signTime = `${start};${expiresAt}`
 	const forbidOverwrite = method === 'put'
 	const bindsContentIntegrity = forbidOverwrite && (options.contentLength !== undefined || options.contentMd5 !== undefined)
-	if (bindsContentIntegrity && (!Number.isSafeInteger(options.contentLength) || Number(options.contentLength) <= 0
+	if (bindsContentIntegrity && (!Number.isSafeInteger(options.contentLength) || Number(options.contentLength) < 0
 		|| typeof options.contentMd5 !== 'string' || !isCanonicalContentMd5(options.contentMd5))) {
 		throw new Error('Invalid PUT content integrity headers')
 	}

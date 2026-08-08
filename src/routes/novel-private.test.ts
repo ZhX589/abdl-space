@@ -6,7 +6,7 @@ import test from 'node:test'
 import { Hono } from 'hono'
 
 import { signJWT } from '../lib/auth.ts'
-import novelPrivate, { cleanupPrivateNovelObjects, MAX_PRIVATE_BOOK_SIZE, PRIVATE_BOOK_INSERT_SQL, PRIVATE_UPLOAD_SETTLE_SECONDS } from './novel-private.ts'
+import novelPrivate, { cleanupPrivateNovelObjects, MAX_PRIVATE_BOOK_SIZE, PRIVATE_BOOK_INSERT_SQL } from './novel-private.ts'
 
 const jwtSecret = 'test-jwt-secret'
 const env = {
@@ -38,7 +38,7 @@ interface BookRow {
 	parse_status: 'pending' | 'parsing' | 'ready' | 'failed'
 	upload_expires_at: number
 	verification_started_at: number | null
-	cleanup_status: 'pending' | 'deleting' | 'done' | 'failed'
+	cleanup_status: 'pending' | 'deleting' | 'monitoring' | 'failed'
 	cleanup_attempted_at: number | null
 	deleted_at: number | null
 }
@@ -389,6 +389,7 @@ test('private COS configuration fails closed and never falls back to public cred
 test('authorize validates format and size and creates a pending upload with expiry', async () => {
 	for (const body of [
 		{ ...validAuthorize, mime_type: 'application/pdf' }, { ...validAuthorize, declared_size: 0 },
+		{ ...validAuthorize, declared_size: 0, content_md5: '1B2M2Y8AsgTpgAmY7PhCfg==' },
 		{ ...validAuthorize, declared_size: MAX_PRIVATE_BOOK_SIZE + 1 }, { ...validAuthorize, object_key: 'client/chosen.epub' },
 	]) {
 		const { response } = await request('/authorize', { body })
@@ -484,6 +485,7 @@ test('conditional INSERT gives one winner for the same hash in real SQLite', () 
 	const database = new DatabaseSync(':memory:')
 	try {
 		database.exec(`
+			CREATE TABLE novel_object_cleanup_jobs (object_key TEXT PRIMARY KEY NOT NULL);
 			CREATE TABLE private_books (
 				id TEXT NOT NULL, owner_id INTEGER NOT NULL, title TEXT NOT NULL, author TEXT NOT NULL,
 				format TEXT NOT NULL, object_key TEXT NOT NULL, content_hash TEXT NOT NULL,
@@ -554,7 +556,7 @@ test('complete returns 202 for a live parsing lease and reclaims one older than 
 	}
 })
 
-test('complete expires uploads before HEAD, enqueues settle-delayed cleanup, and permits reauthorization', async () => {
+test('complete expires uploads before HEAD, enqueues cleanup at expiry, and permits reauthorization', async () => {
 	const expired = bookRow({ content_hash: validAuthorize.content_hash, upload_expires_at: Math.floor(Date.now() / 1000) - 1 })
 	let calls = 0
 	const originalFetch = globalThis.fetch
@@ -848,7 +850,7 @@ test('complete maps private GET failures safely and restores pending', async () 
 	}
 })
 
-test('scheduled cleanup soft-deletes expired pending books and waits through the settle window', async () => {
+test('scheduled cleanup soft-deletes expired pending books and starts DELETE at upload expiry', async () => {
 	const db = createSqliteD1()
 	const now = Math.floor(Date.now() / 1000)
 	const row = insertReadyBook(db, { id: 'expired', parse_status: 'pending', verified_size: null, upload_expires_at: now - 1 })
@@ -860,12 +862,10 @@ test('scheduled cleanup soft-deletes expired pending books and waits through the
 		return new Response(null, { status: 204 })
 	}
 	try {
-		assert.equal(await cleanupPrivateNovelObjects({ ...env, abdl_space_db: db } as never, now, 50), 0)
-		assert.equal(calls, 0)
-		assert.equal(db.database.prepare('SELECT parse_status FROM private_books WHERE owner_id = 42 AND id = ?').get(row.id)?.parse_status, 'failed')
-		assert.equal(await cleanupPrivateNovelObjects({ ...env, abdl_space_db: db } as never, row.upload_expires_at + PRIVATE_UPLOAD_SETTLE_SECONDS, 50), 1)
+		assert.equal(await cleanupPrivateNovelObjects({ ...env, abdl_space_db: db } as never, now, 50), 1)
 		assert.equal(calls, 1)
-		assert.equal(db.database.prepare('SELECT status FROM novel_object_cleanup_jobs WHERE object_key = ?').get(row.object_key)?.status, 'done')
+		assert.equal(db.database.prepare('SELECT parse_status FROM private_books WHERE owner_id = 42 AND id = ?').get(row.id)?.parse_status, 'failed')
+		assert.equal(db.database.prepare('SELECT status FROM novel_object_cleanup_jobs WHERE object_key = ?').get(row.object_key)?.status, 'monitoring')
 	} finally {
 		globalThis.fetch = originalFetch
 		db.database.close()
@@ -887,8 +887,8 @@ test('scheduled cleanup atomically removes a parsing lease stale by over five mi
 	db.database.close()
 })
 
-test('scheduled cleanup treats settled 404 as done and backs off failures without starving later jobs', async () => {
-	for (const [status, expected] of [[404, 'done'], [500, 'failed']] as const) {
+test('scheduled cleanup keeps successful and missing deletes monitoring and backs off failures without starving later jobs', async () => {
+	for (const [status, expected] of [[404, 'monitoring'], [204, 'monitoring'], [500, 'failed']] as const) {
 		const db = createSqliteD1()
 		db.database.prepare("INSERT INTO novel_object_cleanup_jobs (object_key, not_before, status, next_attempt_at) VALUES ('first', 1, 'pending', 1), ('second', 1, 'pending', 1)").run()
 		const originalFetch = globalThis.fetch
@@ -902,7 +902,7 @@ test('scheduled cleanup treats settled 404 as done and backs off failures withou
 		try {
 			assert.equal(await cleanupPrivateNovelObjects({ ...env, abdl_space_db: db } as never, 100, 50), 2)
 			assert.equal(db.database.prepare("SELECT status FROM novel_object_cleanup_jobs WHERE object_key = 'first'").get()?.status, expected)
-			assert.equal(db.database.prepare("SELECT status FROM novel_object_cleanup_jobs WHERE object_key = 'second'").get()?.status, 'done')
+			assert.equal(db.database.prepare("SELECT status FROM novel_object_cleanup_jobs WHERE object_key = 'second'").get()?.status, 'monitoring')
 			assert.match(authorization, /q-ak=AKIDEXAMPLEFAKE(?:&|$)/)
 			assert.doesNotMatch(authorization, /PUBLIC-KEY-MUST-NOT-BE-USED|public-secret-must-not-be-used/)
 		} finally {
@@ -933,7 +933,25 @@ test('scheduled cleanup conditionally claims each object once', async () => {
 	}
 })
 
-test('paste DELETE 404 before upload expiry cannot finish cleanup before a gated PUT succeeds', async () => {
+test('scheduled cleanup processes at most 50 due jobs per invocation', async () => {
+	const db = createSqliteD1()
+	for (let index = 0; index < 51; index++) {
+		db.database.prepare('INSERT INTO novel_object_cleanup_jobs (object_key, not_before, status, next_attempt_at) VALUES (?, 1, \'pending\', 1)').run(`batch-${index}`)
+	}
+	const originalFetch = globalThis.fetch
+	let calls = 0
+	globalThis.fetch = async () => { calls++; return new Response(null, { status: 204 }) }
+	try {
+		assert.equal(await cleanupPrivateNovelObjects({ ...env, abdl_space_db: db } as never, 100, 500), 50)
+		assert.equal(calls, 50)
+		assert.equal(db.database.prepare("SELECT COUNT(*) AS count FROM novel_object_cleanup_jobs WHERE status = 'pending'").get()?.count, 1)
+	} finally {
+		globalThis.fetch = originalFetch
+		db.database.close()
+	}
+})
+
+test('paste cleanup monitors forever across DELETE 404, a late PUT, DELETE 204, and later 404', async () => {
 	const db = createSqliteD1()
 	const originalFetch = globalThis.fetch
 	let releasePut!: () => void
@@ -964,22 +982,25 @@ test('paste DELETE 404 before upload expiry cannot finish cleanup before a gated
 		const row = db.database.prepare("SELECT id, upload_expires_at FROM private_books WHERE owner_id = 42 AND title = 'Late paste'").get() as { id: string, upload_expires_at: number }
 		assert.equal((await phase2Request(db, 'DELETE', `/books/${row.id}`)).status, 200)
 		assert.equal(db.database.prepare('SELECT status FROM novel_object_cleanup_jobs WHERE object_key = (SELECT object_key FROM private_books WHERE owner_id = 42 AND id = ?)').get(row.id)?.status, 'pending')
+		assert.equal(await cleanupPrivateNovelObjects({ ...env, abdl_space_db: db } as never, row.upload_expires_at - 1, 50), 0)
+		assert.equal(await cleanupPrivateNovelObjects({ ...env, abdl_space_db: db } as never, row.upload_expires_at, 50), 1)
+		assert.equal(db.database.prepare('SELECT status FROM novel_object_cleanup_jobs WHERE object_key = (SELECT object_key FROM private_books WHERE owner_id = 42 AND id = ?)').get(row.id)?.status, 'monitoring')
 		releasePut()
 		assert.equal((await paste).status, 502)
 		assert.equal(objectExists, true)
-		assert.equal(await cleanupPrivateNovelObjects({ ...env, abdl_space_db: db } as never, row.upload_expires_at - 1, 50), 0)
-		assert.equal(await cleanupPrivateNovelObjects({ ...env, abdl_space_db: db } as never, row.upload_expires_at, 50), 0)
-		assert.equal(await cleanupPrivateNovelObjects({ ...env, abdl_space_db: db } as never, row.upload_expires_at + PRIVATE_UPLOAD_SETTLE_SECONDS, 50), 1)
+		assert.equal(await cleanupPrivateNovelObjects({ ...env, abdl_space_db: db } as never, row.upload_expires_at + 86_399, 50), 0)
+		assert.equal(await cleanupPrivateNovelObjects({ ...env, abdl_space_db: db } as never, row.upload_expires_at + 86_400, 50), 1)
 		assert.equal(objectExists, false)
-		assert.equal(deleteCalls, 1)
-		assert.equal(db.database.prepare('SELECT status FROM novel_object_cleanup_jobs WHERE object_key = (SELECT object_key FROM private_books WHERE owner_id = 42 AND id = ?)').get(row.id)?.status, 'done')
+		assert.equal(await cleanupPrivateNovelObjects({ ...env, abdl_space_db: db } as never, row.upload_expires_at + 172_800, 50), 1)
+		assert.equal(deleteCalls, 3)
+		assert.equal(db.database.prepare('SELECT status FROM novel_object_cleanup_jobs WHERE object_key = (SELECT object_key FROM private_books WHERE owner_id = 42 AND id = ?)').get(row.id)?.status, 'monitoring')
 	} finally {
 		globalThis.fetch = originalFetch
 		db.database.close()
 	}
 })
 
-test('authorize DELETE 404 before expiry waits for a late PUT and scheduled cleanup after expiry', async () => {
+test('authorize cleanup starts at expiry and keeps monitoring after deleting a late PUT', async () => {
 	const db = createSqliteD1()
 	const originalFetch = globalThis.fetch
 	let objectExists = false
@@ -999,11 +1020,10 @@ test('authorize DELETE 404 before expiry waits for a late PUT and scheduled clea
 		objectExists = true
 		assert.equal(await cleanupPrivateNovelObjects({ ...env, abdl_space_db: db } as never, body.expires_at - 1, 50), 0)
 		assert.equal(objectExists, true)
-		assert.equal(await cleanupPrivateNovelObjects({ ...env, abdl_space_db: db } as never, body.expires_at, 50), 0)
-		assert.equal(await cleanupPrivateNovelObjects({ ...env, abdl_space_db: db } as never, body.expires_at + PRIVATE_UPLOAD_SETTLE_SECONDS, 50), 1)
+		assert.equal(await cleanupPrivateNovelObjects({ ...env, abdl_space_db: db } as never, body.expires_at, 50), 1)
 		assert.equal(objectExists, false)
 		assert.equal(deleteCalls, 1)
-		assert.equal(db.database.prepare('SELECT status FROM novel_object_cleanup_jobs WHERE object_key = (SELECT object_key FROM private_books WHERE owner_id = 42 AND id = ?)').get(body.upload_id)?.status, 'done')
+		assert.equal(db.database.prepare('SELECT status FROM novel_object_cleanup_jobs WHERE object_key = (SELECT object_key FROM private_books WHERE owner_id = 42 AND id = ?)').get(body.upload_id)?.status, 'monitoring')
 	} finally {
 		globalThis.fetch = originalFetch
 		db.database.close()

@@ -9,7 +9,7 @@ import { signJWT } from '../lib/auth.ts'
 import { cleanupPrivateNovelObjects } from './novel-private.ts'
 import admin from './admin.ts'
 
-test('admin user deletion preserves private object jobs that scheduled cleanup can finish', async () => {
+test('admin user deletion preserves a permanently monitored private object job', async () => {
 	const database = new DatabaseSync(':memory:')
 	database.exec('PRAGMA foreign_keys = ON;')
 	database.exec(readFileSync(new URL('../../schemas/schema.sql', import.meta.url), 'utf8'))
@@ -55,14 +55,25 @@ test('admin user deletion preserves private object jobs that scheduled cleanup c
 	assert.equal(database.prepare('SELECT object_key FROM novel_object_cleanup_jobs').get()?.object_key, 'novels/private/2/book.epub')
 
 	const originalFetch = globalThis.fetch
+	let objectExists = false
+	let calls = 0
 	globalThis.fetch = async (_input, init) => {
 		assert.equal(init?.method, 'DELETE')
 		assert.match((init?.headers as Record<string, string>).Authorization, /q-ak=private-id(?:&|$)/)
+		calls++
+		if (!objectExists) return new Response(null, { status: 404 })
+		objectExists = false
 		return new Response(null, { status: 204 })
 	}
 	try {
-		assert.equal(await cleanupPrivateNovelObjects(bindings as never, 901, 50), 1)
-		assert.equal(database.prepare('SELECT status FROM novel_object_cleanup_jobs').get()?.status, 'done')
+		assert.equal(await cleanupPrivateNovelObjects(bindings as never, 1, 50), 1)
+		assert.equal(database.prepare('SELECT status FROM novel_object_cleanup_jobs').get()?.status, 'monitoring')
+		objectExists = true
+		assert.equal(await cleanupPrivateNovelObjects(bindings as never, 86_401, 50), 1)
+		assert.equal(objectExists, false)
+		assert.equal(await cleanupPrivateNovelObjects(bindings as never, 172_801, 50), 1)
+		assert.equal(calls, 3)
+		assert.equal(database.prepare('SELECT status FROM novel_object_cleanup_jobs').get()?.status, 'monitoring')
 	} finally {
 		globalThis.fetch = originalFetch
 		database.close()

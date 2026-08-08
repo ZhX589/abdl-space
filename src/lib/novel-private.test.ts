@@ -130,6 +130,27 @@ test('deduplicates only active books so a soft-deleted hash can be imported agai
 	}
 })
 
+test('never reuses an object key retained by cleanup fencing', () => {
+	for (const useCompleteSchema of [false, true]) {
+		const database = createDatabase(useCompleteSchema)
+		try {
+			insertBook(database, 'deleted-book', 1, 'old-hash', 'retained-object-key')
+			database.prepare('UPDATE private_books SET deleted_at = 1 WHERE owner_id = 1 AND id = ?').run('deleted-book')
+			const statement = database.prepare(`
+				INSERT INTO private_books (
+					id, owner_id, title, author, format, object_key, content_hash, content_md5,
+					declared_size, verified_size, parse_status, upload_expires_at, verification_started_at
+				)
+				SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'pending', ?, NULL
+				WHERE NOT EXISTS (SELECT 1 FROM novel_object_cleanup_jobs WHERE object_key = ?)
+			`)
+			assert.equal(statement.run('replacement', 1, 'Replacement', 'Author', 'epub', 'retained-object-key', 'new-hash', 'kAFQmDzST7DWlj99KOF/cg==', 100, 2, 'retained-object-key').changes, 0)
+		} finally {
+			database.close()
+		}
+	}
+})
+
 test('scopes sync identities and book foreign keys to the owner', () => {
 	const database = createDatabase()
 	try {

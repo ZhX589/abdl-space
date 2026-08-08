@@ -46,9 +46,22 @@ test('creates a stable five-minute PUT authorization that forbids overwrites', a
 	})
 })
 
-test('requires exact length and standard Base64 MD5 for PUT authorization', async () => {
+test('allows zero-byte PUT authorization with the canonical empty MD5', async () => {
+	const result = await createCosPutAuthorization({
+		...credentials,
+		objectKey: 'media/empty.txt',
+		contentType: 'text/plain',
+		contentLength: 0,
+		contentMd5: '1B2M2Y8AsgTpgAmY7PhCfg==',
+		now,
+	})
+	assert.equal(result.headers['Content-Length'], '0')
+	assert.equal(result.headers['Content-MD5'], '1B2M2Y8AsgTpgAmY7PhCfg==')
+})
+
+test('requires non-negative exact length and standard Base64 MD5 for PUT authorization', async () => {
 	for (const options of [
-		{ contentLength: 0, contentMd5: 'kAFQmDzST7DWlj99KOF/cg==' },
+		{ contentLength: -1, contentMd5: 'kAFQmDzST7DWlj99KOF/cg==' },
 		{ contentLength: 3, contentMd5: 'not-base64' },
 		{ contentLength: 3, contentMd5: 'kAFQmDzST7DWlj99KOF/cg' },
 		{ contentLength: 3, contentMd5: 'kAFQmDzST7DWlj99KOF/ch==' },
