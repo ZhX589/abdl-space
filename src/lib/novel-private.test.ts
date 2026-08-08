@@ -32,9 +32,9 @@ function insertBook(database: DatabaseSync, id: string, ownerId: number, content
 	database.prepare(`
 		INSERT INTO private_books (
 			id, owner_id, title, author, format, object_key, content_hash,
-			declared_size, verified_size, parse_status, upload_expires_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`).run(id, ownerId, `Book ${id}`, 'Author', 'epub', objectKey, contentHash, 100, 100, 'ready', 1)
+			content_md5, declared_size, verified_size, parse_status, upload_expires_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`).run(id, ownerId, `Book ${id}`, 'Author', 'epub', objectKey, contentHash, 'kAFQmDzST7DWlj99KOF/cg==', 100, 100, 'ready', 1)
 }
 
 function assertPrivateBooksTableContract(database: DatabaseSync): void {
@@ -58,7 +58,7 @@ test('creates the complete private novel metadata schema with explicit non-null 
 			const bookColumns = database.prepare('PRAGMA table_info(private_books)').all() as unknown as TableColumn[]
 			assert.deepEqual(bookColumns.map(({ name }) => name), [
 				'id', 'owner_id', 'title', 'author', 'format', 'object_key', 'content_hash',
-				'declared_size', 'verified_size', 'parse_status', 'upload_expires_at', 'verification_started_at', 'cleanup_status', 'cleanup_attempted_at', 'created_at', 'updated_at', 'deleted_at',
+				'content_md5', 'declared_size', 'verified_size', 'parse_status', 'upload_expires_at', 'verification_started_at', 'cleanup_status', 'cleanup_attempted_at', 'created_at', 'updated_at', 'deleted_at',
 			])
 			assert.deepEqual(
 				bookColumns.filter(({ pk }) => pk > 0).sort((a, b) => a.pk - b.pk).map(({ name, notnull }) => [name, notnull]),
@@ -79,6 +79,12 @@ test('creates the complete private novel metadata schema with explicit non-null 
 				'seq', 'owner_id', 'book_id', 'item_type', 'item_id', 'payload_json', 'client_updated_at', 'deleted_at', 'created_at',
 			])
 			assert.deepEqual(changeColumns.filter(({ pk }) => pk > 0).map(({ name }) => name), ['seq'])
+
+			const cleanupColumns = database.prepare('PRAGMA table_info(novel_object_cleanup_jobs)').all() as unknown as TableColumn[]
+			assert.deepEqual(cleanupColumns.map(({ name }) => name), [
+				'object_key', 'not_before', 'status', 'attempt_count', 'next_attempt_at', 'claim_token', 'attempted_at', 'last_error_status', 'created_at', 'updated_at',
+			])
+			assert.deepEqual(cleanupColumns.filter(({ pk }) => pk > 0).map(({ name }) => name), ['object_key'])
 		} finally {
 			database.close()
 		}
@@ -154,7 +160,7 @@ test('records immutable sync changes for inserts and effective updates only', ()
 	}
 })
 
-test('cascades private books and sync items without affecting another owner', () => {
+test('cascades private books while preserving object cleanup jobs without a users foreign key', () => {
 	const database = createDatabase()
 	try {
 		insertBook(database, 'owner-1-book', 1, 'owner-1-hash')
@@ -167,6 +173,10 @@ test('cascades private books and sync items without affecting another owner', ()
 		assert.equal(database.prepare('SELECT COUNT(*) AS count FROM novel_sync_items WHERE owner_id = 1').get()?.count, 0)
 		assert.equal(database.prepare('SELECT COUNT(*) AS count FROM private_books WHERE owner_id = 2').get()?.count, 1)
 		assert.equal(database.prepare('SELECT COUNT(*) AS count FROM novel_sync_items WHERE owner_id = 2').get()?.count, 1)
+		assert.deepEqual(Array.from(database.prepare('SELECT object_key, status FROM novel_object_cleanup_jobs').all(), row => ({ ...row })), [
+			{ object_key: 'novels/1/owner-1-book', status: 'pending' },
+		])
+		assert.deepEqual(database.prepare('PRAGMA foreign_key_check').all(), [])
 	} finally {
 		database.close()
 	}

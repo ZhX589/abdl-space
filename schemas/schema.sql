@@ -558,6 +558,7 @@ CREATE TABLE IF NOT EXISTS private_books (
   format TEXT NOT NULL,
   object_key TEXT NOT NULL,
   content_hash TEXT NOT NULL,
+  content_md5 TEXT NOT NULL,
   declared_size INTEGER NOT NULL CHECK (declared_size > 0),
   verified_size INTEGER CHECK (verified_size IS NULL OR verified_size >= 0),
   parse_status TEXT NOT NULL DEFAULT 'pending' CHECK (parse_status IN ('pending', 'parsing', 'ready', 'failed')),
@@ -572,8 +573,55 @@ CREATE TABLE IF NOT EXISTS private_books (
   UNIQUE (owner_id, object_key)
 );
 
+CREATE TABLE IF NOT EXISTS novel_object_cleanup_jobs (
+  object_key TEXT PRIMARY KEY NOT NULL,
+  not_before INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'claimed', 'failed', 'done')),
+  attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+  next_attempt_at INTEGER NOT NULL,
+  claim_token TEXT,
+  attempted_at INTEGER,
+  last_error_status INTEGER,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
+CREATE INDEX IF NOT EXISTS idx_novel_object_cleanup_jobs_due
+  ON novel_object_cleanup_jobs(status, next_attempt_at, attempted_at, object_key);
+
+CREATE TRIGGER IF NOT EXISTS private_books_cleanup_before_delete
+BEFORE DELETE ON private_books
+BEGIN
+  INSERT INTO novel_object_cleanup_jobs (object_key, not_before, status, next_attempt_at)
+  VALUES (OLD.object_key, OLD.upload_expires_at + 900, 'pending', OLD.upload_expires_at + 900)
+  ON CONFLICT(object_key) DO UPDATE SET
+    not_before = MAX(novel_object_cleanup_jobs.not_before, excluded.not_before),
+    status = 'pending',
+    next_attempt_at = MAX(novel_object_cleanup_jobs.not_before, excluded.not_before),
+    claim_token = NULL,
+    updated_at = unixepoch();
+END;
+
+CREATE TRIGGER IF NOT EXISTS private_books_cleanup_after_soft_delete
+AFTER UPDATE OF deleted_at ON private_books
+WHEN OLD.deleted_at IS NULL AND NEW.deleted_at IS NOT NULL
+BEGIN
+  INSERT INTO novel_object_cleanup_jobs (object_key, not_before, status, next_attempt_at)
+  VALUES (NEW.object_key, NEW.upload_expires_at + 900, 'pending', NEW.upload_expires_at + 900)
+  ON CONFLICT(object_key) DO UPDATE SET
+    not_before = MAX(novel_object_cleanup_jobs.not_before, excluded.not_before),
+    status = 'pending',
+    next_attempt_at = MAX(novel_object_cleanup_jobs.not_before, excluded.not_before),
+    claim_token = NULL,
+    updated_at = unixepoch();
+END;
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_private_books_owner_content_hash
   ON private_books(owner_id, content_hash)
+  WHERE deleted_at IS NULL;
+
+CREATE INDEX IF NOT EXISTS idx_private_books_owner_created
+  ON private_books(owner_id, created_at DESC, id DESC)
   WHERE deleted_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS novel_sync_items (

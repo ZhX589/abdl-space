@@ -16,6 +16,8 @@ interface CosAuthorizationOptions extends CosObjectOptions {
 	objectKey: string
 	contentType: string
 	metadataSha256?: string
+	contentLength?: number
+	contentMd5?: string
 	now?: Date
 }
 
@@ -25,6 +27,8 @@ export interface CosAuthorization {
 	expiresAt: number
 	headers: {
 		Authorization: string
+		'Content-Length'?: string
+		'Content-MD5'?: string
 		'Content-Type'?: string
 		'x-cos-forbid-overwrite'?: 'true'
 		'x-cos-meta-sha256'?: string
@@ -43,6 +47,67 @@ export class CosHttpError extends Error {
 
 interface PutObjectToCosOptions extends CosAuthorizationOptions {
 	body: BodyInit
+}
+
+export function md5Base64(input: Uint8Array): string {
+	const paddedLength = Math.ceil((input.byteLength + 9) / 64) * 64
+	const padded = new Uint8Array(paddedLength)
+	padded.set(input)
+	padded[input.byteLength] = 0x80
+	const bitLength = BigInt(input.byteLength) * 8n
+	for (let index = 0; index < 8; index++) padded[paddedLength - 8 + index] = Number((bitLength >> BigInt(index * 8)) & 0xFFn)
+	const shifts = [7, 12, 17, 22, 5, 9, 14, 20, 4, 11, 16, 23, 6, 10, 15, 21]
+	const constants = Array.from({ length: 64 }, (_, index) => Math.floor(Math.abs(Math.sin(index + 1)) * 0x100000000) >>> 0)
+	let a0 = 0x67452301
+	let b0 = 0xefcdab89
+	let c0 = 0x98badcfe
+	let d0 = 0x10325476
+	for (let offset = 0; offset < paddedLength; offset += 64) {
+		const words = new Uint32Array(16)
+		for (let index = 0; index < 16; index++) {
+			const wordOffset = offset + index * 4
+			words[index] = padded[wordOffset] | (padded[wordOffset + 1] << 8) | (padded[wordOffset + 2] << 16) | (padded[wordOffset + 3] << 24)
+		}
+		let a = a0
+		let b = b0
+		let c = c0
+		let d = d0
+		for (let index = 0; index < 64; index++) {
+			let f: number
+			let wordIndex: number
+			if (index < 16) { f = (b & c) | (~b & d); wordIndex = index }
+			else if (index < 32) { f = (d & b) | (~d & c); wordIndex = (5 * index + 1) % 16 }
+			else if (index < 48) { f = b ^ c ^ d; wordIndex = (3 * index + 5) % 16 }
+			else { f = c ^ (b | ~d); wordIndex = (7 * index) % 16 }
+			const shift = shifts[Math.floor(index / 16) * 4 + index % 4]
+			const sum = (a + f + constants[index] + words[wordIndex]) >>> 0
+			const rotated = ((sum << shift) | (sum >>> (32 - shift))) >>> 0
+			const previousD = d
+			d = c
+			c = b
+			b = (b + rotated) >>> 0
+			a = previousD
+		}
+		a0 = (a0 + a) >>> 0
+		b0 = (b0 + b) >>> 0
+		c0 = (c0 + c) >>> 0
+		d0 = (d0 + d) >>> 0
+	}
+	let binary = ''
+	for (const word of [a0, b0, c0, d0]) {
+		for (let index = 0; index < 4; index++) binary += String.fromCharCode((word >>> (index * 8)) & 0xFF)
+	}
+	return btoa(binary)
+}
+
+export function isCanonicalContentMd5(value: string): boolean {
+	if (!/^(?:[A-Za-z0-9+/]{4}){5}[A-Za-z0-9+/]{2}==$/.test(value)) return false
+	try {
+		const binary = atob(value)
+		return binary.length === 16 && btoa(binary) === value
+	} catch {
+		return false
+	}
 }
 
 function toHex(bytes: ArrayBuffer): string {
@@ -103,12 +168,17 @@ async function createCosAuthorization(method: 'put' | 'head' | 'get' | 'delete',
 	const expiresAt = start + AUTHORIZATION_TTL_SECONDS
 	const signTime = `${start};${expiresAt}`
 	const forbidOverwrite = method === 'put'
+	const bindsContentIntegrity = forbidOverwrite && (options.contentLength !== undefined || options.contentMd5 !== undefined)
+	if (bindsContentIntegrity && (!Number.isSafeInteger(options.contentLength) || Number(options.contentLength) <= 0
+		|| typeof options.contentMd5 !== 'string' || !isCanonicalContentMd5(options.contentMd5))) {
+		throw new Error('Invalid PUT content integrity headers')
+	}
 	const metadataSha256 = forbidOverwrite ? options.metadataSha256 : undefined
 	const headerList = forbidOverwrite
-		? `content-type;host;x-cos-forbid-overwrite${metadataSha256 === undefined ? '' : ';x-cos-meta-sha256'}`
+		? `${bindsContentIntegrity ? 'content-length;content-md5;' : ''}content-type;host;x-cos-forbid-overwrite${metadataSha256 === undefined ? '' : ';x-cos-meta-sha256'}`
 		: 'host'
 	const canonicalHeaders = forbidOverwrite
-		? `content-type=${encodeRfc3986(options.contentType)}&host=${encodeRfc3986(host)}&x-cos-forbid-overwrite=true${metadataSha256 === undefined ? '' : `&x-cos-meta-sha256=${encodeRfc3986(metadataSha256)}`}`
+		? `${bindsContentIntegrity ? `content-length=${options.contentLength}&content-md5=${encodeRfc3986(options.contentMd5!)}` + '&' : ''}content-type=${encodeRfc3986(options.contentType)}&host=${encodeRfc3986(host)}&x-cos-forbid-overwrite=true${metadataSha256 === undefined ? '' : `&x-cos-meta-sha256=${encodeRfc3986(metadataSha256)}`}`
 		: `host=${encodeRfc3986(host)}`
 	const httpString = `${method}\n/${options.objectKey}\n\n${canonicalHeaders}\n`
 	const stringToSign = `sha1\n${signTime}\n${await sha1(httpString)}\n`
@@ -130,6 +200,7 @@ async function createCosAuthorization(method: 'put' | 'head' | 'get' | 'delete',
 		expiresAt,
 		headers: {
 			Authorization: authorization,
+			...(bindsContentIntegrity ? { 'Content-Length': String(options.contentLength), 'Content-MD5': options.contentMd5! } : {}),
 			...(method === 'put' ? { 'Content-Type': options.contentType } : {}),
 			...(forbidOverwrite ? { 'x-cos-forbid-overwrite': 'true' as const } : {}),
 			...(metadataSha256 === undefined ? {} : { 'x-cos-meta-sha256': metadataSha256 }),
@@ -159,7 +230,15 @@ export function createCosDeleteAuthorization(options: CosAuthorizationOptions): 
 }
 
 export async function putObjectToCos(options: PutObjectToCosOptions): Promise<Response> {
-	const signed = await createCosPutAuthorization(options)
+	let bytes: Uint8Array | null = null
+	if (typeof options.body === 'string') bytes = encoder.encode(options.body)
+	else if (options.body instanceof Uint8Array) bytes = options.body
+	else if (options.body instanceof ArrayBuffer) bytes = new Uint8Array(options.body)
+	const signed = await createCosPutAuthorization({
+		...options,
+		contentLength: options.contentLength ?? bytes?.byteLength,
+		contentMd5: options.contentMd5 ?? (bytes ? md5Base64(bytes) : undefined),
+	})
 	const response = await fetch(signed.url, {
 		method: 'PUT',
 		headers: signed.headers,

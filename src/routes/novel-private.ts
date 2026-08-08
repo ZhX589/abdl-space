@@ -2,7 +2,7 @@ import { Hono } from 'hono'
 import type { Context } from 'hono'
 import { cors } from 'hono/cors'
 
-import { CosHttpError, createCosGetAuthorization, createCosPutAuthorization, deleteObjectFromCos, getPrivateObjectFromCos, headPrivateObjectFromCos, putObjectToCos } from '../lib/tencent-cos.ts'
+import { CosHttpError, createCosGetAuthorization, createCosPutAuthorization, deleteObjectFromCos, getPrivateObjectFromCos, headPrivateObjectFromCos, isCanonicalContentMd5, md5Base64, putObjectToCos } from '../lib/tencent-cos.ts'
 import { mastodonAuthDetails } from '../mastodon/shared.ts'
 import { assertSessionNotStale } from '../middleware/auth.ts'
 import type { Env } from '../types/index.ts'
@@ -19,6 +19,7 @@ interface PrivateBookRow {
 	format: 'txt' | 'epub'
 	object_key: string
 	content_hash: string
+	content_md5: string
 	declared_size: number
 	verified_size: number | null
 	parse_status: 'pending' | 'parsing' | 'ready' | 'failed'
@@ -53,6 +54,8 @@ const MIME_FORMATS = {
 } as const
 
 export const MAX_PRIVATE_BOOK_SIZE = 50 * 1024 * 1024
+// Content-Length caps uploads at 50 MiB; settle protects PUTs started before signature expiry.
+export const PRIVATE_UPLOAD_SETTLE_SECONDS = 15 * 60
 const MAX_PRIVATE_BOOK_COUNT = 500
 const MAX_PRIVATE_BOOK_TOTAL_SIZE = 2 * 1024 * 1024 * 1024
 const VERIFICATION_LEASE_MICROSECONDS = 5 * 60 * 1_000_000
@@ -66,12 +69,12 @@ const MAX_SYNC_JSON_SIZE = 96 * 1024
 
 export const PRIVATE_BOOK_INSERT_SQL = `
 	INSERT INTO private_books (
-		id, owner_id, title, author, format, object_key, content_hash,
+		id, owner_id, title, author, format, object_key, content_hash, content_md5,
 		declared_size, verified_size, parse_status, upload_expires_at, verification_started_at
 	)
-	SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, 'pending', ?9, NULL
+	SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, 'pending', ?10, NULL
 	WHERE (SELECT COUNT(*) FROM private_books WHERE owner_id = ?2 AND deleted_at IS NULL) < ${MAX_PRIVATE_BOOK_COUNT}
-		AND (SELECT COALESCE(SUM(declared_size), 0) FROM private_books WHERE owner_id = ?2 AND deleted_at IS NULL) + ?8 <= ${MAX_PRIVATE_BOOK_TOTAL_SIZE}
+		AND (SELECT COALESCE(SUM(declared_size), 0) FROM private_books WHERE owner_id = ?2 AND deleted_at IS NULL) + ?9 <= ${MAX_PRIVATE_BOOK_TOTAL_SIZE}
 		AND NOT EXISTS (
 			SELECT 1 FROM private_books WHERE owner_id = ?2 AND content_hash = ?7 AND deleted_at IS NULL
 		)
@@ -201,7 +204,7 @@ function bookResponse(book: PrivateBookRow) {
 
 async function getOwnedBook(db: D1Database, id: string, ownerId: number): Promise<PrivateBookRow | null> {
 	const result = await db.prepare(`
-		SELECT id, owner_id, title, author, format, object_key, content_hash,
+		SELECT id, owner_id, title, author, format, object_key, content_hash, content_md5,
 			declared_size, verified_size, parse_status, upload_expires_at, verification_started_at,
 			cleanup_status, cleanup_attempted_at, created_at, updated_at, deleted_at
 		FROM private_books WHERE id = ? AND owner_id = ?
@@ -212,7 +215,7 @@ async function getOwnedBook(db: D1Database, id: string, ownerId: number): Promis
 
 async function getActiveBookByHash(db: D1Database, ownerId: number, contentHash: string): Promise<PrivateBookRow | null> {
 	const result = await db.prepare(`
-		SELECT id, owner_id, title, author, format, object_key, content_hash,
+		SELECT id, owner_id, title, author, format, object_key, content_hash, content_md5,
 			declared_size, verified_size, parse_status, upload_expires_at, verification_started_at,
 			cleanup_status, cleanup_attempted_at, created_at, updated_at, deleted_at
 		FROM private_books
@@ -246,6 +249,18 @@ async function restorePending(db: D1Database, book: PrivateBookRow, verification
 	}
 }
 
+async function enqueueCleanupJob(db: D1Database, objectKey: string, notBefore: number): Promise<void> {
+	const result = await db.prepare(`
+		INSERT INTO novel_object_cleanup_jobs (object_key, not_before, status, next_attempt_at)
+		VALUES (?, ?, 'pending', ?)
+		ON CONFLICT(object_key) DO UPDATE SET
+			not_before = MAX(novel_object_cleanup_jobs.not_before, excluded.not_before),
+			status = 'pending', next_attempt_at = MAX(novel_object_cleanup_jobs.not_before, excluded.not_before),
+			claim_token = NULL, updated_at = unixepoch()
+	`).bind(objectKey, notBefore, notBefore).run()
+	if (!result.success) throw new Error('Database operation failed')
+}
+
 function newCleanupToken(now = Date.now()): number {
 	return now * 1000 + crypto.getRandomValues(new Uint16Array(1))[0] % 1000
 }
@@ -258,109 +273,110 @@ async function failAndDeleteBook(db: D1Database, book: PrivateBookRow, verificat
 		WHERE id = ? AND owner_id = ? AND parse_status = 'parsing'
 			AND verification_started_at = ? AND deleted_at IS NULL
 	`).bind(cleanupToken, book.id, book.owner_id, verificationStartedAt).run()
+	if (result.success && result.meta.changes === 1) await enqueueCleanupJob(db, book.object_key, book.upload_expires_at + PRIVATE_UPLOAD_SETTLE_SECONDS)
 	return result.success && result.meta.changes === 1
-}
-
-async function cleanupPrivateObject(db: D1Database, book: PrivateBookRow, cos: NonNullable<ReturnType<typeof privateCosOptions>>, cleanupToken: number, now = Math.floor(Date.now() / 1000)): Promise<void> {
-	let cleanupStatus: PrivateBookRow['cleanup_status'] = 'done'
-	try {
-		await deleteObjectFromCos({ ...cos, objectKey: book.object_key, contentType: book.format === 'txt' ? 'text/plain' : 'application/epub+zip' })
-	} catch (error) {
-		if (!(error instanceof CosHttpError && error.status === 404 && now >= book.upload_expires_at)) cleanupStatus = 'failed'
-	}
-	const result = await db.prepare(`
-		UPDATE private_books SET cleanup_status = ?, updated_at = unixepoch()
-		WHERE id = ? AND owner_id = ? AND deleted_at IS NOT NULL AND cleanup_status = 'deleting'
-			AND cleanup_attempted_at = ?
-	`).bind(cleanupStatus, book.id, book.owner_id, cleanupToken).run()
-	if (!result.success || result.meta.changes !== 1) throw new Error('Database operation failed')
 }
 
 export async function cleanupPrivateNovelObjects(env: Env, now: number, limit: number): Promise<number> {
 	const cos = privateCosOptions(env)
 	if (!cos || !Number.isSafeInteger(now) || !Number.isSafeInteger(limit) || limit <= 0) return 0
-	const staleCleanupBefore = (now * 1_000_000) - CLEANUP_LEASE_MICROSECONDS
-	const result = await env.abdl_space_db.prepare(`
-		SELECT id, owner_id, title, author, format, object_key, content_hash,
-			declared_size, verified_size, parse_status, upload_expires_at, verification_started_at,
-			cleanup_status, cleanup_attempted_at, created_at, updated_at, deleted_at
-		FROM private_books
-		WHERE (deleted_at IS NULL AND parse_status = 'pending' AND upload_expires_at <= ?)
-			OR (deleted_at IS NOT NULL AND upload_expires_at <= ? AND cleanup_status IN ('failed', 'pending'))
-			OR (deleted_at IS NOT NULL AND cleanup_status = 'deleting'
-				AND upload_expires_at <= ? AND (cleanup_attempted_at IS NULL OR cleanup_attempted_at <= ?))
-		ORDER BY upload_expires_at ASC
-		LIMIT ?
-	`).bind(now, now, now, staleCleanupBefore, limit).all<PrivateBookRow>()
-	if (!result.success) throw new Error('Database query failed')
+	const staleVerificationBefore = (now * 1_000_000) - VERIFICATION_LEASE_MICROSECONDS
+	const expired = await env.abdl_space_db.prepare(`
+		SELECT id, owner_id, object_key, upload_expires_at FROM private_books
+		WHERE deleted_at IS NULL AND ((parse_status = 'pending' AND upload_expires_at <= ?)
+			OR (parse_status = 'parsing' AND verification_started_at <= ?))
+		ORDER BY upload_expires_at ASC LIMIT ?
+	`).bind(now, staleVerificationBefore, limit).all<Pick<PrivateBookRow, 'id' | 'owner_id' | 'object_key' | 'upload_expires_at'>>()
+	if (!expired.success) throw new Error('Database query failed')
+	for (const book of expired.results) {
+		const removed = await env.abdl_space_db.prepare(`
+			UPDATE private_books SET parse_status = 'failed', deleted_at = ?, verification_started_at = NULL, updated_at = unixepoch()
+			WHERE id = ? AND owner_id = ? AND deleted_at IS NULL
+				AND ((parse_status = 'pending' AND upload_expires_at <= ?)
+					OR (parse_status = 'parsing' AND verification_started_at <= ?))
+		`).bind(now, book.id, book.owner_id, now, staleVerificationBefore).run()
+		if (!removed.success) throw new Error('Database operation failed')
+		if (removed.meta.changes === 1) await enqueueCleanupJob(env.abdl_space_db, book.object_key, book.upload_expires_at + PRIVATE_UPLOAD_SETTLE_SECONDS)
+	}
 
+	const staleClaimBefore = now - Math.floor(CLEANUP_LEASE_MICROSECONDS / 1_000_000)
+	const jobs = await env.abdl_space_db.prepare(`
+		SELECT object_key, not_before, status, attempt_count, claim_token, attempted_at
+		FROM novel_object_cleanup_jobs
+		WHERE not_before <= ? AND next_attempt_at <= ?
+			AND (status IN ('pending', 'failed') OR (status = 'claimed' AND attempted_at <= ?))
+		ORDER BY next_attempt_at ASC, COALESCE(attempted_at, 0) ASC, object_key ASC LIMIT ?
+	`).bind(now, now, staleClaimBefore, limit).all<{ object_key: string, not_before: number, status: string, attempt_count: number, claim_token: string | null, attempted_at: number | null }>()
+	if (!jobs.success) throw new Error('Database query failed')
 	let claimed = 0
-	for (const book of result.results) {
-		const cleanupToken = newCleanupToken()
-		let claim
-		if (book.deleted_at === null) {
-			claim = await env.abdl_space_db.prepare(`
-				UPDATE private_books
-				SET parse_status = 'failed', deleted_at = ?, verification_started_at = NULL,
-					cleanup_status = 'deleting', cleanup_attempted_at = ?, updated_at = unixepoch()
-				WHERE id = ? AND owner_id = ? AND deleted_at IS NULL AND parse_status = 'pending'
-					AND upload_expires_at = ? AND upload_expires_at <= ?
-			`).bind(now, cleanupToken, book.id, book.owner_id, book.upload_expires_at, now).run()
-		} else {
-			claim = await env.abdl_space_db.prepare(`
-				UPDATE private_books
-				SET cleanup_status = 'deleting', cleanup_attempted_at = ?, updated_at = unixepoch()
-				WHERE id = ? AND owner_id = ? AND deleted_at IS NOT NULL
-					AND cleanup_status = ?
-					AND (cleanup_attempted_at = ? OR (cleanup_attempted_at IS NULL AND ? IS NULL))
-			`).bind(cleanupToken, book.id, book.owner_id, book.cleanup_status, book.cleanup_attempted_at, book.cleanup_attempted_at).run()
-		}
+	for (const job of jobs.results) {
+		const claimToken = crypto.randomUUID()
+		const claim = await env.abdl_space_db.prepare(`
+			UPDATE novel_object_cleanup_jobs SET status = 'claimed', claim_token = ?, attempted_at = ?, updated_at = unixepoch()
+			WHERE object_key = ? AND status = ? AND next_attempt_at <= ? AND not_before <= ?
+				AND (claim_token = ? OR (claim_token IS NULL AND ? IS NULL))
+				AND (attempted_at = ? OR (attempted_at IS NULL AND ? IS NULL))
+		`).bind(claimToken, now, job.object_key, job.status, now, now, job.claim_token, job.claim_token, job.attempted_at, job.attempted_at).run()
 		if (!claim.success) throw new Error('Database operation failed')
 		if (claim.meta.changes !== 1) continue
 		claimed++
-		await cleanupPrivateObject(env.abdl_space_db, book, cos, cleanupToken, now)
+		let status = 'done'
+		let errorStatus: number | null = null
+		try {
+			await deleteObjectFromCos({ ...cos, objectKey: job.object_key, contentType: 'application/octet-stream' })
+		} catch (error) {
+			if (!(error instanceof CosHttpError && error.status === 404)) {
+				status = 'failed'
+				errorStatus = error instanceof CosHttpError ? error.status : 502
+			}
+		}
+		const attemptCount = job.attempt_count + 1
+		const retryDelay = Math.min(3600, 30 * (2 ** Math.min(attemptCount - 1, 7)))
+		const final = await env.abdl_space_db.prepare(`
+			UPDATE novel_object_cleanup_jobs
+			SET status = ?, attempt_count = ?, next_attempt_at = ?, last_error_status = ?, claim_token = NULL, updated_at = unixepoch()
+			WHERE object_key = ? AND status = 'claimed' AND claim_token = ?
+		`).bind(status, attemptCount, status === 'done' ? now : now + retryDelay, errorStatus, job.object_key, claimToken).run()
+		if (!final.success || final.meta.changes !== 1) throw new Error('Database operation failed')
 	}
 	return claimed
 }
 
-function pendingMetadataMatches(book: PrivateBookRow, title: string, author: string, format: 'txt' | 'epub', declaredSize: number): boolean {
-	return book.title === title && book.author === author && book.format === format && book.declared_size === declaredSize
+function pendingMetadataMatches(book: PrivateBookRow, title: string, author: string, format: 'txt' | 'epub', declaredSize: number, contentMd5: string): boolean {
+	return book.title === title && book.author === author && book.format === format && book.declared_size === declaredSize && book.content_md5 === contentMd5
 }
 
 novelPrivate.get('/books', async c => {
 	const auth = await authenticate(c, 'read')
 	if (auth instanceof Response) return auth
 	const limit = parseLimit(c.req.query('limit'), 20, 50)
-	const cursor = decodeCursor(c.req.query('cursor'), 3)
+	const cursor = decodeCursor(c.req.query('cursor'), 2)
 	if (limit === null || cursor === null || (cursor && (!Number.isSafeInteger(cursor[0]) || Number(cursor[0]) < 0
-		|| !Number.isSafeInteger(cursor[1]) || Number(cursor[1]) < 0 || typeof cursor[2] !== 'string' || !cursor[2]))) {
+		|| typeof cursor[1] !== 'string' || !cursor[1]))) {
 		return c.json({ error: 'Invalid pagination request', code: 'invalid_pagination' }, 400)
 	}
 	try {
-		const result = cursor
-			? await c.env.abdl_space_db.prepare(`
+		const result = cursor ? await c.env.abdl_space_db.prepare(`
 				SELECT id, owner_id, title, author, format, object_key, content_hash, declared_size,
 					verified_size, parse_status, upload_expires_at, verification_started_at,
 					cleanup_status, cleanup_attempted_at, created_at, updated_at, deleted_at
 				FROM private_books
-				WHERE owner_id = ? AND deleted_at IS NULL AND updated_at <= ?
-					AND (updated_at < ? OR (updated_at = ? AND id < ?))
-				ORDER BY updated_at DESC, id DESC LIMIT ?
-			`).bind(auth.user.sub, cursor[0], cursor[1], cursor[1], cursor[2], limit + 1).all<PrivateBookRow>()
+				WHERE owner_id = ? AND deleted_at IS NULL
+					AND (created_at < ? OR (created_at = ? AND id < ?))
+				ORDER BY created_at DESC, id DESC LIMIT ?
+			`).bind(auth.user.sub, cursor[0], cursor[0], cursor[1], limit + 1).all<PrivateBookRow>()
 			: await c.env.abdl_space_db.prepare(`
-				WITH snapshot(value) AS (SELECT unixepoch())
 				SELECT id, owner_id, title, author, format, object_key, content_hash, declared_size,
 					verified_size, parse_status, upload_expires_at, verification_started_at,
-					cleanup_status, cleanup_attempted_at, created_at, updated_at, deleted_at, snapshot.value AS snapshot_at
-				FROM private_books, snapshot WHERE owner_id = ? AND deleted_at IS NULL AND updated_at <= snapshot.value
-				ORDER BY updated_at DESC, id DESC LIMIT ?
+					cleanup_status, cleanup_attempted_at, created_at, updated_at, deleted_at
+				FROM private_books WHERE owner_id = ? AND deleted_at IS NULL
+				ORDER BY created_at DESC, id DESC LIMIT ?
 			`).bind(auth.user.sub, limit + 1).all<PrivateBookRow>()
 		if (!result.success) throw new Error('Database query failed')
 		const hasMore = result.results.length > limit
 		const page = result.results.slice(0, limit)
 		const last = page.at(-1)
-		const snapshotAt = cursor ? Number(cursor[0]) : (page[0]?.snapshot_at ?? Math.floor(Date.now() / 1000))
-		return c.json({ items: page.map(safeBookResponse), next_cursor: hasMore && last ? encodeCursor([snapshotAt, last.updated_at, last.id]) : null })
+		return c.json({ items: page.map(safeBookResponse), next_cursor: hasMore && last ? encodeCursor([last.created_at, last.id]) : null })
 	} catch {
 		return c.json({ error: 'Private books query failed', code: 'books_query_failed' }, 500)
 	}
@@ -387,15 +403,14 @@ novelPrivate.delete('/books/:id', async c => {
 		const book = await getOwnedBook(c.env.abdl_space_db, c.req.param('id'), auth.user.sub)
 		if (!book) return c.json({ error: 'Private book not found', code: 'book_not_found' }, 404)
 		if (book.deleted_at !== null) return c.json({ id: book.id, deleted: true })
-		const cleanupToken = newCleanupToken()
 		const result = await c.env.abdl_space_db.prepare(`
 			UPDATE private_books
 			SET deleted_at = unixepoch(), parse_status = CASE WHEN parse_status = 'ready' THEN parse_status ELSE 'failed' END,
-				verification_started_at = NULL, cleanup_status = 'deleting', cleanup_attempted_at = ?, updated_at = unixepoch()
+				verification_started_at = NULL, cleanup_status = 'pending', updated_at = unixepoch()
 			WHERE owner_id = ? AND id = ? AND deleted_at IS NULL
-		`).bind(cleanupToken, auth.user.sub, book.id).run()
+		`).bind(auth.user.sub, book.id).run()
 		if (!result.success) throw new Error('Database operation failed')
-		if (result.meta.changes === 1) await cleanupPrivateObject(c.env.abdl_space_db, book, cos, cleanupToken)
+		if (result.meta.changes === 1) await enqueueCleanupJob(c.env.abdl_space_db, book.object_key, book.upload_expires_at + PRIVATE_UPLOAD_SETTLE_SECONDS)
 		return c.json({ id: book.id, deleted: true })
 	} catch {
 		return c.json({ error: 'Private book deletion failed', code: 'delete_failed' }, 500)
@@ -432,6 +447,7 @@ novelPrivate.post('/paste', async c => {
 		return c.json({ error: 'Invalid paste request', code: 'invalid_paste' }, 400)
 	}
 	const contentHash = toHex(await crypto.subtle.digest('SHA-256', bytes))
+	const contentMd5 = md5Base64(bytes)
 	let book: PrivateBookRow | null = null
 	try {
 		book = await getActiveBookByHash(c.env.abdl_space_db, auth.user.sub, contentHash)
@@ -441,7 +457,7 @@ novelPrivate.post('/paste', async c => {
 		const objectKey = `novels/private/${auth.user.sub}/${id}.txt`
 		const expiresAt = Math.floor(Date.now() / 1000) + 300
 		const insert = await c.env.abdl_space_db.prepare(PRIVATE_BOOK_INSERT_SQL)
-			.bind(id, auth.user.sub, title, author, 'txt', objectKey, contentHash, bytes.byteLength, expiresAt).run()
+			.bind(id, auth.user.sub, title, author, 'txt', objectKey, contentHash, contentMd5, bytes.byteLength, expiresAt).run()
 		if (!insert.success) throw new Error('Database operation failed')
 		if (insert.meta.changes !== 1) {
 			const concurrent = await getActiveBookByHash(c.env.abdl_space_db, auth.user.sub, contentHash)
@@ -450,7 +466,7 @@ novelPrivate.post('/paste', async c => {
 		}
 		book = await getOwnedBook(c.env.abdl_space_db, id, auth.user.sub)
 		if (!book) throw new Error('Database query failed')
-		await putObjectToCos({ ...cos, objectKey, contentType: 'text/plain', metadataSha256: contentHash, body: normalizedText })
+		await putObjectToCos({ ...cos, objectKey, contentType: 'text/plain', metadataSha256: contentHash, contentLength: bytes.byteLength, contentMd5, body: normalizedText })
 		const head = await headPrivateObjectFromCos({ ...cos, objectKey, contentType: 'text/plain' })
 		const verifiedSize = Number(head.headers.get('Content-Length'))
 		if (verifiedSize !== bytes.byteLength || !matchesContentType(head.headers.get('Content-Type'), 'text/plain')) throw new Error('Verification mismatch')
@@ -467,13 +483,11 @@ novelPrivate.post('/paste', async c => {
 		return c.json(safeBookResponse(current))
 	} catch {
 		if (book) {
-			const cleanupToken = newCleanupToken()
 			const failed = await c.env.abdl_space_db.prepare(`
-				UPDATE private_books SET parse_status = 'failed', deleted_at = unixepoch(), cleanup_status = 'deleting',
-					cleanup_attempted_at = ?, updated_at = unixepoch()
+				UPDATE private_books SET parse_status = 'failed', deleted_at = unixepoch(), cleanup_status = 'pending', updated_at = unixepoch()
 				WHERE owner_id = ? AND id = ? AND deleted_at IS NULL
-			`).bind(cleanupToken, auth.user.sub, book.id).run()
-			if (failed.success && failed.meta.changes === 1) await cleanupPrivateObject(c.env.abdl_space_db, book, cos, cleanupToken)
+			`).bind(auth.user.sub, book.id).run()
+			if (failed.success && failed.meta.changes === 1) await enqueueCleanupJob(c.env.abdl_space_db, book.object_key, book.upload_expires_at + PRIVATE_UPLOAD_SETTLE_SECONDS)
 		}
 		return c.json({ error: 'Private paste failed', code: 'paste_failed' }, 502)
 	}
@@ -496,7 +510,8 @@ novelPrivate.get('/sync', async c => {
 		const hasMore = result.results.length > limit
 		const page = result.results.slice(0, limit)
 		const last = page.at(-1)
-		return c.json({ items: page.map(syncItemResponse), next_cursor: hasMore && last?.seq !== undefined ? encodeCursor([last.seq]) : null })
+		const checkpointCursor = last?.seq !== undefined ? encodeCursor([last.seq]) : (cursor ? encodeCursor([cursor[0]]) : encodeCursor([0]))
+		return c.json({ items: page.map(syncItemResponse), next_cursor: hasMore ? checkpointCursor : null, checkpoint_cursor: checkpointCursor })
 	} catch {
 		return c.json({ error: 'Novel sync query failed', code: 'sync_query_failed' }, 500)
 	}
@@ -575,17 +590,22 @@ novelPrivate.post('/authorize', async c => {
 	const title = typeof input.title === 'string' ? input.title.trim() : ''
 	const author = typeof input.author === 'string' ? input.author.trim() : ''
 	const contentHash = typeof input.content_hash === 'string' ? input.content_hash.trim().toLowerCase() : ''
+	const contentMd5 = typeof input.content_md5 === 'string' ? input.content_md5.trim() : ''
 	if (!mime || !Number.isSafeInteger(declaredSize) || Number(declaredSize) <= 0 || Number(declaredSize) > MAX_PRIVATE_BOOK_SIZE
-		|| !title || title.length > 500 || !author || author.length > 500 || !/^[a-f0-9]{64}$/.test(contentHash)) {
+		|| !title || title.length > 500 || !author || author.length > 500 || !/^[a-f0-9]{64}$/.test(contentHash)
+		|| !isCanonicalContentMd5(contentMd5)) {
 		return c.json({ error: 'Invalid private book request', code: 'invalid_book' }, 400)
 	}
 
 	try {
 		const existing = await getActiveBookByHash(c.env.abdl_space_db, auth.user.sub, contentHash)
+		if (existing && existing.content_md5 !== contentMd5) {
+			return c.json({ error: 'Private book metadata conflicts with an active upload', code: 'book_conflict' }, 409)
+		}
 		if (existing?.parse_status === 'ready') {
 			return c.json({ upload_id: existing.id, already_uploaded: true, parse_status: 'ready' })
 		}
-		if (existing?.parse_status === 'pending' && !pendingMetadataMatches(existing, title, author, mime.format, Number(declaredSize))) {
+		if (existing?.parse_status === 'pending' && !pendingMetadataMatches(existing, title, author, mime.format, Number(declaredSize), contentMd5)) {
 			return c.json({ error: 'Private book metadata conflicts with an active upload', code: 'book_conflict' }, 409)
 		}
 		if (existing && existing.parse_status !== 'pending') {
@@ -601,7 +621,7 @@ novelPrivate.post('/authorize', async c => {
 			objectKey = `novels/private/${auth.user.sub}/${id}.${mime.extension}`
 		}
 
-		const authorization = await createCosPutAuthorization({ ...cos, objectKey, contentType: mimeType, metadataSha256: contentHash })
+		const authorization = await createCosPutAuthorization({ ...cos, objectKey, contentType: mimeType, metadataSha256: contentHash, contentLength: Number(declaredSize), contentMd5 })
 		if (existing) {
 			const result = await c.env.abdl_space_db.prepare(`
 				UPDATE private_books SET upload_expires_at = ?, updated_at = unixepoch()
@@ -618,7 +638,7 @@ novelPrivate.post('/authorize', async c => {
 			}
 		} else {
 			const result = await c.env.abdl_space_db.prepare(PRIVATE_BOOK_INSERT_SQL)
-				.bind(id, auth.user.sub, title, author, mime.format, objectKey, contentHash, declaredSize, authorization.expiresAt).run()
+				.bind(id, auth.user.sub, title, author, mime.format, objectKey, contentHash, contentMd5, declaredSize, authorization.expiresAt).run()
 			if (!result.success) throw new Error('Database operation failed')
 			if (result.meta.changes !== 1) {
 				const concurrent = await getActiveBookByHash(c.env.abdl_space_db, auth.user.sub, contentHash)
@@ -626,10 +646,10 @@ novelPrivate.post('/authorize', async c => {
 					return c.json({ upload_id: concurrent.id, already_uploaded: true, parse_status: 'ready' })
 				}
 				if (concurrent?.parse_status === 'pending') {
-					if (!pendingMetadataMatches(concurrent, title, author, mime.format, Number(declaredSize))) {
+					if (!pendingMetadataMatches(concurrent, title, author, mime.format, Number(declaredSize), contentMd5)) {
 						return c.json({ error: 'Private book metadata conflicts with an active upload', code: 'book_conflict' }, 409)
 					}
-					const concurrentAuthorization = await createCosPutAuthorization({ ...cos, objectKey: concurrent.object_key, contentType: mimeType, metadataSha256: concurrent.content_hash })
+					const concurrentAuthorization = await createCosPutAuthorization({ ...cos, objectKey: concurrent.object_key, contentType: mimeType, metadataSha256: concurrent.content_hash, contentLength: concurrent.declared_size, contentMd5: concurrent.content_md5 })
 					const refreshed = await c.env.abdl_space_db.prepare(`
 						UPDATE private_books SET upload_expires_at = ?, updated_at = unixepoch()
 						WHERE id = ? AND owner_id = ? AND parse_status = 'pending'
@@ -716,7 +736,6 @@ novelPrivate.post('/:id/complete', async c => {
 				return c.json({ error: 'Private book state changed', code: 'book_conflict' }, 409)
 			}
 			shouldRestore = false
-			await cleanupPrivateObject(c.env.abdl_space_db, book, cos, cleanupToken)
 			return c.json({ error: 'Private book upload expired', code: 'upload_expired' }, 410)
 		}
 
@@ -740,7 +759,6 @@ novelPrivate.post('/:id/complete', async c => {
 				return c.json({ error: 'Private book state changed', code: 'book_conflict' }, 409)
 			}
 			shouldRestore = false
-			await cleanupPrivateObject(c.env.abdl_space_db, book, cos, cleanupToken)
 			return c.json({ error: 'Private object metadata mismatch', code: 'verification_mismatch' }, 422)
 		}
 
@@ -763,7 +781,6 @@ novelPrivate.post('/:id/complete', async c => {
 				return c.json({ error: 'Private book state changed', code: 'book_conflict' }, 409)
 			}
 			shouldRestore = false
-			await cleanupPrivateObject(c.env.abdl_space_db, book, cos, cleanupToken)
 			return c.json({ error: 'Private object content mismatch', code: 'verification_mismatch' }, 422)
 		}
 
@@ -784,7 +801,6 @@ novelPrivate.post('/:id/complete', async c => {
 				return c.json({ error: 'Private book state changed', code: 'book_conflict' }, 409)
 			}
 			shouldRestore = false
-			await cleanupPrivateObject(c.env.abdl_space_db, book, cos, cleanupToken)
 			return c.json({ error: 'Private object content mismatch', code: 'verification_mismatch' }, 422)
 		}
 

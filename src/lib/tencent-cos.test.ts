@@ -26,6 +26,8 @@ test('creates a stable five-minute PUT authorization that forbids overwrites', a
 		objectKey: 'media/a b.jpg',
 		contentType: 'image/jpeg',
 		metadataSha256: 'a'.repeat(64),
+		contentLength: 3,
+		contentMd5: 'kAFQmDzST7DWlj99KOF/cg==',
 		now,
 	})
 
@@ -34,7 +36,9 @@ test('creates a stable five-minute PUT authorization that forbids overwrites', a
 		host: 'abdl-1339643562.cos.ap-shanghai.myqcloud.com',
 		expiresAt: 1785312300,
 		headers: {
-			Authorization: 'q-sign-algorithm=sha1&q-ak=AKIDEXAMPLEFAKE&q-sign-time=1785312000;1785312300&q-key-time=1785312000;1785312300&q-header-list=content-type;host;x-cos-forbid-overwrite;x-cos-meta-sha256&q-url-param-list=&q-signature=aa36a36326e77b3508ab92142d5b824ca395ea22',
+			Authorization: 'q-sign-algorithm=sha1&q-ak=AKIDEXAMPLEFAKE&q-sign-time=1785312000;1785312300&q-key-time=1785312000;1785312300&q-header-list=content-length;content-md5;content-type;host;x-cos-forbid-overwrite;x-cos-meta-sha256&q-url-param-list=&q-signature=227b6ba66d228a802dd6c0a548071ae763e9781e',
+			'Content-Length': '3',
+			'Content-MD5': 'kAFQmDzST7DWlj99KOF/cg==',
 			'Content-Type': 'image/jpeg',
 			'x-cos-forbid-overwrite': 'true',
 			'x-cos-meta-sha256': 'a'.repeat(64),
@@ -42,15 +46,33 @@ test('creates a stable five-minute PUT authorization that forbids overwrites', a
 	})
 })
 
-test('keeps the existing PUT vector when SHA-256 metadata is omitted', async () => {
+test('requires exact length and standard Base64 MD5 for PUT authorization', async () => {
+	for (const options of [
+		{ contentLength: 0, contentMd5: 'kAFQmDzST7DWlj99KOF/cg==' },
+		{ contentLength: 3, contentMd5: 'not-base64' },
+		{ contentLength: 3, contentMd5: 'kAFQmDzST7DWlj99KOF/cg' },
+		{ contentLength: 3, contentMd5: 'kAFQmDzST7DWlj99KOF/ch==' },
+	]) {
+		await assert.rejects(createCosPutAuthorization({
+			...credentials, objectKey: 'media/a.jpg', contentType: 'image/jpeg', metadataSha256: 'a'.repeat(64), now, ...options,
+		}), /content/i)
+	}
+	await assert.rejects(createCosPutAuthorization({
+		...credentials, objectKey: 'media/a.jpg', contentType: 'image/jpeg', metadataSha256: 'a'.repeat(64), contentLength: 3, now,
+	}), /content/i)
+})
+
+test('keeps non-PUT authorizations independent of upload integrity headers', async () => {
 	const result = await createCosPutAuthorization({
 		...credentials,
 		objectKey: 'media/a b.jpg',
 		contentType: 'image/jpeg',
+		contentLength: 3,
+		contentMd5: 'kAFQmDzST7DWlj99KOF/cg==',
 		now,
 	})
 
-	assert.equal(result.headers.Authorization, 'q-sign-algorithm=sha1&q-ak=AKIDEXAMPLEFAKE&q-sign-time=1785312000;1785312300&q-key-time=1785312000;1785312300&q-header-list=content-type;host;x-cos-forbid-overwrite&q-url-param-list=&q-signature=b2fb4b3f7c8565e43fc3f55fdd212d82b61c51ea')
+	assert.match(result.headers.Authorization, /q-header-list=content-length;content-md5;content-type;host;x-cos-forbid-overwrite(?:&|$)/)
 	assert.equal(Object.hasOwn(result.headers, 'x-cos-meta-sha256'), false)
 })
 
@@ -59,11 +81,13 @@ test('signs a decoded Unicode canonical path while keeping the request URL encod
 		...credentials,
 		objectKey: 'media/中文 a.jpg',
 		contentType: 'image/jpeg',
+		contentLength: 3,
+		contentMd5: 'kAFQmDzST7DWlj99KOF/cg==',
 		now,
 	})
 
 	assert.equal(result.url, 'https://abdl-1339643562.cos.ap-shanghai.myqcloud.com/media/%E4%B8%AD%E6%96%87%20a.jpg')
-	assert.equal(result.headers.Authorization, 'q-sign-algorithm=sha1&q-ak=AKIDEXAMPLEFAKE&q-sign-time=1785312000;1785312300&q-key-time=1785312000;1785312300&q-header-list=content-type;host;x-cos-forbid-overwrite&q-url-param-list=&q-signature=368d0f79c8d93dcc57a731e7f771436c1a6d6d16')
+	assert.match(result.headers.Authorization, /q-header-list=content-length;content-md5;content-type;host;x-cos-forbid-overwrite(?:&|$)/)
 	assert.equal(result.headers['x-cos-forbid-overwrite'], 'true')
 })
 
@@ -201,6 +225,8 @@ test('uploads an object with signed PUT headers', async () => {
 			objectKey: 'media/a b.jpg',
 			contentType: 'image/jpeg',
 			body,
+			contentLength: body.byteLength,
+			contentMd5: 'Uonfc331cyb83SJZevsfrA==',
 			now,
 		})
 
@@ -215,6 +241,8 @@ test('uploads an object with signed PUT headers', async () => {
 			...credentials,
 			objectKey: 'media/a b.jpg',
 			contentType: 'image/jpeg',
+			contentLength: body.byteLength,
+			contentMd5: 'Uonfc331cyb83SJZevsfrA==',
 			now,
 		})).headers)
 	} finally {
@@ -233,6 +261,8 @@ test('throws when COS rejects an object upload', async () => {
 				objectKey: 'media/a.jpg',
 				contentType: 'image/jpeg',
 				body: new Uint8Array([1]),
+				contentLength: 1,
+				contentMd5: 'VgK2y1oSVyqG6sWoMOL7OA==',
 				now,
 			}),
 			/COS PUT failed: 403/,
