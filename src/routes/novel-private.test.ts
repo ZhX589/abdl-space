@@ -131,7 +131,7 @@ function createDb(initialRows: BookRow[] = [], options: {
 								return { success: true, results: [{ book_count: active.length, total_size: active.reduce((sum, row) => sum + row.declared_size, 0) }] }
 							}
 							if (sql.includes('cleanup_status IN') && sql.includes('upload_expires_at <= ?')) {
-								const [now, staleCleanupBefore, limit] = params.map(Number)
+								const [now, , , staleCleanupBefore, limit] = params.map(Number)
 								return {
 									success: true,
 									results: [...rows.values()]
@@ -659,9 +659,9 @@ test('an old verification lease cannot soft-delete a newer ready result', async 
 	}
 })
 
-test('metadata cleanup treats DELETE success and 404 as done, but retains 5xx for retry with NOVEL credentials', async () => {
+test('metadata cleanup treats DELETE success and expired 404 as done, but retains 5xx for retry with NOVEL credentials', async () => {
 	for (const [deleteStatus, cleanupStatus] of [[204, 'done'], [404, 'done'], [500, 'failed']] as const) {
-		const row = bookRow()
+		const row = bookRow({ upload_expires_at: deleteStatus === 404 ? Math.floor(Date.now() / 1000) - 1 : Math.floor(Date.now() / 1000) + 300 })
 		const db = createDb([row])
 		const originalFetch = globalThis.fetch
 		let deleteAuthorization = ''
@@ -673,7 +673,7 @@ test('metadata cleanup treats DELETE success and 404 as done, but retains 5xx fo
 		}
 		try {
 			const { response } = await request(`/${row.id}/complete`, { db })
-			assert.equal(response.status, 422)
+			assert.equal(response.status, deleteStatus === 404 ? 410 : 422)
 			assert.equal(db.rows.get(`42:${row.id}`)?.deleted_at !== null, true)
 			assert.equal(db.rows.get(`42:${row.id}`)?.cleanup_status, cleanupStatus)
 			assert.notEqual(db.rows.get(`42:${row.id}`)?.cleanup_attempted_at, null)
@@ -878,7 +878,7 @@ test('scheduled cleanup soft-deletes expired pending books before object deletio
 
 test('scheduled cleanup retries failed objects and maps DELETE 404 and 5xx', async () => {
 	for (const [status, expected] of [[404, 'done'], [500, 'failed']] as const) {
-		const row = bookRow({ deleted_at: 1, cleanup_status: 'failed', cleanup_attempted_at: 10 })
+		const row = bookRow({ deleted_at: 1, cleanup_status: 'failed', cleanup_attempted_at: 10, upload_expires_at: 99 })
 		const db = createDb([row])
 		const originalFetch = globalThis.fetch
 		let authorization = ''
@@ -914,6 +914,81 @@ test('scheduled cleanup conditionally claims each object once', async () => {
 		assert.equal(await first, 1)
 	} finally {
 		globalThis.fetch = originalFetch
+	}
+})
+
+test('paste DELETE 404 before upload expiry cannot finish cleanup before a gated PUT succeeds', async () => {
+	const db = createSqliteD1()
+	const originalFetch = globalThis.fetch
+	let releasePut!: () => void
+	const putGate = new Promise<void>(resolve => { releasePut = resolve })
+	let putStarted = false
+	let objectExists = false
+	let deleteCalls = 0
+	globalThis.fetch = async (_input, init) => {
+		if (init?.method === 'PUT') {
+			putStarted = true
+			await putGate
+			objectExists = true
+			return new Response(null, { status: 200 })
+		}
+		if (init?.method === 'DELETE') {
+			deleteCalls++
+			if (!objectExists) return new Response(null, { status: 404 })
+			objectExists = false
+			return new Response(null, { status: 204 })
+		}
+		if (init?.method === 'HEAD') return new Response(null, { status: 200, headers: { 'Content-Length': '5', 'Content-Type': 'text/plain' } })
+		if (init?.method === 'GET') return new Response('late\n', { status: 200, headers: { 'Content-Length': '5' } })
+		throw new Error(`unexpected ${init?.method}`)
+	}
+	try {
+		const paste = phase2Request(db, 'POST', '/paste', { body: { title: 'Late paste', author: 'Writer', text: 'late' } })
+		while (!putStarted) await new Promise(resolve => setTimeout(resolve, 0))
+		const row = db.database.prepare("SELECT id, upload_expires_at FROM private_books WHERE owner_id = 42 AND title = 'Late paste'").get() as { id: string, upload_expires_at: number }
+		assert.equal((await phase2Request(db, 'DELETE', `/books/${row.id}`)).status, 200)
+		assert.equal(db.database.prepare('SELECT cleanup_status FROM private_books WHERE owner_id = 42 AND id = ?').get(row.id)?.cleanup_status, 'failed')
+		releasePut()
+		assert.equal((await paste).status, 502)
+		assert.equal(objectExists, true)
+		assert.equal(await cleanupPrivateNovelObjects({ ...env, abdl_space_db: db } as never, row.upload_expires_at - 1, 50), 0)
+		assert.equal(await cleanupPrivateNovelObjects({ ...env, abdl_space_db: db } as never, row.upload_expires_at, 50), 1)
+		assert.equal(objectExists, false)
+		assert.equal(deleteCalls, 2)
+		assert.equal(db.database.prepare('SELECT cleanup_status FROM private_books WHERE owner_id = 42 AND id = ?').get(row.id)?.cleanup_status, 'done')
+	} finally {
+		globalThis.fetch = originalFetch
+		db.database.close()
+	}
+})
+
+test('authorize DELETE 404 before expiry waits for a late PUT and scheduled cleanup after expiry', async () => {
+	const db = createSqliteD1()
+	const originalFetch = globalThis.fetch
+	let objectExists = false
+	let deleteCalls = 0
+	globalThis.fetch = async (_input, init) => {
+		assert.equal(init?.method, 'DELETE')
+		deleteCalls++
+		if (!objectExists) return new Response(null, { status: 404 })
+		objectExists = false
+		return new Response(null, { status: 204 })
+	}
+	try {
+		const authorized = await phase2Request(db, 'POST', '/authorize', { body: validAuthorize })
+		const body = await authorized.json() as { upload_id: string, expires_at: number }
+		assert.equal((await phase2Request(db, 'DELETE', `/books/${body.upload_id}`)).status, 200)
+		assert.equal(db.database.prepare('SELECT cleanup_status FROM private_books WHERE owner_id = 42 AND id = ?').get(body.upload_id)?.cleanup_status, 'failed')
+		objectExists = true
+		assert.equal(await cleanupPrivateNovelObjects({ ...env, abdl_space_db: db } as never, body.expires_at - 1, 50), 0)
+		assert.equal(objectExists, true)
+		assert.equal(await cleanupPrivateNovelObjects({ ...env, abdl_space_db: db } as never, body.expires_at, 50), 1)
+		assert.equal(objectExists, false)
+		assert.equal(deleteCalls, 2)
+		assert.equal(db.database.prepare('SELECT cleanup_status FROM private_books WHERE owner_id = 42 AND id = ?').get(body.upload_id)?.cleanup_status, 'done')
+	} finally {
+		globalThis.fetch = originalFetch
+		db.database.close()
 	}
 })
 
@@ -973,6 +1048,24 @@ test('GET books is owner-only, excludes deleted books, returns safe DTOs, and pa
 	assert.deepEqual((await second.json() as { items: Array<{ id: string }> }).items.map(item => item.id), ['a', 'c'])
 	assert.equal((await phase2Request(db, 'GET', '/books?limit=51')).status, 400)
 	assert.equal((await phase2Request(db, 'GET', '/books?cursor=not-a-cursor')).status, 400)
+	db.database.close()
+})
+
+test('GET books keeps a snapshot across pages, exposes later updates next round, and supports Unicode cursors', async () => {
+	const db = createSqliteD1()
+	insertReadyBook(db, { id: '书-a', content_hash: '1'.repeat(64), updated_at: 100 })
+	insertReadyBook(db, { id: '书-b', content_hash: '2'.repeat(64), updated_at: 100 })
+	insertReadyBook(db, { id: 'older', content_hash: '3'.repeat(64), updated_at: 90 })
+	const first = await phase2Request(db, 'GET', '/books?limit=1')
+	const firstBody = await first.json() as { items: Array<{ id: string }>, next_cursor: string }
+	assert.equal(first.status, 200)
+	assert.equal(firstBody.items[0].id, '书-b')
+	db.database.prepare("UPDATE private_books SET updated_at = unixepoch() + 60 WHERE owner_id = 42 AND id = 'older'").run()
+	const second = await phase2Request(db, 'GET', `/books?limit=2&cursor=${encodeURIComponent(firstBody.next_cursor)}`)
+	assert.deepEqual((await second.json() as { items: Array<{ id: string }> }).items.map(item => item.id), ['书-a'])
+	db.database.prepare("UPDATE private_books SET updated_at = unixepoch() WHERE owner_id = 42 AND id = 'older'").run()
+	const nextRound = await phase2Request(db, 'GET', '/books?limit=1')
+	assert.equal((await nextRound.json() as { items: Array<{ id: string }> }).items[0].id, 'older')
 	db.database.close()
 })
 
@@ -1043,50 +1136,78 @@ test('POST paste validates JSON and text, normalizes content, deduplicates by ha
 	}
 })
 
-test('sync PUT validates stable identity and payload, enforces owner book, and applies LWW with tombstone priority', async () => {
+test('JSON request limits reject oversized declared and streamed bodies without consuming the full stream', async () => {
 	const db = createSqliteD1()
-	insertReadyBook(db, { id: 'book' })
-	insertReadyBook(db, { id: 'other-book', owner_id: 7, content_hash: 'f'.repeat(64) })
-	for (const [id, body, expected] of [
-		['item', [], 400], ['item', { book_id: 'book', item_type: 'bad', payload: {}, updated_at: 1 }, 400],
-		['item', { book_id: 'book', item_type: 'bookmark', payload: [], updated_at: 1 }, 400],
-		['item', { book_id: 'book', item_type: 'bookmark', payload: { value: 'x'.repeat(70_000) }, updated_at: 1 }, 400],
-		['item', { book_id: 'other-book', item_type: 'bookmark', payload: {}, updated_at: 1 }, 404],
-		['url-id', { book_id: 'book', item_type: 'bookmark', item_id: 'body-id', payload: {}, updated_at: 1 }, 400],
-	] as const) assert.equal((await phase2Request(db, 'PUT', `/sync/items/${id}`, { body })).status, expected)
+	const declared = await createApp().request('/api/v1/novels/private/authorize', {
+		method: 'POST', headers: { Authorization: await bearer(), 'Content-Type': 'application/json', 'Content-Length': String(64 * 1024 + 1) }, body: '{}',
+	}, { ...env, abdl_space_db: db } as never)
+	assert.equal(declared.status, 413)
 
-	const base = { book_id: 'book', item_type: 'bookmark', payload: { chapter: 2 }, updated_at: 100 }
-	assert.equal((await phase2Request(db, 'PUT', '/sync/items/stable', { body: base })).status, 200)
-	assert.equal((await phase2Request(db, 'PUT', '/sync/items/stable', { body: { ...base, payload: { chapter: 1 }, updated_at: 99 } })).status, 200)
-	assert.equal((await phase2Request(db, 'PUT', '/sync/items/stable', { body: { ...base, payload: {}, deleted_at: 100 } })).status, 200)
-	assert.equal((await phase2Request(db, 'PUT', '/sync/items/stable', { body: { ...base, payload: { chapter: 3 } } })).status, 200)
-	const row = db.database.prepare("SELECT payload_json, updated_at, deleted_at FROM novel_sync_items WHERE owner_id = 42 AND item_type = 'bookmark' AND item_id = 'stable'").get() as { payload_json: string, updated_at: number, deleted_at: number | null }
-	assert.deepEqual(JSON.parse(row.payload_json), {})
-	assert.equal(row.updated_at, 100)
-	assert.equal(row.deleted_at, 100)
+	let pulls = 0
+	let cancelled = false
+	const stream = new ReadableStream<Uint8Array>({
+		pull(controller) {
+			pulls++
+			controller.enqueue(new Uint8Array(40 * 1024).fill(97))
+			if (pulls > 100) controller.close()
+		},
+		cancel() { cancelled = true },
+	})
+	const streamed = await createApp().fetch(new Request('https://example.test/api/v1/novels/private/sync/items/item', {
+		method: 'PUT', headers: { Authorization: await bearer(), 'Content-Type': 'application/json' }, body: stream, duplex: 'half',
+	} as RequestInit & { duplex: 'half' }), { ...env, abdl_space_db: db } as never)
+	assert.equal(streamed.status, 413)
+	assert.equal(cancelled, true)
+	assert.ok(pulls < 100)
 	db.database.close()
 })
 
-test('GET sync returns owner tombstones and paginates equal timestamps by type and id without omissions', async () => {
+test('sync PUT validates stable identity and payload, enforces active owner book, and applies trusted LWW rules', async () => {
+	const db = createSqliteD1()
+	insertReadyBook(db, { id: 'book' })
+	insertReadyBook(db, { id: 'deleted-book', content_hash: '8'.repeat(64), deleted_at: 1 })
+	insertReadyBook(db, { id: 'other-book', owner_id: 7, content_hash: 'f'.repeat(64) })
+	const now = Date.now()
+	for (const [id, body, expected] of [
+		['item', [], 400], ['item', { book_id: 'book', item_type: 'bad', payload: {}, client_updated_at: 1 }, 400],
+		['item', { book_id: 'book', item_type: 'bookmark', payload: [], client_updated_at: 1 }, 400],
+		['item', { book_id: 'book', item_type: 'bookmark', payload: { value: 'x'.repeat(70_000) }, client_updated_at: 1 }, 400],
+		['item', { book_id: 'other-book', item_type: 'bookmark', payload: {}, client_updated_at: 1 }, 404],
+		['item', { book_id: 'deleted-book', item_type: 'bookmark', payload: {}, client_updated_at: 1 }, 404],
+		['item', { book_id: 'book', item_type: 'bookmark', payload: {}, client_updated_at: now + 301_000 }, 400],
+		['url-id', { book_id: 'book', item_type: 'bookmark', item_id: 'body-id', payload: {}, client_updated_at: 1 }, 400],
+	] as const) assert.equal((await phase2Request(db, 'PUT', `/sync/items/${id}`, { body })).status, expected)
+
+	const base = { book_id: 'book', item_type: 'bookmark', payload: { chapter: 2 }, client_updated_at: 100 }
+	assert.equal((await phase2Request(db, 'PUT', '/sync/items/stable', { body: base })).status, 200)
+	assert.equal((await phase2Request(db, 'PUT', '/sync/items/stable', { body: { ...base, payload: { chapter: 1 }, client_updated_at: 99 } })).status, 200)
+	assert.equal((await phase2Request(db, 'PUT', '/sync/items/stable', { body: { ...base, payload: {}, deleted_at: 100 } })).status, 200)
+	assert.equal((await phase2Request(db, 'PUT', '/sync/items/stable', { body: { ...base, payload: { chapter: 3 } } })).status, 200)
+	assert.equal((await phase2Request(db, 'PUT', '/sync/items/stable', { body: { ...base, payload: { chapter: 4 }, client_updated_at: 101 } })).status, 200)
+	const row = db.database.prepare("SELECT payload_json, client_updated_at, server_updated_at, deleted_at FROM novel_sync_items WHERE owner_id = 42 AND item_type = 'bookmark' AND item_id = 'stable'").get() as { payload_json: string, client_updated_at: number, server_updated_at: number, deleted_at: number | null }
+	assert.deepEqual(JSON.parse(row.payload_json), {})
+	assert.equal(row.client_updated_at, 100)
+	assert.ok(row.server_updated_at > 0)
+	assert.equal(row.deleted_at, 100)
+	assert.equal(db.database.prepare('SELECT COUNT(*) AS count FROM novel_sync_changes').get()?.count, 2)
+	db.database.close()
+})
+
+test('GET sync paginates immutable seq changes without omissions when an item changes between pages', async () => {
 	const db = createSqliteD1()
 	insertReadyBook(db, { id: 'book' })
 	insertReadyBook(db, { id: 'other-book', owner_id: 7, content_hash: '9'.repeat(64) })
-	for (const [owner, book, type, id, updated, deleted] of [
-		[42, 'book', 'bookmark', 'a', 100, null], [42, 'book', 'bookmark', 'b', 100, 100],
-		[42, 'book', 'note', 'a', 100, null], [42, 'book', 'progress', 'z', 90, null],
-		[7, 'other-book', 'bookmark', 'secret', 200, null],
-	] as const) db.database.prepare('INSERT INTO novel_sync_items (book_id, owner_id, item_type, item_id, payload_json, updated_at, deleted_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(book, owner, type, id, '{}', updated, deleted)
-
-	const seen: string[] = []
-	let cursor: string | null = null
-	do {
-		const response = await phase2Request(db, 'GET', `/sync?limit=1${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`)
-		assert.equal(response.status, 200)
-		const body = await response.json() as { items: Array<{ item_type: string, item_id: string, deleted_at: number | null }>, next_cursor: string | null }
-		seen.push(...body.items.map(item => `${item.item_type}:${item.item_id}:${item.deleted_at ?? ''}`))
-		cursor = body.next_cursor
-	} while (cursor)
-	assert.deepEqual(seen, ['note:a:', 'bookmark:b:100', 'bookmark:a:', 'progress:z:'])
+	for (const [owner, book, type, id, updated, deleted] of [[42, 'book', 'bookmark', 'a', 100, null], [42, 'book', 'note', 'b', 100, null], [7, 'other-book', 'bookmark', 'secret', 200, null]] as const) {
+		db.database.prepare('INSERT INTO novel_sync_items (book_id, owner_id, item_type, item_id, payload_json, client_updated_at, server_updated_at, deleted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(book, owner, type, id, '{}', updated, 1, deleted)
+	}
+	const first = await phase2Request(db, 'GET', '/sync?limit=1')
+	const firstBody = await first.json() as { items: Array<Record<string, unknown>>, next_cursor: string }
+	assert.equal(first.status, 200)
+	assert.deepEqual(Object.keys(firstBody.items[0]).sort(), ['book_id', 'client_updated_at', 'deleted_at', 'item_id', 'item_type', 'payload', 'seq'])
+	db.database.prepare("UPDATE novel_sync_items SET payload_json = '{\"chapter\":2}', client_updated_at = 101, server_updated_at = 2 WHERE owner_id = 42 AND item_type = 'bookmark' AND item_id = 'a'").run()
+	const second = await phase2Request(db, 'GET', `/sync?limit=10&cursor=${encodeURIComponent(firstBody.next_cursor)}`)
+	const secondBody = await second.json() as { items: Array<{ seq: number, item_id: string, payload: Record<string, unknown> }> }
+	assert.deepEqual(secondBody.items.map(item => [item.seq, item.item_id, item.payload]), [[2, 'b', {}], [4, 'a', { chapter: 2 }]])
 	assert.equal((await phase2Request(db, 'GET', '/sync?limit=201')).status, 400)
 	assert.equal((await phase2Request(db, 'GET', '/sync?cursor=bad')).status, 400)
 	db.database.close()

@@ -30,11 +30,41 @@ CREATE TABLE novel_sync_items (
   item_type TEXT NOT NULL CHECK (item_type IN ('progress', 'bookmark', 'note')),
   item_id TEXT NOT NULL,
   payload_json TEXT NOT NULL,
-  updated_at INTEGER NOT NULL,
+  client_updated_at INTEGER NOT NULL,
+  server_updated_at INTEGER NOT NULL,
   deleted_at INTEGER,
   PRIMARY KEY (owner_id, item_type, item_id),
   FOREIGN KEY (owner_id, book_id) REFERENCES private_books(owner_id, id) ON DELETE CASCADE
 );
 
 CREATE INDEX idx_novel_sync_items_owner_book_updated
-  ON novel_sync_items(owner_id, book_id, updated_at);
+  ON novel_sync_items(owner_id, book_id, server_updated_at);
+
+CREATE TABLE novel_sync_changes (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  owner_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  book_id TEXT NOT NULL,
+  item_type TEXT NOT NULL CHECK (item_type IN ('progress', 'bookmark', 'note')),
+  item_id TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  client_updated_at INTEGER NOT NULL,
+  deleted_at INTEGER,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  FOREIGN KEY (owner_id, book_id) REFERENCES private_books(owner_id, id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_novel_sync_changes_owner_seq ON novel_sync_changes(owner_id, seq);
+
+CREATE TRIGGER novel_sync_items_change_insert
+AFTER INSERT ON novel_sync_items
+BEGIN
+  INSERT INTO novel_sync_changes (owner_id, book_id, item_type, item_id, payload_json, client_updated_at, deleted_at)
+  VALUES (NEW.owner_id, NEW.book_id, NEW.item_type, NEW.item_id, NEW.payload_json, NEW.client_updated_at, NEW.deleted_at);
+END;
+
+CREATE TRIGGER novel_sync_items_change_update
+AFTER UPDATE ON novel_sync_items
+BEGIN
+  INSERT INTO novel_sync_changes (owner_id, book_id, item_type, item_id, payload_json, client_updated_at, deleted_at)
+  VALUES (NEW.owner_id, NEW.book_id, NEW.item_type, NEW.item_id, NEW.payload_json, NEW.client_updated_at, NEW.deleted_at);
+END;

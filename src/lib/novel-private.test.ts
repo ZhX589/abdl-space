@@ -45,8 +45,8 @@ function assertPrivateBooksTableContract(database: DatabaseSync): void {
 function insertSyncItem(database: DatabaseSync, bookId: string, ownerId: number, itemId: string): void {
 	database.prepare(`
 		INSERT INTO novel_sync_items (
-			book_id, owner_id, item_type, item_id, payload_json, updated_at
-		) VALUES (?, ?, 'bookmark', ?, '{}', 1)
+			book_id, owner_id, item_type, item_id, payload_json, client_updated_at, server_updated_at
+		) VALUES (?, ?, 'bookmark', ?, '{}', 1, 1)
 	`).run(bookId, ownerId, itemId)
 }
 
@@ -67,12 +67,18 @@ test('creates the complete private novel metadata schema with explicit non-null 
 
 			const syncColumns = database.prepare('PRAGMA table_info(novel_sync_items)').all() as unknown as TableColumn[]
 			assert.deepEqual(syncColumns.map(({ name }) => name), [
-				'book_id', 'owner_id', 'item_type', 'item_id', 'payload_json', 'updated_at', 'deleted_at',
+				'book_id', 'owner_id', 'item_type', 'item_id', 'payload_json', 'client_updated_at', 'server_updated_at', 'deleted_at',
 			])
 			assert.deepEqual(
 				syncColumns.filter(({ pk }) => pk > 0).sort((a, b) => a.pk - b.pk).map(({ name, notnull }) => [name, notnull]),
 				[['owner_id', 1], ['item_type', 1], ['item_id', 1]],
 			)
+
+			const changeColumns = database.prepare('PRAGMA table_info(novel_sync_changes)').all() as unknown as TableColumn[]
+			assert.deepEqual(changeColumns.map(({ name }) => name), [
+				'seq', 'owner_id', 'book_id', 'item_type', 'item_id', 'payload_json', 'client_updated_at', 'deleted_at', 'created_at',
+			])
+			assert.deepEqual(changeColumns.filter(({ pk }) => pk > 0).map(({ name }) => name), ['seq'])
 		} finally {
 			database.close()
 		}
@@ -127,6 +133,22 @@ test('scopes sync identities and book foreign keys to the owner', () => {
 		assert.throws(() => insertSyncItem(database, 'owner-2-book', 1, 'wrong-owner'), /FOREIGN KEY constraint failed/)
 		assert.throws(() => insertSyncItem(database, 'owner-1-book', 1, 'stable-item'), /UNIQUE constraint failed/)
 		assert.doesNotThrow(() => insertSyncItem(database, 'owner-2-book', 2, 'stable-item'))
+	} finally {
+		database.close()
+	}
+})
+
+test('records immutable sync changes for inserts and effective updates only', () => {
+	const database = createDatabase()
+	try {
+		insertBook(database, 'book', 1, 'hash')
+		insertSyncItem(database, 'book', 1, 'stable')
+		database.prepare(`UPDATE novel_sync_items SET payload_json = ?, client_updated_at = ?, server_updated_at = ?
+			WHERE owner_id = 1 AND item_type = 'bookmark' AND item_id = 'stable'`).run('{"chapter":2}', 2, 2)
+		const changes = database.prepare('SELECT seq, owner_id, book_id, item_type, item_id, payload_json, client_updated_at FROM novel_sync_changes ORDER BY seq').all() as Array<Record<string, unknown>>
+		assert.equal(changes.length, 2)
+		assert.deepEqual(changes.map(change => change.seq), [1, 2])
+		assert.deepEqual(changes.map(change => change.payload_json), ['{}', '{"chapter":2}'])
 	} finally {
 		database.close()
 	}

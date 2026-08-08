@@ -11,6 +11,7 @@ type AppType = { Bindings: Env }
 type AuthDetails = NonNullable<Awaited<ReturnType<typeof mastodonAuthDetails>>>
 
 interface PrivateBookRow {
+	snapshot_at?: number
 	id: string
 	owner_id: number
 	title: string
@@ -31,11 +32,13 @@ interface PrivateBookRow {
 }
 
 interface NovelSyncItemRow {
+	seq?: number
 	book_id: string
 	item_type: 'progress' | 'bookmark' | 'note'
 	item_id: string
 	payload_json: string
-	updated_at: number
+	client_updated_at: number
+	server_updated_at?: number
 	deleted_at: number | null
 }
 
@@ -57,6 +60,9 @@ const CLEANUP_LEASE_MICROSECONDS = 5 * 60 * 1_000_000
 const MAX_PASTE_SIZE = 5 * 1024 * 1024
 const MAX_PASTE_LINE_LENGTH = 100_000
 const MAX_SYNC_PAYLOAD_SIZE = 64 * 1024
+const MAX_SMALL_JSON_SIZE = 64 * 1024
+const MAX_PASTE_JSON_SIZE = 6 * 1024 * 1024
+const MAX_SYNC_JSON_SIZE = 96 * 1024
 
 export const PRIVATE_BOOK_INSERT_SQL = `
 	INSERT INTO private_books (
@@ -95,9 +101,30 @@ async function authenticate(c: Context<AppType>, scope: 'read' | 'write'): Promi
 	return auth
 }
 
-async function parseJsonObject(c: Context<AppType>): Promise<Record<string, unknown> | null> {
+async function readJsonObjectLimited(c: Context<AppType>, maximumBytes: number): Promise<Record<string, unknown> | null | 'too_large'> {
+	const contentLength = c.req.header('Content-Length')
+	if (contentLength !== undefined) {
+		const declaredLength = Number(contentLength)
+		if (!Number.isSafeInteger(declaredLength) || declaredLength < 0) return null
+		if (declaredLength > maximumBytes) return 'too_large'
+	}
 	try {
-		const text = await c.req.text()
+		const reader = c.req.raw.body?.getReader()
+		if (!reader) return {}
+		const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false })
+		let bytesRead = 0
+		let text = ''
+		while (true) {
+			const { done, value } = await reader.read()
+			if (done) break
+			bytesRead += value.byteLength
+			if (bytesRead > maximumBytes) {
+				await reader.cancel()
+				return 'too_large'
+			}
+			text += decoder.decode(value, { stream: true })
+		}
+		text += decoder.decode()
 		const value: unknown = text.trim() ? JSON.parse(text) : {}
 		return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
 	} catch {
@@ -114,14 +141,19 @@ function toHex(bytes: ArrayBuffer): string {
 }
 
 function encodeCursor(parts: Array<string | number>): string {
-	return btoa(JSON.stringify(parts)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+	const bytes = new TextEncoder().encode(JSON.stringify(parts))
+	let binary = ''
+	for (const byte of bytes) binary += String.fromCharCode(byte)
+	return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
 }
 
 function decodeCursor(value: string | undefined, length: number): Array<string | number> | null | undefined {
 	if (value === undefined || value === '') return undefined
 	try {
 		const base64 = value.replace(/-/g, '+').replace(/_/g, '/')
-		const decoded: unknown = JSON.parse(atob(base64 + '='.repeat((4 - base64.length % 4) % 4)))
+		const binary = atob(base64 + '='.repeat((4 - base64.length % 4) % 4))
+		const bytes = Uint8Array.from(binary, character => character.charCodeAt(0))
+		const decoded: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(bytes))
 		if (!Array.isArray(decoded) || decoded.length !== length || decoded.some(part => typeof part !== 'string' && typeof part !== 'number')) return null
 		return decoded
 	} catch {
@@ -152,12 +184,13 @@ function safeBookResponse(book: PrivateBookRow) {
 
 function syncItemResponse(item: NovelSyncItemRow) {
 	return {
+		...(item.seq === undefined ? {} : { seq: item.seq }),
 		book_id: item.book_id,
 		item_type: item.item_type,
 		item_id: item.item_id,
-		payload_json: item.payload_json,
 		payload: JSON.parse(item.payload_json) as Record<string, unknown>,
-		updated_at: item.updated_at,
+		client_updated_at: item.client_updated_at,
+		...(item.server_updated_at === undefined ? {} : { server_updated_at: item.server_updated_at }),
 		deleted_at: item.deleted_at,
 	}
 }
@@ -228,12 +261,12 @@ async function failAndDeleteBook(db: D1Database, book: PrivateBookRow, verificat
 	return result.success && result.meta.changes === 1
 }
 
-async function cleanupPrivateObject(db: D1Database, book: PrivateBookRow, cos: NonNullable<ReturnType<typeof privateCosOptions>>, cleanupToken: number): Promise<void> {
+async function cleanupPrivateObject(db: D1Database, book: PrivateBookRow, cos: NonNullable<ReturnType<typeof privateCosOptions>>, cleanupToken: number, now = Math.floor(Date.now() / 1000)): Promise<void> {
 	let cleanupStatus: PrivateBookRow['cleanup_status'] = 'done'
 	try {
 		await deleteObjectFromCos({ ...cos, objectKey: book.object_key, contentType: book.format === 'txt' ? 'text/plain' : 'application/epub+zip' })
 	} catch (error) {
-		if (!(error instanceof CosHttpError && error.status === 404)) cleanupStatus = 'failed'
+		if (!(error instanceof CosHttpError && error.status === 404 && now >= book.upload_expires_at)) cleanupStatus = 'failed'
 	}
 	const result = await db.prepare(`
 		UPDATE private_books SET cleanup_status = ?, updated_at = unixepoch()
@@ -253,12 +286,12 @@ export async function cleanupPrivateNovelObjects(env: Env, now: number, limit: n
 			cleanup_status, cleanup_attempted_at, created_at, updated_at, deleted_at
 		FROM private_books
 		WHERE (deleted_at IS NULL AND parse_status = 'pending' AND upload_expires_at <= ?)
-			OR (deleted_at IS NOT NULL AND cleanup_status IN ('failed', 'pending'))
+			OR (deleted_at IS NOT NULL AND upload_expires_at <= ? AND cleanup_status IN ('failed', 'pending'))
 			OR (deleted_at IS NOT NULL AND cleanup_status = 'deleting'
-				AND (cleanup_attempted_at IS NULL OR cleanup_attempted_at <= ?))
+				AND upload_expires_at <= ? AND (cleanup_attempted_at IS NULL OR cleanup_attempted_at <= ?))
 		ORDER BY upload_expires_at ASC
 		LIMIT ?
-	`).bind(now, staleCleanupBefore, limit).all<PrivateBookRow>()
+	`).bind(now, now, now, staleCleanupBefore, limit).all<PrivateBookRow>()
 	if (!result.success) throw new Error('Database query failed')
 
 	let claimed = 0
@@ -285,7 +318,7 @@ export async function cleanupPrivateNovelObjects(env: Env, now: number, limit: n
 		if (!claim.success) throw new Error('Database operation failed')
 		if (claim.meta.changes !== 1) continue
 		claimed++
-		await cleanupPrivateObject(env.abdl_space_db, book, cos, cleanupToken)
+		await cleanupPrivateObject(env.abdl_space_db, book, cos, cleanupToken, now)
 	}
 	return claimed
 }
@@ -298,8 +331,9 @@ novelPrivate.get('/books', async c => {
 	const auth = await authenticate(c, 'read')
 	if (auth instanceof Response) return auth
 	const limit = parseLimit(c.req.query('limit'), 20, 50)
-	const cursor = decodeCursor(c.req.query('cursor'), 2)
-	if (limit === null || cursor === null || (cursor && (!Number.isSafeInteger(cursor[0]) || Number(cursor[0]) < 0 || typeof cursor[1] !== 'string' || !cursor[1]))) {
+	const cursor = decodeCursor(c.req.query('cursor'), 3)
+	if (limit === null || cursor === null || (cursor && (!Number.isSafeInteger(cursor[0]) || Number(cursor[0]) < 0
+		|| !Number.isSafeInteger(cursor[1]) || Number(cursor[1]) < 0 || typeof cursor[2] !== 'string' || !cursor[2]))) {
 		return c.json({ error: 'Invalid pagination request', code: 'invalid_pagination' }, 400)
 	}
 	try {
@@ -309,21 +343,24 @@ novelPrivate.get('/books', async c => {
 					verified_size, parse_status, upload_expires_at, verification_started_at,
 					cleanup_status, cleanup_attempted_at, created_at, updated_at, deleted_at
 				FROM private_books
-				WHERE owner_id = ? AND deleted_at IS NULL AND (updated_at < ? OR (updated_at = ? AND id < ?))
+				WHERE owner_id = ? AND deleted_at IS NULL AND updated_at <= ?
+					AND (updated_at < ? OR (updated_at = ? AND id < ?))
 				ORDER BY updated_at DESC, id DESC LIMIT ?
-			`).bind(auth.user.sub, cursor[0], cursor[0], cursor[1], limit + 1).all<PrivateBookRow>()
+			`).bind(auth.user.sub, cursor[0], cursor[1], cursor[1], cursor[2], limit + 1).all<PrivateBookRow>()
 			: await c.env.abdl_space_db.prepare(`
+				WITH snapshot(value) AS (SELECT unixepoch())
 				SELECT id, owner_id, title, author, format, object_key, content_hash, declared_size,
 					verified_size, parse_status, upload_expires_at, verification_started_at,
-					cleanup_status, cleanup_attempted_at, created_at, updated_at, deleted_at
-				FROM private_books WHERE owner_id = ? AND deleted_at IS NULL
+					cleanup_status, cleanup_attempted_at, created_at, updated_at, deleted_at, snapshot.value AS snapshot_at
+				FROM private_books, snapshot WHERE owner_id = ? AND deleted_at IS NULL AND updated_at <= snapshot.value
 				ORDER BY updated_at DESC, id DESC LIMIT ?
 			`).bind(auth.user.sub, limit + 1).all<PrivateBookRow>()
 		if (!result.success) throw new Error('Database query failed')
 		const hasMore = result.results.length > limit
 		const page = result.results.slice(0, limit)
 		const last = page.at(-1)
-		return c.json({ items: page.map(safeBookResponse), next_cursor: hasMore && last ? encodeCursor([last.updated_at, last.id]) : null })
+		const snapshotAt = cursor ? Number(cursor[0]) : (page[0]?.snapshot_at ?? Math.floor(Date.now() / 1000))
+		return c.json({ items: page.map(safeBookResponse), next_cursor: hasMore && last ? encodeCursor([snapshotAt, last.updated_at, last.id]) : null })
 	} catch {
 		return c.json({ error: 'Private books query failed', code: 'books_query_failed' }, 500)
 	}
@@ -370,19 +407,28 @@ novelPrivate.post('/paste', async c => {
 	if (auth instanceof Response) return auth
 	const cos = privateCosOptions(c.env)
 	if (!cos) return c.json({ error: 'Private storage is unavailable', code: 'private_storage_unavailable' }, 503)
-	const input = await parseJsonObject(c)
+	const input = await readJsonObjectLimited(c, MAX_PASTE_JSON_SIZE)
+	if (input === 'too_large') return c.json({ error: 'Paste request is too large', code: 'request_too_large' }, 413)
 	if (!input) return c.json({ error: 'Invalid paste request', code: 'invalid_paste' }, 400)
 	const title = typeof input.title === 'string' ? input.title.trim() : ''
 	const author = typeof input.author === 'string' ? input.author.trim() : ''
 	const rawText = typeof input.text === 'string' ? input.text : ''
 	const normalizedText = rawText.replace(/\r\n?/g, '\n').replace(/[ \t]+$/gm, '').replace(/\n*$/, '\n')
-	const containsControlCharacter = Array.from(normalizedText).some(character => {
-		const code = character.codePointAt(0)!
-		return (code < 0x20 && character !== '\n' && character !== '\t') || code === 0x7F
-	})
+	let containsControlCharacter = false
+	let longestLine = 0
+	let currentLine = 0
+	for (let index = 0; index < normalizedText.length; index++) {
+		const code = normalizedText.charCodeAt(index)
+		if ((code < 0x20 && code !== 0x0A && code !== 0x09) || code === 0x7F) containsControlCharacter = true
+		if (code === 0x0A) {
+			longestLine = Math.max(longestLine, currentLine)
+			currentLine = 0
+		} else currentLine++
+	}
+	longestLine = Math.max(longestLine, currentLine)
 	const bytes = new TextEncoder().encode(normalizedText)
 	if (!title || title.length > 500 || !author || author.length > 500 || !normalizedText.trim() || containsControlCharacter
-		|| bytes.byteLength > MAX_PASTE_SIZE || normalizedText.split('\n').some(line => line.length > MAX_PASTE_LINE_LENGTH)) {
+		|| bytes.byteLength > MAX_PASTE_SIZE || longestLine > MAX_PASTE_LINE_LENGTH) {
 		return c.json({ error: 'Invalid paste request', code: 'invalid_paste' }, 400)
 	}
 	const contentHash = toHex(await crypto.subtle.digest('SHA-256', bytes))
@@ -437,36 +483,20 @@ novelPrivate.get('/sync', async c => {
 	const auth = await authenticate(c, 'read')
 	if (auth instanceof Response) return auth
 	const limit = parseLimit(c.req.query('limit'), 100, 200)
-	const cursor = decodeCursor(c.req.query('cursor'), 3)
-	if (limit === null || cursor === null || (cursor && (!Number.isSafeInteger(cursor[0]) || Number(cursor[0]) < 0
-		|| typeof cursor[1] !== 'string' || !['progress', 'bookmark', 'note'].includes(cursor[1]) || typeof cursor[2] !== 'string' || !cursor[2]))) {
+	const cursor = decodeCursor(c.req.query('cursor'), 1)
+	if (limit === null || cursor === null || (cursor && (!Number.isSafeInteger(cursor[0]) || Number(cursor[0]) < 0))) {
 		return c.json({ error: 'Invalid pagination request', code: 'invalid_pagination' }, 400)
 	}
 	try {
-		const result = cursor
-			? await c.env.abdl_space_db.prepare(`
-				SELECT sync_item.book_id, sync_item.item_type, sync_item.item_id, sync_item.payload_json,
-					sync_item.updated_at, sync_item.deleted_at
-				FROM novel_sync_items AS sync_item
-				JOIN private_books AS book ON book.owner_id = sync_item.owner_id AND book.id = sync_item.book_id
-				WHERE sync_item.owner_id = ? AND book.deleted_at IS NULL AND (
-					sync_item.updated_at < ? OR (sync_item.updated_at = ? AND sync_item.item_type < ?)
-					OR (sync_item.updated_at = ? AND sync_item.item_type = ? AND sync_item.item_id < ?)
-				) ORDER BY sync_item.updated_at DESC, sync_item.item_type DESC, sync_item.item_id DESC LIMIT ?
-			`).bind(auth.user.sub, cursor[0], cursor[0], cursor[1], cursor[0], cursor[1], cursor[2], limit + 1).all<NovelSyncItemRow>()
-			: await c.env.abdl_space_db.prepare(`
-				SELECT sync_item.book_id, sync_item.item_type, sync_item.item_id, sync_item.payload_json,
-					sync_item.updated_at, sync_item.deleted_at
-				FROM novel_sync_items AS sync_item
-				JOIN private_books AS book ON book.owner_id = sync_item.owner_id AND book.id = sync_item.book_id
-				WHERE sync_item.owner_id = ? AND book.deleted_at IS NULL
-				ORDER BY sync_item.updated_at DESC, sync_item.item_type DESC, sync_item.item_id DESC LIMIT ?
-			`).bind(auth.user.sub, limit + 1).all<NovelSyncItemRow>()
+		const result = await c.env.abdl_space_db.prepare(`
+			SELECT seq, book_id, item_type, item_id, payload_json, client_updated_at, deleted_at
+			FROM novel_sync_changes WHERE owner_id = ? AND seq > ? ORDER BY seq ASC LIMIT ?
+		`).bind(auth.user.sub, cursor ? cursor[0] : 0, limit + 1).all<NovelSyncItemRow>()
 		if (!result.success) throw new Error('Database query failed')
 		const hasMore = result.results.length > limit
 		const page = result.results.slice(0, limit)
 		const last = page.at(-1)
-		return c.json({ items: page.map(syncItemResponse), next_cursor: hasMore && last ? encodeCursor([last.updated_at, last.item_type, last.item_id]) : null })
+		return c.json({ items: page.map(syncItemResponse), next_cursor: hasMore && last?.seq !== undefined ? encodeCursor([last.seq]) : null })
 	} catch {
 		return c.json({ error: 'Novel sync query failed', code: 'sync_query_failed' }, 500)
 	}
@@ -475,41 +505,50 @@ novelPrivate.get('/sync', async c => {
 novelPrivate.put('/sync/items/:id', async c => {
 	const auth = await authenticate(c, 'write')
 	if (auth instanceof Response) return auth
-	const input = await parseJsonObject(c)
+	const input = await readJsonObjectLimited(c, MAX_SYNC_JSON_SIZE)
+	if (input === 'too_large') return c.json({ error: 'Sync request is too large', code: 'request_too_large' }, 413)
 	if (!input) return c.json({ error: 'Invalid sync item', code: 'invalid_sync_item' }, 400)
 	const itemId = c.req.param('id')
 	const bookId = typeof input.book_id === 'string' ? input.book_id : ''
 	const itemType = typeof input.item_type === 'string' ? input.item_type : ''
 	const incomingItemId = input.item_id
-	const updatedAt = input.updated_at
+	const clientUpdatedAt = input.client_updated_at ?? input.updated_at
 	const deletedAt = input.deleted_at === undefined || input.deleted_at === null ? null : input.deleted_at
 	let payload: unknown = input.payload
 	if (payload === undefined && typeof input.payload_json === 'string') {
 		try { payload = JSON.parse(input.payload_json) } catch { payload = null }
 	}
 	if (!itemId || (incomingItemId !== undefined && incomingItemId !== itemId) || !bookId || !['progress', 'bookmark', 'note'].includes(itemType)
-		|| !Number.isSafeInteger(updatedAt) || Number(updatedAt) < 0 || (deletedAt !== null && (!Number.isSafeInteger(deletedAt) || Number(deletedAt) < 0))
+		|| !Number.isSafeInteger(clientUpdatedAt) || Number(clientUpdatedAt) < 0 || Number(clientUpdatedAt) > Date.now() + 5 * 60 * 1000
+		|| (deletedAt !== null && (!Number.isSafeInteger(deletedAt) || Number(deletedAt) < 0))
 		|| payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
 		return c.json({ error: 'Invalid sync item', code: 'invalid_sync_item' }, 400)
 	}
 	const payloadJson = JSON.stringify(payload)
 	if (new TextEncoder().encode(payloadJson).byteLength > MAX_SYNC_PAYLOAD_SIZE) return c.json({ error: 'Invalid sync item', code: 'invalid_sync_item' }, 400)
 	try {
-		const book = await getOwnedBook(c.env.abdl_space_db, bookId, auth.user.sub)
-		if (!book || book.deleted_at !== null) return c.json({ error: 'Private book not found', code: 'book_not_found' }, 404)
+		const serverUpdatedAt = Date.now()
 		const result = await c.env.abdl_space_db.prepare(`
-			INSERT INTO novel_sync_items (book_id, owner_id, item_type, item_id, payload_json, updated_at, deleted_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?)
+			INSERT INTO novel_sync_items (book_id, owner_id, item_type, item_id, payload_json, client_updated_at, server_updated_at, deleted_at)
+			SELECT ?, ?, ?, ?, ?, ?, ?, ? FROM private_books
+			WHERE owner_id = ? AND id = ? AND deleted_at IS NULL
 			ON CONFLICT(owner_id, item_type, item_id) DO UPDATE SET
 				book_id = excluded.book_id, payload_json = excluded.payload_json,
-				updated_at = excluded.updated_at, deleted_at = excluded.deleted_at
-			WHERE excluded.updated_at > novel_sync_items.updated_at
-				OR (excluded.updated_at = novel_sync_items.updated_at
-					AND excluded.deleted_at IS NOT NULL AND novel_sync_items.deleted_at IS NULL)
-		`).bind(bookId, auth.user.sub, itemType, itemId, payloadJson, updatedAt, deletedAt).run()
+				client_updated_at = excluded.client_updated_at, server_updated_at = excluded.server_updated_at,
+				deleted_at = excluded.deleted_at
+			WHERE EXISTS (SELECT 1 FROM private_books WHERE owner_id = excluded.owner_id AND id = excluded.book_id AND deleted_at IS NULL)
+				AND ((novel_sync_items.deleted_at IS NULL AND excluded.client_updated_at > novel_sync_items.client_updated_at)
+					OR (novel_sync_items.deleted_at IS NULL AND excluded.client_updated_at = novel_sync_items.client_updated_at AND excluded.deleted_at IS NOT NULL)
+					OR (novel_sync_items.deleted_at IS NOT NULL AND excluded.deleted_at IS NOT NULL AND excluded.client_updated_at > novel_sync_items.client_updated_at))
+		`).bind(bookId, auth.user.sub, itemType, itemId, payloadJson, clientUpdatedAt, serverUpdatedAt, deletedAt, auth.user.sub, bookId).run()
 		if (!result.success) throw new Error('Database operation failed')
+		if (result.meta.changes === 0) {
+			const activeBook = await c.env.abdl_space_db.prepare('SELECT id FROM private_books WHERE owner_id = ? AND id = ? AND deleted_at IS NULL').bind(auth.user.sub, bookId).all<{ id: string }>()
+			if (!activeBook.success) throw new Error('Database query failed')
+			if (!activeBook.results[0]) return c.json({ error: 'Private book not found', code: 'book_not_found' }, 404)
+		}
 		const stored = await c.env.abdl_space_db.prepare(`
-			SELECT book_id, item_type, item_id, payload_json, updated_at, deleted_at
+			SELECT book_id, item_type, item_id, payload_json, client_updated_at, server_updated_at, deleted_at
 			FROM novel_sync_items WHERE owner_id = ? AND item_type = ? AND item_id = ?
 		`).bind(auth.user.sub, itemType, itemId).all<NovelSyncItemRow>()
 		if (!stored.success || !stored.results[0]) throw new Error('Database query failed')
@@ -525,7 +564,8 @@ novelPrivate.post('/authorize', async c => {
 	const cos = privateCosOptions(c.env)
 	if (!cos) return c.json({ error: 'Private storage is unavailable', code: 'private_storage_unavailable' }, 503)
 
-	const input = await parseJsonObject(c)
+	const input = await readJsonObjectLimited(c, MAX_SMALL_JSON_SIZE)
+	if (input === 'too_large') return c.json({ error: 'Private book request is too large', code: 'request_too_large' }, 413)
 	if (!input) return c.json({ error: 'Invalid private book request', code: 'invalid_book' }, 400)
 	if (Object.hasOwn(input, 'object_key')) return c.json({ error: 'Client object keys are not allowed', code: 'invalid_book' }, 400)
 
@@ -629,6 +669,9 @@ novelPrivate.post('/:id/complete', async c => {
 	if (auth instanceof Response) return auth
 	const cos = privateCosOptions(c.env)
 	if (!cos) return c.json({ error: 'Private storage is unavailable', code: 'private_storage_unavailable' }, 503)
+	const input = await readJsonObjectLimited(c, MAX_SMALL_JSON_SIZE)
+	if (input === 'too_large') return c.json({ error: 'Completion request is too large', code: 'request_too_large' }, 413)
+	if (!input) return c.json({ error: 'Invalid completion request', code: 'invalid_completion' }, 400)
 
 	let claimedBook: PrivateBookRow | null = null
 	let verificationStartedAt: number | null = null
@@ -774,6 +817,9 @@ novelPrivate.post('/:id/download/authorize', async c => {
 	if (auth instanceof Response) return auth
 	const cos = privateCosOptions(c.env)
 	if (!cos) return c.json({ error: 'Private storage is unavailable', code: 'private_storage_unavailable' }, 503)
+	const input = await readJsonObjectLimited(c, MAX_SMALL_JSON_SIZE)
+	if (input === 'too_large') return c.json({ error: 'Download request is too large', code: 'request_too_large' }, 413)
+	if (!input) return c.json({ error: 'Invalid download request', code: 'invalid_download' }, 400)
 
 	try {
 		const book = await getOwnedBook(c.env.abdl_space_db, c.req.param('id'), auth.user.sub)
