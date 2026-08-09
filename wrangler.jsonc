@@ -5,7 +5,7 @@
  * 本地开发: npm run dev
  * 生产部署: npm run deploy
  * 设置密钥: npx wrangler secret put JWT_SECRET --name abdl-space-api
- * 私有小说使用独立最小权限密钥（仅声明名称，值必须通过 Wrangler Secret 设置）:
+ * 私有小说可选使用独立最小权限密钥；未设置时复用 COS_SECRET_ID/KEY:
  * npx wrangler secret put NOVEL_COS_SECRET_ID --name abdl-space-api
  * npx wrangler secret put NOVEL_COS_SECRET_KEY --name abdl-space-api
  */

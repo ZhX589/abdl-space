@@ -375,15 +375,19 @@ test('JWT authentication rejects tokens issued before password_changed_at', asyn
 	assert.equal(response.status, 401)
 })
 
-test('private COS configuration fails closed and never falls back to public credentials or bucket', async () => {
+test('private COS configuration falls back to shared credentials but never the public bucket', async () => {
 	for (const override of [
-		{ NOVEL_COS_SECRET_ID: '' }, { NOVEL_COS_SECRET_KEY: '' }, { NOVEL_PRIVATE_COS_BUCKET: '' },
+		{ NOVEL_PRIVATE_COS_BUCKET: '' },
 		{ NOVEL_PRIVATE_COS_REGION: '' }, { NOVEL_PRIVATE_COS_BUCKET: env.COS_BUCKET },
-		{ NOVEL_COS_SECRET_ID: env.COS_SECRET_ID }, { NOVEL_COS_SECRET_KEY: env.COS_SECRET_KEY },
 	]) {
 		const { response } = await request('/authorize', { body: validAuthorize, env: override })
 		assert.equal(response.status, 503, JSON.stringify(override))
 	}
+	const { response } = await request('/authorize', {
+		body: validAuthorize,
+		env: { NOVEL_COS_SECRET_ID: '', NOVEL_COS_SECRET_KEY: '' },
+	})
+	assert.equal(response.status, 200)
 })
 
 test('authorize validates format and size and creates a pending upload with expiry', async () => {

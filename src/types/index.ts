@@ -365,8 +365,8 @@ export interface Env {
   COS_BUCKET: string
   COS_REGION: string
   COS_PUBLIC_ORIGIN?: string
-  NOVEL_COS_SECRET_ID: string
-  NOVEL_COS_SECRET_KEY: string
+  NOVEL_COS_SECRET_ID?: string
+  NOVEL_COS_SECRET_KEY?: string
   NOVEL_PRIVATE_COS_BUCKET: string
   NOVEL_PRIVATE_COS_REGION: string
   // NBW S2S

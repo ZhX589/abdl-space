@@ -230,12 +230,12 @@ async function getActiveBookByHash(db: D1Database, ownerId: number, contentHash:
 }
 
 function privateCosOptions(env: Env) {
-	const secretId = env.NOVEL_COS_SECRET_ID?.trim()
-	const secretKey = env.NOVEL_COS_SECRET_KEY?.trim()
+	const secretId = env.NOVEL_COS_SECRET_ID?.trim() || env.COS_SECRET_ID?.trim()
+	const secretKey = env.NOVEL_COS_SECRET_KEY?.trim() || env.COS_SECRET_KEY?.trim()
 	const bucket = env.NOVEL_PRIVATE_COS_BUCKET?.trim()
 	const region = env.NOVEL_PRIVATE_COS_REGION?.trim()
 	if (!secretId || !secretKey || !bucket || !region || bucket === env.COS_BUCKET?.trim()
-		|| secretId === env.COS_SECRET_ID?.trim() || secretKey === env.COS_SECRET_KEY?.trim()) return null
+	) return null
 	return { secretId, secretKey, bucket, region }
 }
 
