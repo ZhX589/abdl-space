@@ -25,7 +25,7 @@
 		"COS_BUCKET": "abdl-1339643562",
 		"COS_REGION": "ap-shanghai",
 		"COS_PUBLIC_ORIGIN": "https://abdl-1339643562.cos.ap-shanghai.myqcloud.com",
-		"NOVEL_PRIVATE_COS_BUCKET": "abdl-private-books-1339643562",
+		"NOVEL_PRIVATE_COS_BUCKET": "abdl-1339643562",
 		"NOVEL_PRIVATE_COS_REGION": "ap-shanghai"
 	},
 	"d1_databases": [

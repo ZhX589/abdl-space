@@ -234,8 +234,7 @@ function privateCosOptions(env: Env) {
 	const secretKey = env.NOVEL_COS_SECRET_KEY?.trim() || env.COS_SECRET_KEY?.trim()
 	const bucket = env.NOVEL_PRIVATE_COS_BUCKET?.trim()
 	const region = env.NOVEL_PRIVATE_COS_REGION?.trim()
-	if (!secretId || !secretKey || !bucket || !region || bucket === env.COS_BUCKET?.trim()
-	) return null
+	if (!secretId || !secretKey || !bucket || !region) return null
 	return { secretId, secretKey, bucket, region }
 }
 

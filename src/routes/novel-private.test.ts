@@ -375,14 +375,21 @@ test('JWT authentication rejects tokens issued before password_changed_at', asyn
 	assert.equal(response.status, 401)
 })
 
-test('private COS configuration falls back to shared credentials but never the public bucket', async () => {
+test('private COS configuration falls back to shared credentials and may reuse the public bucket', async () => {
 	for (const override of [
 		{ NOVEL_PRIVATE_COS_BUCKET: '' },
-		{ NOVEL_PRIVATE_COS_REGION: '' }, { NOVEL_PRIVATE_COS_BUCKET: env.COS_BUCKET },
+		{ NOVEL_PRIVATE_COS_REGION: '' },
 	]) {
 		const { response } = await request('/authorize', { body: validAuthorize, env: override })
 		assert.equal(response.status, 503, JSON.stringify(override))
 	}
+	const sharedBucket = await request('/authorize', {
+		body: validAuthorize,
+		env: { NOVEL_PRIVATE_COS_BUCKET: env.COS_BUCKET },
+	})
+	assert.equal(sharedBucket.response.status, 200)
+	const sharedResult = await sharedBucket.response.json() as { upload_url: string }
+	assert.match(sharedResult.upload_url, new RegExp(`^https://${env.COS_BUCKET}\\.cos\\.${env.NOVEL_PRIVATE_COS_REGION}\\.myqcloud\\.com/`))
 	const { response } = await request('/authorize', {
 		body: validAuthorize,
 		env: { NOVEL_COS_SECRET_ID: '', NOVEL_COS_SECRET_KEY: '' },
