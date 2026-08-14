@@ -50,18 +50,46 @@ interface ChapterRow {
 	deleted_at: number | null
 }
 
+interface RevisionRow {
+	id: string
+	owner_id: number
+	chapter_id: string
+	body: string
+	status: string
+	version: number
+	create_idempotency_key: string | null
+	created_at: number
+	updated_at: number
+}
+
+interface RevisionOperationRow {
+	owner_id: number
+	idempotency_key: string
+	revision_id: string
+	request_body: string
+	request_base_version: number
+	response_body: string
+	response_chapter_id: string
+	response_status: string
+	response_version: number
+	response_created_at: number
+	response_updated_at: number
+}
+
 const MAX_JSON_BYTES = 16 * 1024
 const TITLE_LIMIT = 120
 const DESCRIPTION_LIMIT = 2000
 const IDEMPOTENCY_KEY_LIMIT = 128
 const MAX_ACTIVE_WORKS = 100
+const MAX_REVISION_BODY_LENGTH = 500_000
+const MAX_REVISION_JSON_BYTES = 2 * 1024 * 1024
 const CATEGORIES = new Set(['fiction', 'fantasy', 'romance', 'science_fiction', 'mystery', 'history', 'essay', 'other'])
 
 const novelAuthoring = new Hono<AppType>()
 
 novelAuthoring.use('*', cors({
 	origin: '*',
-	allowMethods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
+	allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
 	allowHeaders: ['Content-Type', 'Authorization', 'Idempotency-Key'],
 }))
 
@@ -77,12 +105,12 @@ async function authenticate(c: Context<AppType>, scope: 'read' | 'write'): Promi
 	return auth
 }
 
-async function readJsonObjectLimited(c: Context<AppType>): Promise<Record<string, unknown> | null | 'too_large'> {
+async function readJsonObjectLimited(c: Context<AppType>, maximumBytes = MAX_JSON_BYTES): Promise<Record<string, unknown> | null | 'too_large'> {
 	const contentLength = c.req.header('Content-Length')
 	if (contentLength !== undefined) {
 		const declared = Number(contentLength)
 		if (!Number.isSafeInteger(declared) || declared < 0) return null
-		if (declared > MAX_JSON_BYTES) return 'too_large'
+		if (declared > maximumBytes) return 'too_large'
 	}
 	try {
 		const reader = c.req.raw.body?.getReader()
@@ -94,7 +122,7 @@ async function readJsonObjectLimited(c: Context<AppType>): Promise<Record<string
 			const { done, value } = await reader.read()
 			if (done) break
 			bytesRead += value.byteLength
-			if (bytesRead > MAX_JSON_BYTES) {
+			if (bytesRead > maximumBytes) {
 				await reader.cancel()
 				return 'too_large'
 			}
@@ -156,6 +184,10 @@ function safeChapterResponse(row: ChapterRow) {
 	return { id: row.id, volume_id: row.volume_id, title: row.title, sort_order: row.sort_order, created_at: row.created_at, updated_at: row.updated_at }
 }
 
+function safeRevisionResponse(row: RevisionRow) {
+	return { id: row.id, chapter_id: row.chapter_id, body: row.body, status: row.status, version: row.version, created_at: row.created_at, updated_at: row.updated_at }
+}
+
 async function getOwnedVolume(db: D1Database, authorId: number, novelId: string, volumeId: string) {
 	return db.prepare(`SELECT v.id, v.novel_id, v.title, v.sort_order, v.idempotency_key, v.created_at, v.updated_at, v.deleted_at
 		FROM novel_volumes v JOIN novels n ON n.id = v.novel_id
@@ -168,6 +200,27 @@ async function getOwnedChapter(db: D1Database, authorId: number, novelId: string
 		FROM novel_chapters c JOIN novels n ON n.id = c.novel_id
 		WHERE n.author_id = ? AND n.id = ? AND n.deleted_at IS NULL AND c.volume_id = ? AND c.id = ? AND c.deleted_at IS NULL`)
 		.bind(authorId, novelId, volumeId, chapterId).first<ChapterRow>()
+}
+
+async function getOwnedChapterById(db: D1Database, authorId: number, chapterId: string) {
+	return db.prepare(`SELECT c.id, c.novel_id, c.volume_id, c.title, c.sort_order, c.idempotency_key, c.created_at, c.updated_at, c.deleted_at
+		FROM novel_chapters c JOIN novel_volumes v ON v.id = c.volume_id AND v.novel_id = c.novel_id JOIN novels n ON n.id = c.novel_id
+		WHERE n.author_id = ? AND n.deleted_at IS NULL AND n.status = 'draft' AND v.deleted_at IS NULL AND c.id = ? AND c.deleted_at IS NULL`)
+		.bind(authorId, chapterId).first<ChapterRow>()
+}
+
+async function getOwnedRevision(db: D1Database, authorId: number, revisionId: string) {
+	return db.prepare(`SELECT r.id, r.owner_id, r.chapter_id, r.body, r.status, r.version, r.create_idempotency_key, r.created_at, r.updated_at
+		FROM chapter_revisions r JOIN novel_chapters c ON c.id = r.chapter_id
+		JOIN novel_volumes v ON v.id = c.volume_id AND v.novel_id = c.novel_id JOIN novels n ON n.id = c.novel_id
+		WHERE n.author_id = ? AND n.deleted_at IS NULL AND v.deleted_at IS NULL AND c.deleted_at IS NULL AND r.id = ?`)
+		.bind(authorId, revisionId).first<RevisionRow>()
+}
+
+function normalizedRevisionBody(input: Record<string, unknown>): string | null {
+	if (typeof input.body !== 'string') return null
+	const body = input.body.replace(/\r\n?/g, '\n')
+	return body.length <= MAX_REVISION_BODY_LENGTH ? body : null
 }
 
 function validTitle(input: Record<string, unknown>) {
@@ -237,7 +290,7 @@ novelAuthoring.post('/works', async c => {
 	if (!idempotencyKey || idempotencyKey.length > IDEMPOTENCY_KEY_LIMIT) {
 		return c.json({ error: 'A valid idempotency key is required', code: 'invalid_idempotency_key' }, 400)
 	}
-	const input = await readJsonObjectLimited(c)
+		const input = await readJsonObjectLimited(c, MAX_REVISION_JSON_BYTES)
 	if (input === 'too_large') return c.json({ error: 'Create work request is too large', code: 'request_too_large' }, 413)
 	if (!input) return c.json({ error: 'Invalid create work request', code: 'invalid_work' }, 400)
 	const title = typeof input.title === 'string' ? input.title.trim() : ''
@@ -485,6 +538,108 @@ novelAuthoring.delete('/works/:id/volumes/:volumeId', async c => {
 		return c.json({ id: volume.id, deleted: true })
 	} catch {
 		return c.json({ error: 'Volume deletion failed', code: 'delete_volume_failed' }, 500)
+	}
+})
+
+novelAuthoring.post('/chapters/:chapterId/revisions', async c => {
+	const auth = await authenticate(c, 'write')
+	if (auth instanceof Response) return auth
+	const key = idempotencyKey(c)
+	if (!key) return c.json({ error: 'A valid idempotency key is required', code: 'invalid_idempotency_key' }, 400)
+	const input = await readJsonObjectLimited(c)
+	if (input === 'too_large') return c.json({ error: 'Request is too large', code: 'request_too_large' }, 413)
+	const body = input && normalizedRevisionBody(input)
+	if (!input || body === null) return c.json({ error: 'Invalid revision body', code: 'invalid_revision' }, 400)
+	try {
+		const chapter = await getOwnedChapterById(c.env.abdl_space_db, auth.user.sub, c.req.param('chapterId'))
+		if (!chapter) return c.json({ error: 'Chapter not found', code: 'chapter_not_found' }, 404)
+		const existing = await c.env.abdl_space_db.prepare(`SELECT id, owner_id, chapter_id, body, status, version, create_idempotency_key, created_at, updated_at FROM chapter_revisions WHERE owner_id = ? AND chapter_id = ? AND create_idempotency_key = ?`)
+			.bind(auth.user.sub, chapter.id, key).first<RevisionRow>()
+		if (existing) return existing.body === body ? c.json(safeRevisionResponse(existing)) : c.json({ error: 'Idempotency metadata conflict', code: 'idempotency_conflict' }, 409)
+		const id = crypto.randomUUID()
+		const result = await c.env.abdl_space_db.prepare(`INSERT OR IGNORE INTO chapter_revisions (id, owner_id, chapter_id, body, status, version, create_idempotency_key)
+			SELECT ?, n.author_id, c.id, ?, 'draft', 1, ? FROM novel_chapters c
+			JOIN novel_volumes v ON v.id = c.volume_id AND v.novel_id = c.novel_id JOIN novels n ON n.id = c.novel_id
+			WHERE c.id = ? AND c.deleted_at IS NULL AND v.deleted_at IS NULL AND n.deleted_at IS NULL AND n.status = 'draft' AND n.author_id = ?`)
+			.bind(id, body, key, chapter.id, auth.user.sub).run()
+		if (!result.success) throw new Error('Database operation failed')
+		const created = result.meta.changes === 1 ? await getOwnedRevision(c.env.abdl_space_db, auth.user.sub, id)
+			: await c.env.abdl_space_db.prepare(`SELECT id, owner_id, chapter_id, body, status, version, create_idempotency_key, created_at, updated_at FROM chapter_revisions WHERE owner_id = ? AND chapter_id = ? AND create_idempotency_key = ?`).bind(auth.user.sub, chapter.id, key).first<RevisionRow>()
+		if (!created || created.body !== body) return c.json({ error: 'Revision conflict', code: 'idempotency_conflict' }, 409)
+		return c.json(safeRevisionResponse(created), result.meta.changes === 1 ? 201 : 200)
+	} catch {
+		return c.json({ error: 'Revision creation failed', code: 'create_revision_failed' }, 500)
+	}
+})
+
+novelAuthoring.get('/revisions/:revisionId', async c => {
+	const auth = await authenticate(c, 'read')
+	if (auth instanceof Response) return auth
+	try {
+		const revision = await getOwnedRevision(c.env.abdl_space_db, auth.user.sub, c.req.param('revisionId'))
+		if (!revision) return c.json({ error: 'Revision not found', code: 'revision_not_found' }, 404)
+		return c.json(safeRevisionResponse(revision))
+	} catch {
+		return c.json({ error: 'Revision query failed', code: 'revision_query_failed' }, 500)
+	}
+})
+
+novelAuthoring.put('/revisions/:revisionId/draft', async c => {
+	const auth = await authenticate(c, 'write')
+	if (auth instanceof Response) return auth
+	const key = idempotencyKey(c)
+	if (!key) return c.json({ error: 'A valid idempotency key is required', code: 'invalid_idempotency_key' }, 400)
+	const input = await readJsonObjectLimited(c, MAX_REVISION_JSON_BYTES)
+	if (input === 'too_large') return c.json({ error: 'Request is too large', code: 'request_too_large' }, 413)
+	const body = input && normalizedRevisionBody(input)
+	const baseVersion = input && Number.isSafeInteger(input.base_version) && Number(input.base_version) >= 1 ? Number(input.base_version) : null
+	if (!input || body === null || baseVersion === null) return c.json({ error: 'Invalid draft update', code: 'invalid_draft' }, 400)
+	try {
+		const replay = await c.env.abdl_space_db.prepare(`SELECT owner_id, idempotency_key, revision_id, request_body, request_base_version, response_body, response_chapter_id, response_status, response_version, response_created_at, response_updated_at
+			FROM novel_revision_operations WHERE owner_id = ? AND idempotency_key = ?`).bind(auth.user.sub, key).first<RevisionOperationRow>()
+		if (replay) {
+			if (replay.revision_id !== c.req.param('revisionId') || replay.request_body !== body || replay.request_base_version !== baseVersion) return c.json({ error: 'Idempotency metadata conflict', code: 'idempotency_conflict' }, 409)
+			return c.json({ id: replay.revision_id, chapter_id: replay.response_chapter_id, body: replay.response_body, status: replay.response_status, version: replay.response_version, created_at: replay.response_created_at, updated_at: replay.response_updated_at })
+		}
+
+		const revision = await getOwnedRevision(c.env.abdl_space_db, auth.user.sub, c.req.param('revisionId'))
+		if (!revision) return c.json({ error: 'Revision not found', code: 'revision_not_found' }, 404)
+		if (revision.status !== 'draft') return c.json({ error: 'Revision is frozen', code: 'revision_frozen' }, 409)
+		const updatedAt = Math.floor(Date.now() / 1000)
+		const updateStatement = c.env.abdl_space_db.prepare(`UPDATE chapter_revisions SET body = ?, version = version + 1, updated_at = ?
+			WHERE id = ? AND owner_id = ? AND status = 'draft' AND version = ? AND EXISTS (
+				SELECT 1 FROM novel_chapters c JOIN novel_volumes v ON v.id = c.volume_id AND v.novel_id = c.novel_id JOIN novels n ON n.id = c.novel_id
+				WHERE c.id = chapter_revisions.chapter_id AND c.deleted_at IS NULL AND v.deleted_at IS NULL
+					AND n.deleted_at IS NULL AND n.status = 'draft' AND n.author_id = ?
+			)`).bind(body, updatedAt, revision.id, auth.user.sub, baseVersion, auth.user.sub)
+		const responseVersion = baseVersion + 1
+		const operationStatement = c.env.abdl_space_db.prepare(`INSERT INTO novel_revision_operations
+			(owner_id, idempotency_key, revision_id, request_body, request_base_version, response_body, response_chapter_id, response_status, response_version, response_created_at, response_updated_at)
+			SELECT ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ? WHERE changes() = 1`)
+			.bind(auth.user.sub, key, revision.id, body, baseVersion, body, revision.chapter_id, responseVersion, revision.created_at, updatedAt)
+		let batchResults
+		try {
+			batchResults = await c.env.abdl_space_db.batch([updateStatement, operationStatement])
+		} catch {
+			const winner = await c.env.abdl_space_db.prepare(`SELECT owner_id, idempotency_key, revision_id, request_body, request_base_version, response_body, response_chapter_id, response_status, response_version, response_created_at, response_updated_at FROM novel_revision_operations WHERE owner_id = ? AND idempotency_key = ?`).bind(auth.user.sub, key).first<RevisionOperationRow>()
+			if (winner) {
+				if (winner.revision_id !== revision.id || winner.request_body !== body || winner.request_base_version !== baseVersion) return c.json({ error: 'Idempotency metadata conflict', code: 'idempotency_conflict' }, 409)
+				return c.json({ id: winner.revision_id, chapter_id: winner.response_chapter_id, body: winner.response_body, status: winner.response_status, version: winner.response_version, created_at: winner.response_created_at, updated_at: winner.response_updated_at })
+			}
+			throw new Error('Database operation failed')
+		}
+		const update = batchResults[0]
+		const operation = batchResults[1]
+		if (!update.success || !operation.success) throw new Error('Database operation failed')
+		if (update.meta.changes !== 1 || operation.meta.changes !== 1) {
+			const current = await getOwnedRevision(c.env.abdl_space_db, auth.user.sub, revision.id)
+			if (!current) return c.json({ error: 'Revision not found', code: 'revision_not_found' }, 404)
+			if (current.status !== 'draft') return c.json({ error: 'Revision is frozen', code: 'revision_frozen' }, 409)
+			return c.json({ error: 'Draft changed on another device', code: 'revision_conflict', server_revision: safeRevisionResponse(current) }, 409)
+		}
+		return c.json({ ...safeRevisionResponse(revision), body, version: responseVersion, updated_at: updatedAt })
+	} catch {
+		return c.json({ error: 'Draft update failed', code: 'update_draft_failed' }, 500)
 	}
 })
 

@@ -15,8 +15,11 @@ function createDatabase() {
 	database.exec(readFileSync(new URL('../../migrations/oauth.sql', import.meta.url), 'utf8'))
 	database.exec(readFileSync(new URL('../../migrations/0051_novel_authoring.sql', import.meta.url), 'utf8'))
 	database.exec(readFileSync(new URL('../../migrations/0052_novel_structure.sql', import.meta.url), 'utf8'))
+	database.exec(readFileSync(new URL('../../migrations/0053_novel_revisions.sql', import.meta.url), 'utf8'))
 	const prepare = (sql: string) => ({
 		bind: (...params: unknown[]) => ({
+			_sql: sql,
+			_params: params,
 			async all<T>() {
 				return { success: true, results: database.prepare(sql).all(...params) as T[] }
 			},
@@ -29,7 +32,21 @@ function createDatabase() {
 			},
 		}),
 	})
-	return { database, prepare }
+	const batch = async (statements: Array<{ _sql: string, _params: unknown[] }>) => {
+		database.exec('BEGIN')
+		try {
+			const results = statements.map(statement => {
+				const result = database.prepare(statement._sql).run(...statement._params)
+				return { success: true, meta: { changes: Number(result.changes) } }
+			})
+			database.exec('COMMIT')
+			return results
+		} catch (error) {
+			database.exec('ROLLBACK')
+			throw error
+		}
+	}
+	return { database, prepare, batch }
 }
 
 function createApp() {
@@ -279,10 +296,104 @@ test('0052 independently creates constrained volume and chapter tables', () => {
 	assert.throws(() => database.prepare(`INSERT INTO novel_volumes (id, novel_id, title, sort_order) VALUES ('negative', 'a', '卷', -1)`).run())
 })
 
+test('chapter revisions create idempotently and remain owner isolated', async () => {
+	const db = createDatabase()
+	insertUser(db, 1, 72 * 60 * 60 + 60, true)
+	insertUser(db, 2, 72 * 60 * 60 + 60, true)
+	const { work, volume, chapter } = await createStructure(db, 1, 'revision-create')
+	const body = { body: '第一段\r\n第二段' }
+	const first = await request(db, 1, 'POST', `/chapters/${chapter.id}/revisions`, body, { 'Idempotency-Key': 'create-revision' })
+	const replay = await request(db, 1, 'POST', `/chapters/${chapter.id}/revisions`, body, { 'Idempotency-Key': 'create-revision' })
+	assert.equal(first.status, 201)
+	assert.equal(replay.status, 200)
+	const revision = await first.json() as { id: string, body: string, version: number, status: string, chapter_id: string }
+	assert.equal(revision.id, (await replay.json() as { id: string }).id)
+	assert.equal(revision.body, '第一段\n第二段')
+	assert.equal(revision.version, 1)
+	assert.equal(revision.status, 'draft')
+	assert.equal(revision.chapter_id, chapter.id)
+	assert.equal((await request(db, 2, 'GET', `/revisions/${revision.id}`)).status, 404)
+	assert.equal((await request(db, 1, 'GET', `/revisions/${revision.id}`)).status, 200)
+	assert.equal(work.id.length > 0 && volume.id.length > 0, true)
+})
+
+test('draft updates use atomic base versions and return the server revision on conflict', async () => {
+	const db = createDatabase()
+	insertUser(db, 1, 72 * 60 * 60 + 60, true)
+	const { chapter } = await createStructure(db, 1, 'revision-cas')
+	const created = await request(db, 1, 'POST', `/chapters/${chapter.id}/revisions`, { body: 'v1' }, { 'Idempotency-Key': 'create-cas' })
+	const revision = await created.json() as { id: string }
+
+	const success = await request(db, 1, 'PUT', `/revisions/${revision.id}/draft`, { body: 'v2', base_version: 1 }, { 'Idempotency-Key': 'put-v2' })
+	assert.equal(success.status, 200)
+	assert.equal((await success.json() as { version: number, body: string }).version, 2)
+	const conflict = await request(db, 1, 'PUT', `/revisions/${revision.id}/draft`, { body: 'stale', base_version: 1 }, { 'Idempotency-Key': 'stale-put' })
+	assert.equal(conflict.status, 409)
+	const conflictBody = await conflict.json() as { code: string, server_revision: { body: string, version: number } }
+	assert.equal(conflictBody.code, 'revision_conflict')
+	assert.deepEqual(conflictBody.server_revision, { id: revision.id, chapter_id: chapter.id, body: 'v2', status: 'draft', version: 2, created_at: conflictBody.server_revision.created_at, updated_at: conflictBody.server_revision.updated_at })
+	const stored = db.database.prepare(`SELECT body, version FROM chapter_revisions WHERE id = ?`).get(revision.id)!
+	assert.equal(stored.body, 'v2')
+	assert.equal(stored.version, 2)
+})
+
+test('successful draft retries reuse their original response instead of becoming false conflicts', async () => {
+	const db = createDatabase()
+	insertUser(db, 1, 72 * 60 * 60 + 60, true)
+	const { chapter } = await createStructure(db, 1, 'revision-idempotency')
+	const revision = await (await request(db, 1, 'POST', `/chapters/${chapter.id}/revisions`, { body: 'v1' }, { 'Idempotency-Key': 'create-idem' })).json() as { id: string }
+	const input = { body: 'confirmed', base_version: 1 }
+	const first = await request(db, 1, 'PUT', `/revisions/${revision.id}/draft`, input, { 'Idempotency-Key': 'stable-update' })
+	const replay = await request(db, 1, 'PUT', `/revisions/${revision.id}/draft`, input, { 'Idempotency-Key': 'stable-update' })
+	assert.equal(first.status, 200)
+	assert.equal(replay.status, 200)
+	assert.deepEqual(await replay.json(), await first.json())
+	assert.equal(db.database.prepare(`SELECT version FROM chapter_revisions WHERE id = ?`).get(revision.id)!.version, 2)
+	const changedPayload = await request(db, 1, 'PUT', `/revisions/${revision.id}/draft`, { body: 'different', base_version: 1 }, { 'Idempotency-Key': 'stable-update' })
+	assert.equal(changedPayload.status, 409)
+	assert.equal((await changedPayload.json() as { code: string }).code, 'idempotency_conflict')
+})
+
+test('only one concurrent writer advances a revision and frozen revisions reject drafts', async () => {
+	const db = createDatabase()
+	insertUser(db, 1, 72 * 60 * 60 + 60, true)
+	const { chapter } = await createStructure(db, 1, 'revision-concurrency')
+	const revision = await (await request(db, 1, 'POST', `/chapters/${chapter.id}/revisions`, { body: 'v1' }, { 'Idempotency-Key': 'create-race' })).json() as { id: string }
+	const [left, right] = await Promise.all([
+		request(db, 1, 'PUT', `/revisions/${revision.id}/draft`, { body: 'left', base_version: 1 }, { 'Idempotency-Key': 'left' }),
+		request(db, 1, 'PUT', `/revisions/${revision.id}/draft`, { body: 'right', base_version: 1 }, { 'Idempotency-Key': 'right' }),
+	])
+	assert.deepEqual([left.status, right.status].sort(), [200, 409])
+	assert.equal(db.database.prepare(`SELECT version FROM chapter_revisions WHERE id = ?`).get(revision.id)!.version, 2)
+	db.database.prepare(`UPDATE chapter_revisions SET status = 'review_pending' WHERE id = ?`).run(revision.id)
+	const frozen = await request(db, 1, 'PUT', `/revisions/${revision.id}/draft`, { body: 'forbidden', base_version: 2 }, { 'Idempotency-Key': 'frozen' })
+	assert.equal(frozen.status, 409)
+	assert.equal((await frozen.json() as { code: string }).code, 'revision_frozen')
+})
+
+test('0053 creates revision and idempotency tables with draft constraints', () => {
+	const database = new DatabaseSync(':memory:')
+	database.exec('PRAGMA foreign_keys = ON;')
+	database.exec(`CREATE TABLE users (id INTEGER PRIMARY KEY);`)
+	database.exec(readFileSync(new URL('../../migrations/0051_novel_authoring.sql', import.meta.url), 'utf8'))
+	database.exec(readFileSync(new URL('../../migrations/0052_novel_structure.sql', import.meta.url), 'utf8'))
+	database.exec(readFileSync(new URL('../../migrations/0053_novel_revisions.sql', import.meta.url), 'utf8'))
+	assert.deepEqual(database.prepare(`PRAGMA table_info(chapter_revisions)`).all().map(row => row.name), ['id', 'owner_id', 'chapter_id', 'body', 'status', 'version', 'create_idempotency_key', 'created_at', 'updated_at'])
+	assert.equal(database.prepare(`PRAGMA foreign_key_list(chapter_revisions)`).all().some(row => row.table === 'novel_chapters'), true)
+	assert.throws(() => database.prepare(`INSERT INTO chapter_revisions (id, chapter_id, body, status, version) VALUES ('bad', 'missing', '', 'unknown', 1)`).run())
+})
+
 async function createWork(db: ReturnType<typeof createDatabase>, sub: number, key: string) {
 	const response = await request(db, sub, 'POST', '/works', { title: key, description: '', category: 'fiction' }, { 'Idempotency-Key': key })
 	assert.equal(response.status, 201)
 	return response.json() as Promise<{ id: string }>
+}
+
+async function createStructure(db: ReturnType<typeof createDatabase>, sub: number, key: string) {
+	const work = await createWork(db, sub, key)
+	const volume = await (await request(db, sub, 'POST', `/works/${work.id}/volumes`, { title: '第一卷' }, { 'Idempotency-Key': `${key}-volume` })).json() as { id: string }
+	const chapter = await (await request(db, sub, 'POST', `/works/${work.id}/volumes/${volume.id}/chapters`, { title: '第一章' }, { 'Idempotency-Key': `${key}-chapter` })).json() as { id: string }
+	return { work, volume, chapter }
 }
 
 function assertEligibility(eligible: boolean, accountAgeEligible: boolean, postEligible: boolean, reason?: string) {
