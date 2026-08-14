@@ -14,6 +14,7 @@ function createDatabase() {
 	database.exec(readFileSync(new URL('../../schemas/schema.sql', import.meta.url), 'utf8'))
 	database.exec(readFileSync(new URL('../../migrations/oauth.sql', import.meta.url), 'utf8'))
 	database.exec(readFileSync(new URL('../../migrations/0051_novel_authoring.sql', import.meta.url), 'utf8'))
+	database.exec(readFileSync(new URL('../../migrations/0052_novel_structure.sql', import.meta.url), 'utf8'))
 	const prepare = (sql: string) => ({
 		bind: (...params: unknown[]) => ({
 			async all<T>() {
@@ -63,7 +64,7 @@ function insertUser(db: ReturnType<typeof createDatabase>, id: number, ageSecond
 
 test('author eligibility requires both 72 hours and an existing post', async () => {
 	const db = createDatabase()
-	insertUser(db, 1, 72 * 60 * 60 - 1, true)
+	insertUser(db, 1, 72 * 60 * 60 - 10, true)
 	insertUser(db, 2, 72 * 60 * 60 + 60, false)
 	insertUser(db, 3, 72 * 60 * 60 + 60, true)
 
@@ -195,6 +196,94 @@ test('work details are owner isolated and never expose cover fields', async () =
 	assert.equal(otherResponse.status, 404)
 	assert.equal(Object.keys(ownerWork).some(key => key.includes('cover')), false)
 })
+
+test('volume and chapter structure is owner isolated, ordered, and idempotent', async () => {
+	const db = createDatabase()
+	insertUser(db, 1, 72 * 60 * 60 + 60, true)
+	insertUser(db, 2, 72 * 60 * 60 + 60, true)
+	const work = await createWork(db, 1, 'structure-work')
+
+	const volume = await request(db, 1, 'POST', `/works/${work.id}/volumes`, { title: '第一卷' }, { 'Idempotency-Key': 'volume-1' })
+	const replay = await request(db, 1, 'POST', `/works/${work.id}/volumes`, { title: '第一卷' }, { 'Idempotency-Key': 'volume-1' })
+	assert.equal(volume.status, 201)
+	assert.equal(replay.status, 200)
+	const volumeBody = await volume.json() as { id: string }
+	assert.equal(volumeBody.id, (await replay.json() as { id: string }).id)
+
+	const chapter = await request(db, 1, 'POST', `/works/${work.id}/volumes/${volumeBody.id}/chapters`, { title: '第一章' }, { 'Idempotency-Key': 'chapter-1' })
+	assert.equal(chapter.status, 201)
+	const structure = await request(db, 1, 'GET', `/works/${work.id}/structure`)
+	const other = await request(db, 2, 'GET', `/works/${work.id}/structure`)
+	const body = await structure.json() as { volumes: Array<{ title: string, chapters: Array<{ title: string }> }> }
+	assert.equal(body.volumes[0].title, '第一卷')
+	assert.equal(body.volumes[0].chapters[0].title, '第一章')
+	assert.equal(other.status, 404)
+})
+
+test('existing draft structure remains editable after eligibility loss but published structure is read only', async () => {
+	const db = createDatabase()
+	insertUser(db, 1, 72 * 60 * 60 + 60, true)
+	const work = await createWork(db, 1, 'eligibility-loss-structure')
+	db.database.prepare('DELETE FROM posts WHERE user_id = 1').run()
+	const allowed = await request(db, 1, 'POST', `/works/${work.id}/volumes`, { title: '资格失效后仍可编辑' }, { 'Idempotency-Key': 'allowed-volume' })
+	assert.equal(allowed.status, 201)
+	db.database.prepare(`UPDATE novels SET status = 'published' WHERE id = ?`).run(work.id)
+	const denied = await request(db, 1, 'POST', `/works/${work.id}/volumes`, { title: '不应创建' }, { 'Idempotency-Key': 'denied-volume' })
+	assert.equal(denied.status, 409)
+	assert.equal((await denied.json() as { code: string }).code, 'work_not_editable')
+})
+
+test('volume and chapter titles and order can update while deletes are soft and safe', async () => {
+	const db = createDatabase()
+	insertUser(db, 1, 72 * 60 * 60 + 60, true)
+	const work = await createWork(db, 1, 'mutate-structure')
+	const volumeResponse = await request(db, 1, 'POST', `/works/${work.id}/volumes`, { title: '旧卷名' }, { 'Idempotency-Key': 'mutate-volume' })
+	const volume = await volumeResponse.json() as { id: string }
+	const chapterResponse = await request(db, 1, 'POST', `/works/${work.id}/volumes/${volume.id}/chapters`, { title: '旧章名' }, { 'Idempotency-Key': 'mutate-chapter' })
+	const chapter = await chapterResponse.json() as { id: string }
+
+	const updatedVolume = await request(db, 1, 'PATCH', `/works/${work.id}/volumes/${volume.id}`, { sort_order: 20 })
+	const renamedVolume = await request(db, 1, 'PATCH', `/works/${work.id}/volumes/${volume.id}`, { title: '新卷名' })
+	const updatedChapter = await request(db, 1, 'PATCH', `/works/${work.id}/volumes/${volume.id}/chapters/${chapter.id}`, { sort_order: 10 })
+	const renamedChapter = await request(db, 1, 'PATCH', `/works/${work.id}/volumes/${volume.id}/chapters/${chapter.id}`, { title: '新章名' })
+	assert.equal(updatedVolume.status, 200)
+	assert.equal(renamedVolume.status, 200)
+	assert.equal(updatedChapter.status, 200)
+	assert.equal(renamedChapter.status, 200)
+	assert.equal((await renamedChapter.json() as { title: string }).title, '新章名')
+	assert.equal((await updatedChapter.json() as { sort_order: number }).sort_order, 10)
+	assert.equal((await updatedVolume.json() as { sort_order: number }).sort_order, 20)
+
+	const nonEmptyDelete = await request(db, 1, 'DELETE', `/works/${work.id}/volumes/${volume.id}`)
+	assert.equal(nonEmptyDelete.status, 409)
+	assert.equal((await nonEmptyDelete.json() as { code: string }).code, 'volume_not_empty')
+	assert.equal((await request(db, 1, 'DELETE', `/works/${work.id}/volumes/${volume.id}/chapters/${chapter.id}`)).status, 200)
+	assert.equal((await request(db, 1, 'DELETE', `/works/${work.id}/volumes/${volume.id}`)).status, 200)
+	const structure = await request(db, 1, 'GET', `/works/${work.id}/structure`)
+	assert.deepEqual((await structure.json() as { volumes: unknown[] }).volumes, [])
+})
+
+test('0052 independently creates constrained volume and chapter tables', () => {
+	const database = new DatabaseSync(':memory:')
+	database.exec('PRAGMA foreign_keys = ON;')
+	database.exec(`CREATE TABLE users (id INTEGER PRIMARY KEY);`)
+	database.exec(readFileSync(new URL('../../migrations/0051_novel_authoring.sql', import.meta.url), 'utf8'))
+	database.exec(readFileSync(new URL('../../migrations/0052_novel_structure.sql', import.meta.url), 'utf8'))
+	assert.deepEqual(database.prepare(`PRAGMA table_info(novel_volumes)`).all().map(row => row.name), ['id', 'novel_id', 'title', 'sort_order', 'idempotency_key', 'created_at', 'updated_at', 'deleted_at'])
+	assert.deepEqual(database.prepare(`PRAGMA table_info(novel_chapters)`).all().map(row => row.name), ['id', 'novel_id', 'volume_id', 'title', 'sort_order', 'idempotency_key', 'created_at', 'updated_at', 'deleted_at'])
+	assert.equal(database.prepare(`PRAGMA foreign_key_list(novel_chapters)`).all().some(row => row.table === 'novel_volumes'), true)
+	database.prepare(`INSERT INTO users (id) VALUES (1), (2)`).run()
+	database.prepare(`INSERT INTO novels (id, author_id, title, category) VALUES ('a', 1, 'A', 'fiction'), ('b', 2, 'B', 'fiction')`).run()
+	database.prepare(`INSERT INTO novel_volumes (id, novel_id, title, sort_order) VALUES ('volume', 'a', '卷', 0)`).run()
+	assert.throws(() => database.prepare(`INSERT INTO novel_chapters (id, novel_id, volume_id, title, sort_order) VALUES ('bad', 'b', 'volume', '章', 0)`).run())
+	assert.throws(() => database.prepare(`INSERT INTO novel_volumes (id, novel_id, title, sort_order) VALUES ('negative', 'a', '卷', -1)`).run())
+})
+
+async function createWork(db: ReturnType<typeof createDatabase>, sub: number, key: string) {
+	const response = await request(db, sub, 'POST', '/works', { title: key, description: '', category: 'fiction' }, { 'Idempotency-Key': key })
+	assert.equal(response.status, 201)
+	return response.json() as Promise<{ id: string }>
+}
 
 function assertEligibility(eligible: boolean, accountAgeEligible: boolean, postEligible: boolean, reason?: string) {
 	return {
