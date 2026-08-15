@@ -204,6 +204,83 @@ CREATE TABLE IF NOT EXISTS novel_revision_operations (
   FOREIGN KEY (owner_id, revision_id) REFERENCES chapter_revisions(owner_id, id) ON DELETE CASCADE
 );
 
+-- 小说 MiMo 审核、评级与申诉管线 (spec S9)
+CREATE TABLE IF NOT EXISTS novel_review_snapshots (
+  id TEXT PRIMARY KEY,
+  owner_id INTEGER NOT NULL,
+  revision_id TEXT NOT NULL,
+  body_snapshot TEXT NOT NULL CHECK (length(body_snapshot) <= 500000),
+  body_bytes INTEGER NOT NULL CHECK (body_bytes >= 0),
+  submitted_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  FOREIGN KEY (owner_id) REFERENCES users(id) ON DELETE CASCADE,
+  FOREIGN KEY (owner_id, revision_id) REFERENCES chapter_revisions(owner_id, id) ON DELETE CASCADE,
+  UNIQUE (owner_id, id)
+);
+CREATE INDEX IF NOT EXISTS idx_review_snapshots_revision
+  ON novel_review_snapshots(revision_id, submitted_at DESC, id);
+
+CREATE TABLE IF NOT EXISTS novel_review_results (
+  id TEXT PRIMARY KEY,
+  owner_id INTEGER NOT NULL,
+  revision_id TEXT NOT NULL,
+  snapshot_id TEXT NOT NULL,
+  violation_flag INTEGER NOT NULL CHECK (violation_flag IN (0, 1)),
+  risk_categories TEXT NOT NULL DEFAULT '[]',
+  rating TEXT NOT NULL CHECK (rating IN ('all_ages', 'suggest_12', 'suggest_15', 'suggest_18')),
+  content_hint TEXT NOT NULL DEFAULT '' CHECK (length(content_hint) <= 500),
+  summary TEXT NOT NULL DEFAULT '' CHECK (length(summary) <= 1000),
+  model_id TEXT NOT NULL DEFAULT '',
+  decided_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  FOREIGN KEY (owner_id) REFERENCES users(id) ON DELETE CASCADE,
+  FOREIGN KEY (owner_id, revision_id) REFERENCES chapter_revisions(owner_id, id) ON DELETE CASCADE,
+  FOREIGN KEY (owner_id, snapshot_id) REFERENCES novel_review_snapshots(owner_id, id) ON DELETE CASCADE,
+  UNIQUE (owner_id, id)
+);
+CREATE INDEX IF NOT EXISTS idx_review_results_revision
+  ON novel_review_results(revision_id, decided_at DESC, id);
+
+CREATE TABLE IF NOT EXISTS novel_review_appeals (
+  id TEXT PRIMARY KEY,
+  owner_id INTEGER NOT NULL,
+  revision_id TEXT NOT NULL,
+  reason TEXT NOT NULL CHECK (length(reason) BETWEEN 1 AND 2000),
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'reviewing', 'approved', 'rejected')),
+  idempotency_key TEXT,
+  decided_by INTEGER,
+  decided_at INTEGER,
+  decision_note TEXT NOT NULL DEFAULT '' CHECK (length(decision_note) <= 1000),
+  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  FOREIGN KEY (owner_id) REFERENCES users(id) ON DELETE CASCADE,
+  FOREIGN KEY (owner_id, revision_id) REFERENCES chapter_revisions(owner_id, id) ON DELETE CASCADE,
+  FOREIGN KEY (decided_by) REFERENCES users(id) ON DELETE SET NULL,
+  UNIQUE (owner_id, id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_review_appeals_idempotency
+  ON novel_review_appeals(revision_id, idempotency_key)
+  WHERE idempotency_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_review_appeals_pending
+  ON novel_review_appeals(status, created_at, id)
+  WHERE status IN ('pending', 'reviewing');
+
+CREATE TABLE IF NOT EXISTS novel_review_audit (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  owner_id INTEGER NOT NULL,
+  revision_id TEXT NOT NULL,
+  actor_id INTEGER NOT NULL,
+  action TEXT NOT NULL CHECK (action IN (
+    'submit', 'auto_approve', 'auto_reject', 'appeal',
+    'human_approve', 'human_reject', 'publish', 'review_kept_pending'
+  )),
+  metadata TEXT NOT NULL DEFAULT '{}',
+  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  FOREIGN KEY (owner_id) REFERENCES users(id) ON DELETE CASCADE,
+  FOREIGN KEY (owner_id, revision_id) REFERENCES chapter_revisions(owner_id, id) ON DELETE CASCADE,
+  FOREIGN KEY (actor_id) REFERENCES users(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_review_audit_revision
+  ON novel_review_audit(revision_id, id);
+
 -- 投票表
 CREATE TABLE IF NOT EXISTS polls (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

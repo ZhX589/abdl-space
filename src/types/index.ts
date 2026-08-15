@@ -371,6 +371,12 @@ export interface Env {
   NOVEL_PRIVATE_COS_REGION: string
   // NBW S2S
   NBW_API_KEY?: string
+  // 小说 MiMo 审核 (spec S9)：仅后端调用，不下发 Android
+  MIMO_ENDPOINT?: string
+  MIMO_API_KEY?: string
+  MIMO_TIMEOUT_MS?: string
+  // 测试可注入的 MiMo 调用器；生产留空时路由构造 WorkerSecretMiMoCaller
+  novel_mimo_caller?: unknown
   // NBW OAuth
   NBW_CLIENT_ID?: string
   NBW_CLIENT_SECRET?: string

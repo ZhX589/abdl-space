@@ -16,6 +16,7 @@ function createDatabase() {
 	database.exec(readFileSync(new URL('../../migrations/0051_novel_authoring.sql', import.meta.url), 'utf8'))
 	database.exec(readFileSync(new URL('../../migrations/0052_novel_structure.sql', import.meta.url), 'utf8'))
 	database.exec(readFileSync(new URL('../../migrations/0053_novel_revisions.sql', import.meta.url), 'utf8'))
+	database.exec(readFileSync(new URL('../../migrations/0054_novel_review_pipeline.sql', import.meta.url), 'utf8'))
 	const prepare = (sql: string) => ({
 		bind: (...params: unknown[]) => ({
 			_sql: sql,
@@ -404,3 +405,261 @@ function assertEligibility(eligible: boolean, accountAgeEligible: boolean, postE
 		reasons: reason ? [reason] : [],
 	}
 }
+
+// === MiMo 审核、评级与申诉 (spec S9 / migration 0054) ===
+
+interface MiMoStub {
+	result?: Record<string, unknown>
+	throwError?: Error
+	delayMs?: number
+	calls: string[]
+}
+
+function makeMiMoStub() {
+	const stub: MiMoStub = { calls: [] }
+	const caller = {
+		async review(body: string) {
+			stub.calls.push(body)
+			if (stub.delayMs) await new Promise(resolve => setTimeout(resolve, stub.delayMs))
+			if (stub.throwError) throw stub.throwError
+			if (stub.result === undefined) throw new Error('MiMo stub not configured')
+			return stub.result
+		},
+	}
+	return { stub, caller }
+}
+
+async function reviewRequest(
+	db: ReturnType<typeof createDatabase>,
+	mimo: unknown,
+	sub: number,
+	method: string,
+	path: string,
+	body?: unknown,
+	headers: Record<string, string> = {},
+) {
+	return createAppWithMiMo().request(`/api/v1/novels/authoring${path}`, {
+		method,
+		headers: {
+			Authorization: await bearer(sub),
+			...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+			...headers,
+		},
+		body: body === undefined ? undefined : JSON.stringify(body),
+	}, { abdl_space_db: db, JWT_SECRET: jwtSecret, novel_mimo_caller: mimo } as never)
+}
+
+function createAppWithMiMo() {
+	const app = new Hono()
+	app.route('/api/v1/novels/authoring', novelAuthoring)
+	return app
+}
+
+async function createDraftRevision(db: ReturnType<typeof createDatabase>, sub: number, key: string, body = '第一章正文内容。') {
+	const { work, volume, chapter } = await createStructure(db, sub, key)
+	const revisionResponse = await (await request(db, sub, 'POST', `/chapters/${chapter.id}/revisions`, { body }, { 'Idempotency-Key': `${key}-rev` })).json() as { id: string, chapter_id: string }
+	return { work, volume, chapter, revision: { id: revisionResponse.id, chapter_id: revisionResponse.chapter_id } }
+}
+
+const COMPLIANT_RESULT = {
+	violation_flag: false,
+	risk_categories: [{ category: 'none', confidence: 0.05 }],
+	rating: 'all_ages',
+	content_hint: '适合所有年龄段',
+	summary: '内容合规',
+}
+const VIOLATION_RESULT = {
+	violation_flag: true,
+	risk_categories: [{ category: 'explicit_content', confidence: 0.97 }],
+	rating: 'suggest_18',
+	content_hint: '包含成内容描写',
+	summary: '过分违规，拒绝发布',
+}
+
+test('0054 creates review pipeline tables with revision foreign keys', () => {
+	const database = new DatabaseSync(':memory:')
+	database.exec('PRAGMA foreign_keys = ON;')
+	database.exec(`CREATE TABLE users (id INTEGER PRIMARY KEY);`)
+	database.exec(`CREATE TABLE novels (id TEXT PRIMARY KEY, author_id INTEGER NOT NULL, title TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', category TEXT NOT NULL, status TEXT NOT NULL, idempotency_key TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, deleted_at INTEGER, FOREIGN KEY (author_id) REFERENCES users(id) ON DELETE CASCADE);`)
+	database.exec(readFileSync(new URL('../../migrations/0051_novel_authoring.sql', import.meta.url), 'utf8'))
+	database.exec(readFileSync(new URL('../../migrations/0052_novel_structure.sql', import.meta.url), 'utf8'))
+	database.exec(readFileSync(new URL('../../migrations/0053_novel_revisions.sql', import.meta.url), 'utf8'))
+	database.exec(readFileSync(new URL('../../migrations/0054_novel_review_pipeline.sql', import.meta.url), 'utf8'))
+	for (const table of ['novel_review_snapshots', 'novel_review_results', 'novel_review_appeals', 'novel_review_audit']) {
+		const row = database.prepare(`SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = ?) AS e`).get(table) as { e: number }
+		assert.equal(row.e, 1)
+	}
+	assert.equal(database.prepare(`PRAGMA foreign_key_list(novel_review_results)`).all().some(row => row.table === 'novel_review_snapshots'), true)
+	assert.throws(() => database.prepare(`INSERT INTO novel_review_results (id, owner_id, revision_id, snapshot_id, violation_flag, rating) VALUES ('r', 1, 'c', 's', 0, 'bogus')`).run())
+})
+
+test('submitting a draft revision with a compliant MiMo result freezes snapshot and approves', async () => {
+	const db = createDatabase()
+	insertUser(db, 1, 72 * 60 * 60 + 60, true)
+	const { stub, caller } = makeMiMoStub()
+	stub.result = COMPLIANT_RESULT
+	const { chapter, revision } = await createDraftRevision(db, 1, 'compliant')
+
+	const response = await reviewRequest(db, caller, 1, 'POST', `/chapters/${chapter.id}/revisions/${revision.id}/submit`, undefined, { 'Idempotency-Key': 'submit-compliant' })
+	assert.equal(response.status, 200)
+	const result = await response.json() as { status: string, rating: string, snapshot_id: string, result_id: string }
+	assert.equal(result.status, 'approved')
+	assert.equal(result.rating, 'all_ages')
+	assert.ok(result.snapshot_id)
+	assert.ok(result.result_id)
+
+	const audit = db.database.prepare(`SELECT action FROM novel_review_audit WHERE revision_id = ? ORDER BY id`).all(revision.id) as { action: string }[]
+	assert.deepEqual(audit.map(row => row.action), ['submit', 'auto_approve'])
+
+	const snapshot = db.database.prepare(`SELECT body_snapshot FROM novel_review_snapshots WHERE revision_id = ?`).get(revision.id) as { body_snapshot: string }
+	assert.equal(snapshot.body_snapshot, '第一章正文内容。')
+	assert.equal(stub.calls.length, 1)
+})
+
+test('submitting with a violation result rejects but keeps the private draft', async () => {
+	const db = createDatabase()
+	insertUser(db, 1, 72 * 60 * 60 + 60, true)
+	const { stub, caller } = makeMiMoStub()
+	stub.result = VIOLATION_RESULT
+	const { chapter, revision } = await createDraftRevision(db, 1, 'violation')
+
+	const response = await reviewRequest(db, caller, 1, 'POST', `/chapters/${chapter.id}/revisions/${revision.id}/submit`, undefined, { 'Idempotency-Key': 'submit-violation' })
+	assert.equal(response.status, 200)
+	const result = await response.json() as { status: string, violation_flag: boolean }
+	assert.equal(result.status, 'rejected')
+	assert.equal(result.violation_flag, true)
+
+	const body = db.database.prepare(`SELECT body, status FROM chapter_revisions WHERE id = ?`).get(revision.id) as { body: string, status: string }
+	assert.equal(body.status, 'rejected')
+	assert.equal(body.body, '第一章正文内容。')
+})
+
+test('MiMo timeout keeps the revision review_pending and never auto-approves', async () => {
+	const db = createDatabase()
+	insertUser(db, 1, 72 * 60 * 60 + 60, true)
+	const { stub, caller } = makeMiMoStub()
+	stub.throwError = new Error('MiMo timeout')
+	const { chapter, revision } = await createDraftRevision(db, 1, 'timeout')
+
+	const response = await reviewRequest(db, caller, 1, 'POST', `/chapters/${chapter.id}/revisions/${revision.id}/submit`, undefined, { 'Idempotency-Key': 'submit-timeout' })
+	assert.equal(response.status, 200)
+	const result = await response.json() as { status: string }
+	assert.equal(result.status, 'review_pending')
+
+	const status = db.database.prepare(`SELECT status FROM chapter_revisions WHERE id = ?`).get(revision.id) as { status: string }
+	assert.equal(status.status, 'review_pending')
+	const resultCount = db.database.prepare(`SELECT COUNT(*) AS c FROM novel_review_results WHERE revision_id = ?`).get(revision.id) as { c: number }
+	assert.equal(resultCount.c, 0)
+	const audit = db.database.prepare(`SELECT action FROM novel_review_audit WHERE revision_id = ? ORDER BY id`).all(revision.id) as { action: string }[]
+	assert.deepEqual(audit.map(row => row.action), ['submit', 'review_kept_pending'])
+})
+
+test('MiMo returning invalid JSON schema keeps the revision review_pending', async () => {
+	const db = createDatabase()
+	insertUser(db, 1, 72 * 60 * 60 + 60, true)
+	const { stub, caller } = makeMiMoStub()
+	stub.result = { unexpected_field: true, rating: 'not_a_valid_rating' }
+	const { chapter, revision } = await createDraftRevision(db, 1, 'invalid')
+
+	const response = await reviewRequest(db, caller, 1, 'POST', `/chapters/${chapter.id}/revisions/${revision.id}/submit`, undefined, { 'Idempotency-Key': 'submit-invalid' })
+	assert.equal(response.status, 200)
+	const result = await response.json() as { status: string }
+	assert.equal(result.status, 'review_pending')
+
+	const status = db.database.prepare(`SELECT status FROM chapter_revisions WHERE id = ?`).get(revision.id) as { status: string }
+	assert.equal(status.status, 'review_pending')
+})
+
+test('submitting a non-draft revision is rejected with 409', async () => {
+	const db = createDatabase()
+	insertUser(db, 1, 72 * 60 * 60 + 60, true)
+	const { stub, caller } = makeMiMoStub()
+	stub.result = COMPLIANT_RESULT
+	const { chapter, revision } = await createDraftRevision(db, 1, 'resubmit')
+
+	const first = await reviewRequest(db, caller, 1, 'POST', `/chapters/${chapter.id}/revisions/${revision.id}/submit`, undefined, { 'Idempotency-Key': 'submit-once' })
+	assert.equal(first.status, 200)
+	assert.equal((await first.json() as { status: string }).status, 'approved')
+
+	const again = await reviewRequest(db, caller, 1, 'POST', `/chapters/${chapter.id}/revisions/${revision.id}/submit`, undefined, { 'Idempotency-Key': 'submit-twice' })
+	assert.equal(again.status, 409)
+})
+
+test('submit replay with the same idempotency key returns the original result without calling MiMo again', async () => {
+	const db = createDatabase()
+	insertUser(db, 1, 72 * 60 * 60 + 60, true)
+	const { stub, caller } = makeMiMoStub()
+	stub.result = COMPLIANT_RESULT
+	const { chapter, revision } = await createDraftRevision(db, 1, 'idempotent')
+
+	const first = await reviewRequest(db, caller, 1, 'POST', `/chapters/${chapter.id}/revisions/${revision.id}/submit`, undefined, { 'Idempotency-Key': 'submit-stable' })
+	const replay = await reviewRequest(db, caller, 1, 'POST', `/chapters/${chapter.id}/revisions/${revision.id}/submit`, undefined, { 'Idempotency-Key': 'submit-stable' })
+	assert.equal(first.status, 200)
+	assert.equal(replay.status, 200)
+	assert.equal((await first.json() as { result_id: string }).result_id, (await replay.json() as { result_id: string }).result_id)
+	assert.equal(stub.calls.length, 1)
+})
+
+test('cross-owner submit is forbidden (returns 404 to avoid leaking existence)', async () => {
+	const db = createDatabase()
+	insertUser(db, 1, 72 * 60 * 60 + 60, true)
+	insertUser(db, 2, 72 * 60 * 60 + 60, true)
+	const { stub, caller } = makeMiMoStub()
+	stub.result = COMPLIANT_RESULT
+	const { chapter, revision } = await createDraftRevision(db, 1, 'owner')
+
+	const intruder = await reviewRequest(db, caller, 2, 'POST', `/chapters/${chapter.id}/revisions/${revision.id}/submit`, undefined, { 'Idempotency-Key': 'intruder' })
+	assert.equal(intruder.status, 404)
+	assert.equal(stub.calls.length, 0)
+})
+
+test('GET review returns the snapshot rating and content hint for the owner', async () => {
+	const db = createDatabase()
+	insertUser(db, 1, 72 * 60 * 60 + 60, true)
+	const { stub, caller } = makeMiMoStub()
+	stub.result = COMPLIANT_RESULT
+	const { chapter, revision } = await createDraftRevision(db, 1, 'getreview')
+	await reviewRequest(db, caller, 1, 'POST', `/chapters/${chapter.id}/revisions/${revision.id}/submit`, undefined, { 'Idempotency-Key': 'submit-getreview' })
+
+	const response = await reviewRequest(db, caller, 1, 'GET', `/revisions/${revision.id}/review`)
+	assert.equal(response.status, 200)
+	const result = await response.json() as { status: string, rating: string, content_hint: string, violation_flag: boolean }
+	assert.equal(result.status, 'approved')
+	assert.equal(result.rating, 'all_ages')
+	assert.equal(result.content_hint, '适合所有年龄段')
+	assert.equal(result.violation_flag, false)
+})
+
+test('a rejected revision can be appealed into a human queue', async () => {
+	const db = createDatabase()
+	insertUser(db, 1, 72 * 60 * 60 + 60, true)
+	const { stub, caller } = makeMiMoStub()
+	stub.result = VIOLATION_RESULT
+	const { revision } = await createDraftRevision(db, 1, 'appeal')
+	await reviewRequest(db, caller, 1, 'POST', `/chapters/${revision.chapter_id}/revisions/${revision.id}/submit`, undefined, { 'Idempotency-Key': 'submit-appeal' })
+
+	const appeal = await reviewRequest(db, caller, 1, 'POST', `/revisions/${revision.id}/appeals`, { reason: '我认为误判，请人工复核。' }, { 'Idempotency-Key': 'appeal-1' })
+	assert.equal(appeal.status, 201)
+	const appealResult = await appeal.json() as { id: string, status: string }
+	assert.equal(appealResult.status, 'pending')
+
+	const row = db.database.prepare(`SELECT status, reason, decided_at FROM novel_review_appeals WHERE revision_id = ?`).get(revision.id) as { status: string, reason: string, decided_at: number | null }
+	assert.equal(row.status, 'pending')
+	assert.equal(row.reason, '我认为误判，请人工复核。')
+	assert.equal(row.decided_at, null)
+
+	const audit = db.database.prepare(`SELECT action FROM novel_review_audit WHERE revision_id = ? ORDER BY id`).all(revision.id) as { action: string }[]
+	assert.ok(audit.some(row => row.action === 'appeal'))
+})
+
+test('appealing a non-rejected revision is rejected with 409', async () => {
+	const db = createDatabase()
+	insertUser(db, 1, 72 * 60 * 60 + 60, true)
+	const { stub, caller } = makeMiMoStub()
+	stub.result = COMPLIANT_RESULT
+	const { revision } = await createDraftRevision(db, 1, 'badappeal')
+	await reviewRequest(db, caller, 1, 'POST', `/chapters/${revision.chapter_id}/revisions/${revision.id}/submit`, undefined, { 'Idempotency-Key': 'submit-badappeal' })
+
+	const appeal = await reviewRequest(db, caller, 1, 'POST', `/revisions/${revision.id}/appeals`, { reason: '想申诉' }, { 'Idempotency-Key': 'badappeal-1' })
+	assert.equal(appeal.status, 409)
+})
