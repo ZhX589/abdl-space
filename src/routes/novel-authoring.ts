@@ -787,6 +787,8 @@ novelAuthoring.post('/chapters/:chapterId/revisions/:revisionId/submit', async c
 	const revision = await getOwnedRevision(db, auth.user.sub, c.req.param('revisionId'))
 	if (!revision) return c.json({ error: 'Revision not found', code: 'revision_not_found' }, 404)
 	if (revision.chapter_id !== c.req.param('chapterId')) return c.json({ error: 'Revision does not belong to this chapter', code: 'chapter_mismatch' }, 400)
+	const eligibility = await getEligibility(db, auth.user.sub)
+	if (!eligibility?.eligible) return c.json({ error: 'Author is no longer eligible to submit for publishing', code: 'author_ineligible' }, 403)
 
 	const submitOp = await db.prepare(`SELECT revision_id, response_status, response_body FROM novel_revision_operations WHERE owner_id = ? AND idempotency_key = ?`)
 		.bind(auth.user.sub, key).first<{ revision_id: string, response_status: string, response_body: string }>()
@@ -885,6 +887,74 @@ novelAuthoring.post('/revisions/:revisionId/appeals', async c => {
 
 	await db.batch([appealInsert, appealAudit])
 	return c.json({ id: appealId, revision_id: revision.id, status: 'pending' }, 201)
+})
+
+novelAuthoring.post('/revisions/:revisionId/publish', async c => {
+	const auth = await authenticate(c, 'write')
+	if (auth instanceof Response) return auth
+	const key = idempotencyKey(c)
+	if (!key) return c.json({ error: 'A valid idempotency key is required', code: 'invalid_idempotency_key' }, 400)
+	const db = c.env.abdl_space_db
+	const revision = await getOwnedRevision(db, auth.user.sub, c.req.param('revisionId'))
+	if (!revision) return c.json({ error: 'Revision not found', code: 'revision_not_found' }, 404)
+
+	const existing = await db.prepare(`SELECT revision_id, response_body FROM novel_revision_operations WHERE owner_id = ? AND idempotency_key = ?`)
+		.bind(auth.user.sub, key).first<{ revision_id: string, response_body: string }>()
+	if (existing && existing.revision_id === revision.id) {
+		return new Response(existing.response_body, { status: 200, headers: { 'Content-Type': 'application/json' } })
+	}
+	if (existing && existing.revision_id !== revision.id) return c.json({ error: 'Idempotency metadata conflict', code: 'idempotency_conflict' }, 409)
+
+	if (revision.status !== 'approved') return c.json({ error: 'Only approved revisions can be published', code: 'revision_not_approved' }, 409)
+
+	const now = Math.floor(Date.now() / 1000)
+	const supersedeOld = db.prepare(`UPDATE chapter_revisions SET status = 'superseded', updated_at = ?
+		WHERE chapter_id = ? AND owner_id = ? AND status = 'published' AND id != ?`)
+		.bind(now, revision.chapter_id, auth.user.sub, revision.id)
+	const publishNew = db.prepare(`UPDATE chapter_revisions SET status = 'published', updated_at = ?
+		WHERE id = ? AND owner_id = ? AND status = 'approved'`)
+		.bind(now, revision.id, auth.user.sub)
+	const publishAudit = db.prepare(`INSERT INTO novel_review_audit (owner_id, revision_id, actor_id, action, metadata)
+		VALUES (?, ?, ?, 'publish', ?)`).bind(auth.user.sub, revision.id, auth.user.sub, JSON.stringify({ idempotency_key: key }))
+	const responseBody = JSON.stringify({ id: revision.id, chapter_id: revision.chapter_id, status: 'published', published_revision_id: revision.id })
+	const opRecord = db.prepare(`INSERT INTO novel_revision_operations (owner_id, idempotency_key, revision_id, request_body, request_base_version, response_body, response_chapter_id, response_status, response_version, response_created_at, response_updated_at)
+		VALUES (?, ?, ?, '', 0, ?, ?, 'published', ?, ?, ?)`)
+		.bind(auth.user.sub, key, revision.id, responseBody, revision.chapter_id, revision.version, revision.created_at, now)
+
+	const results = await db.batch([supersedeOld, publishNew, publishAudit, opRecord])
+	const publishChange = results[1]
+	if (!publishChange.success || publishChange.meta.changes !== 1) {
+		const current = await getOwnedRevision(db, auth.user.sub, revision.id)
+		if (!current) return c.json({ error: 'Revision not found', code: 'revision_not_found' }, 404)
+		if (current.status === 'published') return c.json({ id: revision.id, chapter_id: revision.chapter_id, status: 'published', published_revision_id: revision.id })
+		return c.json({ error: 'Revision is no longer approved', code: 'revision_not_approved' }, 409)
+	}
+	return new Response(responseBody, { status: 200, headers: { 'Content-Type': 'application/json' } })
+})
+
+novelAuthoring.get('/chapters/:chapterId/published', async c => {
+	const auth = await authenticate(c, 'read')
+	if (auth instanceof Response) return auth
+	const db = c.env.abdl_space_db
+	const chapter = await getOwnedChapterById(db, auth.user.sub, c.req.param('chapterId'))
+	if (!chapter) return c.json({ error: 'Chapter not found', code: 'chapter_not_found' }, 404)
+	const published = await db.prepare(`SELECT r.id, r.chapter_id, r.body, r.version, r.updated_at, res.rating, res.content_hint
+		FROM chapter_revisions r LEFT JOIN novel_review_results res ON res.revision_id = r.id
+		WHERE r.owner_id = ? AND r.chapter_id = ? AND r.status = 'published'
+		ORDER BY res.decided_at DESC, r.id LIMIT 1`)
+		.bind(auth.user.sub, c.req.param('chapterId')).first<{ id: string, chapter_id: string, body: string, version: number, updated_at: number, rating: string | null, content_hint: string | null }>()
+	if (!published) return c.json({ error: 'No published revision for this chapter', code: 'not_published' }, 404)
+	return c.json({
+		revision_id: published.id,
+		chapter_id: published.chapter_id,
+		body: published.body,
+		status: 'published',
+		version: published.version,
+		updated_at: published.updated_at,
+		rating: published.rating,
+		rating_label: published.rating ? ratingLabel(published.rating) : null,
+		content_hint: published.content_hint,
+	})
 })
 
 export default novelAuthoring

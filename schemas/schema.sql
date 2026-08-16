@@ -281,6 +281,10 @@ CREATE TABLE IF NOT EXISTS novel_review_audit (
 CREATE INDEX IF NOT EXISTS idx_review_audit_revision
   ON novel_review_audit(revision_id, id);
 
+-- 小说评级原子发布 (spec S9/S14)：每章至多一条 published revision
+CREATE UNIQUE INDEX IF NOT EXISTS idx_chapter_revisions_single_published
+  ON chapter_revisions(chapter_id) WHERE status = 'published';
+
 -- 投票表
 CREATE TABLE IF NOT EXISTS polls (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
