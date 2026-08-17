@@ -778,6 +778,39 @@ async function getOwnedReviewResult(db: D1Database, ownerRevisionId: { owner_id:
 		.bind(ownerRevisionId.owner_id, ownerRevisionId.id).first<ReviewResultRow>()
 }
 
+async function requireAdmin(c: Context<AppType>, auth: MastodonAuthResult): Promise<Response | null> {
+	const current = await c.env.abdl_space_db.prepare(`SELECT role FROM users WHERE id = ?`).bind(auth.user.sub).first<{ role: string }>()
+	return current?.role === 'admin' ? null : c.json({ error: 'Admin access required', code: 'admin_required' }, 403)
+}
+
+interface AppealRow {
+	id: string
+	owner_id: number
+	revision_id: string
+	reason: string
+	status: string
+	decided_by: number | null
+	decided_at: number | null
+	decision_note: string
+	created_at: number
+	updated_at: number
+	claimed_by: number | null
+}
+
+async function getAppeal(db: D1Database, appealId: string) {
+	return db.prepare(`SELECT a.id, a.owner_id, a.revision_id, a.reason, a.status, a.decided_by, a.decided_at, a.decision_note, a.created_at, a.updated_at, c.admin_id AS claimed_by
+		FROM novel_review_appeals a LEFT JOIN novel_review_appeal_claims c ON c.appeal_id = a.id WHERE a.id = ?`)
+		.bind(appealId).first<AppealRow>()
+}
+
+async function replayAdminOperation(db: D1Database, adminId: number, key: string, appealId: string, action: string) {
+	const replay = await db.prepare(`SELECT appeal_id, action, response_body FROM novel_review_admin_operations WHERE admin_id = ? AND idempotency_key = ?`)
+		.bind(adminId, key).first<{ appeal_id: string, action: string, response_body: string }>()
+	if (!replay) return null
+	if (replay.appeal_id !== appealId || replay.action !== action) return 'conflict' as const
+	return replay.response_body
+}
+
 novelAuthoring.post('/chapters/:chapterId/revisions/:revisionId/submit', async c => {
 	const auth = await authenticate(c, 'write')
 	if (auth instanceof Response) return auth
@@ -887,6 +920,89 @@ novelAuthoring.post('/revisions/:revisionId/appeals', async c => {
 
 	await db.batch([appealInsert, appealAudit])
 	return c.json({ id: appealId, revision_id: revision.id, status: 'pending' }, 201)
+})
+
+novelAuthoring.get('/admin/appeals', async c => {
+	const auth = await authenticate(c, 'read')
+	if (auth instanceof Response) return auth
+	const denied = await requireAdmin(c, auth)
+	if (denied) return denied
+	const rows = await c.env.abdl_space_db.prepare(`SELECT a.id, a.reason, a.status
+		FROM novel_review_appeals a WHERE a.status IN ('pending', 'reviewing') ORDER BY a.created_at, a.id LIMIT 100`).bind().all<{ id: string, reason: string, status: string }>()
+	return c.json({ items: rows.results })
+})
+
+novelAuthoring.post('/admin/appeals/:appealId/claim', async c => {
+	const auth = await authenticate(c, 'write')
+	if (auth instanceof Response) return auth
+	const denied = await requireAdmin(c, auth)
+	if (denied) return denied
+	const key = idempotencyKey(c)
+	if (!key) return c.json({ error: 'A valid idempotency key is required', code: 'invalid_idempotency_key' }, 400)
+	const db = c.env.abdl_space_db
+	const appealId = c.req.param('appealId')
+	const replay = await replayAdminOperation(db, auth.user.sub, key, appealId, 'claim')
+	if (replay === 'conflict') return c.json({ error: 'Idempotency metadata conflict', code: 'idempotency_conflict' }, 409)
+	if (replay) return new Response(replay, { status: 200, headers: { 'Content-Type': 'application/json' } })
+	const appeal = await getAppeal(db, appealId)
+	if (!appeal) return c.json({ error: 'Appeal not found', code: 'appeal_not_found' }, 404)
+	if (appeal.status === 'reviewing' && appeal.claimed_by === auth.user.sub) {
+		const body = JSON.stringify({ id: appeal.id, status: 'reviewing' })
+		await db.prepare(`INSERT INTO novel_review_admin_operations (admin_id, idempotency_key, appeal_id, action, response_body) VALUES (?, ?, ?, 'claim', ?)`)
+			.bind(auth.user.sub, key, appeal.id, body).run()
+		return new Response(body, { status: 200, headers: { 'Content-Type': 'application/json' } })
+	}
+	if (appeal.status !== 'pending' || appeal.claimed_by !== null) return c.json({ error: 'Appeal is already claimed or resolved', code: 'appeal_unavailable' }, 409)
+	const now = Math.floor(Date.now() / 1000)
+	const body = JSON.stringify({ id: appeal.id, status: 'reviewing' })
+	const claim = db.prepare(`INSERT INTO novel_review_appeal_claims (appeal_id, admin_id, claimed_at) VALUES (?, ?, ?)`).bind(appeal.id, auth.user.sub, now)
+	const state = db.prepare(`UPDATE novel_review_appeals SET status = 'reviewing', updated_at = ? WHERE id = ? AND status = 'pending'`).bind(now, appeal.id)
+	const op = db.prepare(`INSERT INTO novel_review_admin_operations (admin_id, idempotency_key, appeal_id, action, response_body) VALUES (?, ?, ?, 'claim', ?)`)
+		.bind(auth.user.sub, key, appeal.id, body)
+	const results = await db.batch([claim, state, op])
+	if (!results[1].success || results[1].meta.changes !== 1) return c.json({ error: 'Appeal is already claimed or resolved', code: 'appeal_unavailable' }, 409)
+	return new Response(body, { status: 200, headers: { 'Content-Type': 'application/json' } })
+})
+
+novelAuthoring.post('/admin/appeals/:appealId/decision', async c => {
+	const auth = await authenticate(c, 'write')
+	if (auth instanceof Response) return auth
+	const denied = await requireAdmin(c, auth)
+	if (denied) return denied
+	const key = idempotencyKey(c)
+	if (!key) return c.json({ error: 'A valid idempotency key is required', code: 'invalid_idempotency_key' }, 400)
+	const input = await readJsonObjectLimited(c)
+	if (input === 'too_large') return c.json({ error: 'Request is too large', code: 'request_too_large' }, 413)
+	const decision = input?.decision
+	const note = typeof input?.note === 'string' ? input.note.trim() : ''
+	if ((decision !== 'approve' && decision !== 'reject') || note.length > 1000) return c.json({ error: 'Invalid appeal decision', code: 'invalid_decision' }, 400)
+	const db = c.env.abdl_space_db
+	const appealId = c.req.param('appealId')
+	const action = decision === 'approve' ? 'approve' : 'reject'
+	const replay = await replayAdminOperation(db, auth.user.sub, key, appealId, action)
+	if (replay === 'conflict') return c.json({ error: 'Idempotency metadata conflict', code: 'idempotency_conflict' }, 409)
+	if (replay) return new Response(replay, { status: 200, headers: { 'Content-Type': 'application/json' } })
+	const appeal = await getAppeal(db, appealId)
+	if (!appeal) return c.json({ error: 'Appeal not found', code: 'appeal_not_found' }, 404)
+	if (appeal.status !== 'reviewing' || appeal.claimed_by !== auth.user.sub) return c.json({ error: 'Appeal must be claimed by this administrator', code: 'appeal_not_claimed' }, 409)
+	const revision = await db.prepare(`SELECT id, status FROM chapter_revisions WHERE id = ? AND owner_id = ?`).bind(appeal.revision_id, appeal.owner_id).first<{ id: string, status: string }>()
+	if (!revision || revision.status !== 'rejected') return c.json({ error: 'Revision is no longer rejected', code: 'revision_not_rejected' }, 409)
+	const now = Math.floor(Date.now() / 1000)
+	const nextRevisionStatus = decision === 'approve' ? 'approved' : 'rejected'
+	const nextAppealStatus = decision === 'approve' ? 'approved' : 'rejected'
+	const auditAction = decision === 'approve' ? 'human_approve' : 'human_reject'
+	const body = JSON.stringify({ id: appeal.id, status: nextAppealStatus, revision_status: nextRevisionStatus })
+	const revisionUpdate = db.prepare(`UPDATE chapter_revisions SET status = ?, updated_at = ? WHERE id = ? AND owner_id = ? AND status = 'rejected'`)
+		.bind(nextRevisionStatus, now, appeal.revision_id, appeal.owner_id)
+	const appealUpdate = db.prepare(`UPDATE novel_review_appeals SET status = ?, decided_by = ?, decided_at = ?, decision_note = ?, updated_at = ? WHERE id = ? AND status = 'reviewing'`)
+		.bind(nextAppealStatus, auth.user.sub, now, note, now, appeal.id)
+	const audit = db.prepare(`INSERT INTO novel_review_audit (owner_id, revision_id, actor_id, action, metadata) VALUES (?, ?, ?, ?, ?)`)
+		.bind(appeal.owner_id, appeal.revision_id, auth.user.sub, auditAction, JSON.stringify({ appeal_id: appeal.id, decision_note: note }))
+	const op = db.prepare(`INSERT INTO novel_review_admin_operations (admin_id, idempotency_key, appeal_id, action, response_body) VALUES (?, ?, ?, ?, ?)`)
+		.bind(auth.user.sub, key, appeal.id, action, body)
+	const results = await db.batch([revisionUpdate, appealUpdate, audit, op])
+	if (!results[0].success || results[0].meta.changes !== 1 || !results[1].success || results[1].meta.changes !== 1) return c.json({ error: 'Appeal changed before decision', code: 'appeal_changed' }, 409)
+	return new Response(body, { status: 200, headers: { 'Content-Type': 'application/json' } })
 })
 
 novelAuthoring.post('/revisions/:revisionId/publish', async c => {

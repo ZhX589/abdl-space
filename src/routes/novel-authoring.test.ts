@@ -18,6 +18,7 @@ function createDatabase() {
 	database.exec(readFileSync(new URL('../../migrations/0053_novel_revisions.sql', import.meta.url), 'utf8'))
 	database.exec(readFileSync(new URL('../../migrations/0054_novel_review_pipeline.sql', import.meta.url), 'utf8'))
 	database.exec(readFileSync(new URL('../../migrations/0055_novel_publish.sql', import.meta.url), 'utf8'))
+	database.exec(readFileSync(new URL('../../migrations/0056_novel_appeal_adjudication.sql', import.meta.url), 'utf8'))
 	const prepare = (sql: string) => ({
 		bind: (...params: unknown[]) => ({
 			_sql: sql,
@@ -57,8 +58,8 @@ function createApp() {
 	return app
 }
 
-async function bearer(sub: number) {
-	return `Bearer ${await signJWT({ sub, username: `user${sub}`, email: `user${sub}@example.test`, role: 'user' }, jwtSecret)}`
+async function bearer(sub: number, role = 'user') {
+	return `Bearer ${await signJWT({ sub, username: `user${sub}`, email: `user${sub}@example.test`, role }, jwtSecret)}`
 }
 
 async function request(db: ReturnType<typeof createDatabase>, sub: number, method: string, path: string, body?: unknown, headers: Record<string, string> = {}) {
@@ -73,11 +74,23 @@ async function request(db: ReturnType<typeof createDatabase>, sub: number, metho
 	}, { abdl_space_db: db, JWT_SECRET: jwtSecret } as never)
 }
 
-function insertUser(db: ReturnType<typeof createDatabase>, id: number, ageSeconds: number, withPost: boolean) {
+async function adminRequest(db: ReturnType<typeof createDatabase>, sub: number, method: string, path: string, body?: unknown, headers: Record<string, string> = {}) {
+	return createApp().request(`/api/v1/novels/authoring${path}`, {
+		method,
+		headers: {
+			Authorization: await bearer(sub, 'admin'),
+			...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+			...headers,
+		},
+		body: body === undefined ? undefined : JSON.stringify(body),
+	}, { abdl_space_db: db, JWT_SECRET: jwtSecret } as never)
+}
+
+function insertUser(db: ReturnType<typeof createDatabase>, id: number, ageSeconds: number, withPost: boolean, role = 'user') {
 	db.database.prepare(`
-		INSERT INTO users (id, email, password_hash, username, created_at)
-		VALUES (?, ?, 'hash', ?, datetime('now', ?))
-	`).run(id, `user${id}@example.test`, `user${id}`, `-${ageSeconds} seconds`)
+		INSERT INTO users (id, email, password_hash, username, role, created_at)
+		VALUES (?, ?, 'hash', ?, ?, datetime('now', ?))
+	`).run(id, `user${id}@example.test`, `user${id}`, role, `-${ageSeconds} seconds`)
 	if (withPost) db.database.prepare(`INSERT INTO posts (user_id, content) VALUES (?, 'qualifying post')`).run(id)
 }
 
@@ -802,4 +815,84 @@ test('submit rechecks publish eligibility: an author who lost eligibility cannot
 	const row = db.database.prepare(`SELECT status FROM chapter_revisions WHERE id = ?`).get(revision.id) as { status: string }
 	assert.equal(row.status, 'draft')
 	assert.equal(stub.calls.length, 0)
+})
+
+// === 人工申诉裁决 (spec S9) ===
+
+async function createPendingAppeal(db: ReturnType<typeof createDatabase>, sub: number, key: string) {
+	const { stub, caller } = makeMiMoStub()
+	stub.result = VIOLATION_RESULT
+	const { revision } = await createDraftRevision(db, sub, key)
+	const submit = await reviewRequest(db, caller, sub, 'POST', `/chapters/${revision.chapter_id}/revisions/${revision.id}/submit`, undefined, { 'Idempotency-Key': `${key}-submit` })
+	assert.equal((await submit.json() as { status: string }).status, 'rejected')
+	const appeal = await reviewRequest(db, caller, sub, 'POST', `/revisions/${revision.id}/appeals`, { reason: '请人工复核。' }, { 'Idempotency-Key': `${key}-appeal` })
+	assert.equal(appeal.status, 201)
+	return { revision, appeal: await appeal.json() as { id: string, status: string } }
+}
+
+test('only administrators can view pending appeals and the queue excludes resolved appeals', async () => {
+	const db = createDatabase()
+	insertUser(db, 1, 72 * 60 * 60 + 60, true)
+	insertUser(db, 9, 72 * 60 * 60 + 60, true, 'admin')
+	const { appeal } = await createPendingAppeal(db, 1, 'appeal-queue')
+
+	const denied = await request(db, 1, 'GET', '/admin/appeals')
+	assert.equal(denied.status, 403)
+	const queue = await adminRequest(db, 9, 'GET', '/admin/appeals')
+	assert.equal(queue.status, 200)
+	const items = (await queue.json() as { items: Array<{ id: string, status: string, reason: string }> }).items
+	assert.deepEqual(items.map(item => ({ ...item })), [{ id: appeal.id, status: 'pending', reason: '请人工复核。' }])
+})
+
+test('an administrator can claim and approve a pending appeal, making its revision publishable', async () => {
+	const db = createDatabase()
+	insertUser(db, 1, 72 * 60 * 60 + 60, true)
+	insertUser(db, 9, 72 * 60 * 60 + 60, true, 'admin')
+	const { revision, appeal } = await createPendingAppeal(db, 1, 'appeal-approve')
+
+	const claim = await adminRequest(db, 9, 'POST', `/admin/appeals/${appeal.id}/claim`, undefined, { 'Idempotency-Key': 'claim-approve' })
+	assert.equal(claim.status, 200)
+	assert.equal((await claim.json() as { status: string }).status, 'reviewing')
+	const decision = await adminRequest(db, 9, 'POST', `/admin/appeals/${appeal.id}/decision`, { decision: 'approve', note: '人工确认可发布。' }, { 'Idempotency-Key': 'decision-approve' })
+	assert.equal(decision.status, 200)
+	assert.equal((await decision.json() as { status: string, revision_status: string }).status, 'approved')
+
+	const revisionRow = db.database.prepare(`SELECT status FROM chapter_revisions WHERE id = ?`).get(revision.id) as { status: string }
+	assert.equal(revisionRow.status, 'approved')
+	const appealRow = db.database.prepare(`SELECT status, decided_by, decision_note FROM novel_review_appeals WHERE id = ?`).get(appeal.id) as { status: string, decided_by: number, decision_note: string }
+	assert.deepEqual({ ...appealRow }, { status: 'approved', decided_by: 9, decision_note: '人工确认可发布。' })
+	const actions = db.database.prepare(`SELECT action FROM novel_review_audit WHERE revision_id = ? ORDER BY id`).all(revision.id) as { action: string }[]
+	assert.ok(actions.some(row => row.action === 'human_approve'))
+})
+
+test('an administrator can reject an appeal but cannot decide an unclaimed appeal', async () => {
+	const db = createDatabase()
+	insertUser(db, 1, 72 * 60 * 60 + 60, true)
+	insertUser(db, 9, 72 * 60 * 60 + 60, true, 'admin')
+	const { revision, appeal } = await createPendingAppeal(db, 1, 'appeal-reject')
+
+	const premature = await adminRequest(db, 9, 'POST', `/admin/appeals/${appeal.id}/decision`, { decision: 'reject', note: '尚未领取。' }, { 'Idempotency-Key': 'decision-premature' })
+	assert.equal(premature.status, 409)
+	await adminRequest(db, 9, 'POST', `/admin/appeals/${appeal.id}/claim`, undefined, { 'Idempotency-Key': 'claim-reject' })
+	const decision = await adminRequest(db, 9, 'POST', `/admin/appeals/${appeal.id}/decision`, { decision: 'reject', note: '维持原判。' }, { 'Idempotency-Key': 'decision-reject' })
+	assert.equal(decision.status, 200)
+	assert.equal((await decision.json() as { status: string, revision_status: string }).status, 'rejected')
+	const revisionRow = db.database.prepare(`SELECT status FROM chapter_revisions WHERE id = ?`).get(revision.id) as { status: string }
+	assert.equal(revisionRow.status, 'rejected')
+	const actions = db.database.prepare(`SELECT action FROM novel_review_audit WHERE revision_id = ? ORDER BY id`).all(revision.id) as { action: string }[]
+	assert.ok(actions.some(row => row.action === 'human_reject'))
+})
+
+test('appeal claim and decision are owner-fenced and idempotent', async () => {
+	const db = createDatabase()
+	insertUser(db, 1, 72 * 60 * 60 + 60, true)
+	insertUser(db, 9, 72 * 60 * 60 + 60, true, 'admin')
+	insertUser(db, 10, 72 * 60 * 60 + 60, true, 'admin')
+	const { appeal } = await createPendingAppeal(db, 1, 'appeal-fence')
+	const firstClaim = await adminRequest(db, 9, 'POST', `/admin/appeals/${appeal.id}/claim`, undefined, { 'Idempotency-Key': 'claim-stable' })
+	const replay = await adminRequest(db, 9, 'POST', `/admin/appeals/${appeal.id}/claim`, undefined, { 'Idempotency-Key': 'claim-stable' })
+	assert.equal(firstClaim.status, 200)
+	assert.equal(replay.status, 200)
+	const otherAdmin = await adminRequest(db, 10, 'POST', `/admin/appeals/${appeal.id}/claim`, undefined, { 'Idempotency-Key': 'claim-other' })
+	assert.equal(otherAdmin.status, 409)
 })
