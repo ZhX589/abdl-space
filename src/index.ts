@@ -49,6 +49,7 @@ import webauthn from './routes/webauthn.ts'
 import friendRequests from './routes/friend_requests.ts'
 import novelPrivate from './routes/novel-private.ts'
 import novelAuthoring from './routes/novel-authoring.ts'
+import novelStore from './routes/novel-store.ts'
 import mastodon from './mastodon/routes.ts'
 import mastodonV2 from './mastodon/v2.ts'
 import mastodonPush from './mastodon/push.ts'
@@ -248,6 +249,7 @@ app.route('/api/v1/captcha', captchaV1)
 app.route('/api/v1/uploads', uploads)
 app.route('/api/v1/novels/private', novelPrivate)
 app.route('/api/v1/novels/authoring', novelAuthoring)
+app.route('/api/v1/novels/store', novelStore)
 app.route('/api/v1', mastodon)
 app.route('/api/v1/push', mastodonPush)
 app.route('/api/v1/abdl', mastodonAbdl)

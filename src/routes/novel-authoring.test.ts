@@ -5,6 +5,7 @@ import test from 'node:test'
 import { Hono } from 'hono'
 import { signJWT } from '../lib/auth.ts'
 import novelAuthoring from './novel-authoring.ts'
+import novelStore from './novel-store.ts'
 
 const jwtSecret = 'novel-authoring-test-secret'
 
@@ -55,6 +56,7 @@ function createDatabase() {
 function createApp() {
 	const app = new Hono()
 	app.route('/api/v1/novels/authoring', novelAuthoring)
+	app.route('/api/v1/novels/store', novelStore)
 	return app
 }
 
@@ -84,6 +86,10 @@ async function adminRequest(db: ReturnType<typeof createDatabase>, sub: number, 
 		},
 		body: body === undefined ? undefined : JSON.stringify(body),
 	}, { abdl_space_db: db, JWT_SECRET: jwtSecret } as never)
+}
+
+async function storeRequest(db: ReturnType<typeof createDatabase>, path: string) {
+	return createApp().request(`/api/v1/novels/store${path}`, undefined, { abdl_space_db: db, JWT_SECRET: jwtSecret } as never)
 }
 
 function insertUser(db: ReturnType<typeof createDatabase>, id: number, ageSeconds: number, withPost: boolean, role = 'user') {
@@ -799,6 +805,83 @@ test('GET published chapter returns 404 when nothing is published yet', async ()
 	assert.equal(response.status, 404)
 	const stillDraft = db.database.prepare(`SELECT status FROM chapter_revisions WHERE id = ?`).get(revision.id) as { status: string }
 	assert.equal(stillDraft.status, 'draft')
+})
+
+test('public store exposes only published works, their published structure, and the current revision', async () => {
+	const db = createDatabase()
+	insertUser(db, 1, 72 * 60 * 60 + 60, true)
+	const { stub, caller } = makeMiMoStub()
+	const { work, chapter, revision } = await createDraftRevision(db, 1, 'store-public', '首版公开正文。')
+	stub.result = COMPLIANT_RESULT
+	assert.equal((await reviewRequest(db, caller, 1, 'POST', `/chapters/${chapter.id}/revisions/${revision.id}/submit`, undefined, { 'Idempotency-Key': 'store-submit-1' })).status, 200)
+	assert.equal((await reviewRequest(db, caller, 1, 'POST', `/revisions/${revision.id}/publish`, undefined, { 'Idempotency-Key': 'store-publish-1' })).status, 200)
+
+	const { work: draftWork } = await createDraftRevision(db, 1, 'store-draft', '绝不能公开的草稿。')
+	const listing = await storeRequest(db, '/works')
+	assert.equal(listing.status, 200, await listing.clone().text())
+	const listed = await listing.json() as { items: Array<{ id: string, author: { username: string }, published_chapter_count: number }>, next_cursor: string | null }
+	assert.equal(listed.items.length, 1)
+	assert.equal(listed.items[0].id, work.id)
+	assert.deepEqual(listed.items[0].author, { username: 'user1' })
+	assert.equal(listed.items[0].published_chapter_count, 1)
+	assert.equal(listed.next_cursor, null)
+
+	assert.equal((await storeRequest(db, `/works/${draftWork.id}`)).status, 404)
+	const structure = await storeRequest(db, `/works/${work.id}`)
+	assert.equal(structure.status, 200)
+	const publicWork = await structure.json() as { volumes: Array<{ chapters: Array<{ id: string, published_revision_id: string, rating: string }> }> }
+	assert.equal(publicWork.volumes.length, 1)
+	assert.equal(publicWork.volumes[0].chapters[0].id, chapter.id)
+	assert.equal(publicWork.volumes[0].chapters[0].published_revision_id, revision.id)
+	assert.equal(publicWork.volumes[0].chapters[0].rating, 'all_ages')
+
+	const chapterResponse = await storeRequest(db, `/works/${work.id}/chapters/${chapter.id}?revision_id=${revision.id}`)
+	assert.equal(chapterResponse.status, 200)
+	const publicChapter = await chapterResponse.json() as { revision_id: string, body: string }
+	assert.equal(publicChapter.revision_id, revision.id)
+	assert.equal(publicChapter.body, '首版公开正文。')
+	assert.equal((await storeRequest(db, `/works/${work.id}/chapters/not-a-chapter?revision_id=${revision.id}`)).status, 404)
+
+	const nextRevision = await (await request(db, 1, 'POST', `/chapters/${chapter.id}/revisions`, { body: '新版公开正文。' }, { 'Idempotency-Key': 'store-next-revision' })).json() as { id: string }
+	assert.equal((await reviewRequest(db, caller, 1, 'POST', `/chapters/${chapter.id}/revisions/${nextRevision.id}/submit`, undefined, { 'Idempotency-Key': 'store-submit-2' })).status, 200)
+	assert.equal((await reviewRequest(db, caller, 1, 'POST', `/revisions/${nextRevision.id}/publish`, undefined, { 'Idempotency-Key': 'store-publish-2' })).status, 200)
+	assert.equal((await storeRequest(db, `/works/${work.id}/chapters/${chapter.id}?revision_id=${revision.id}`)).status, 409)
+	const republished = await storeRequest(db, `/works/${work.id}/chapters/${chapter.id}?revision_id=${nextRevision.id}`)
+	assert.equal(republished.status, 200)
+	const republishedChapter = await republished.json() as { revision_id: string, body: string }
+	assert.equal(republishedChapter.revision_id, nextRevision.id)
+	assert.equal(republishedChapter.body, '新版公开正文。')
+})
+
+test('public store lists all published works through a stable cursor', async () => {
+	const db = createDatabase()
+	insertUser(db, 1, 72 * 60 * 60 + 60, true)
+	const { stub, caller } = makeMiMoStub()
+	stub.result = COMPLIANT_RESULT
+	const published: Array<{ workId: string, chapterId: string }> = []
+	for (const title of ['cursor-one', 'cursor-two', 'cursor-three']) {
+		const { work, chapter, revision } = await createDraftRevision(db, 1, title)
+		assert.equal((await reviewRequest(db, caller, 1, 'POST', `/chapters/${chapter.id}/revisions/${revision.id}/submit`, undefined, { 'Idempotency-Key': `cursor-submit-${title}` })).status, 200)
+		assert.equal((await reviewRequest(db, caller, 1, 'POST', `/revisions/${revision.id}/publish`, undefined, { 'Idempotency-Key': `cursor-publish-${title}` })).status, 200)
+		published.push({ workId: work.id, chapterId: chapter.id })
+	}
+	const first = await storeRequest(db, '/works?limit=2')
+	assert.equal(first.status, 200, await first.clone().text())
+	const firstBody = await first.json() as { items: Array<{ id: string }>, next_cursor: string | null }
+	assert.equal(firstBody.items.length, 2)
+	assert.ok(firstBody.next_cursor)
+	const unread = published.find(item => firstBody.items.every(work => work.id !== item.workId))!
+	const replacement = await (await request(db, 1, 'POST', `/chapters/${unread.chapterId}/revisions`, { body: '分页期间发布的新正文。' }, { 'Idempotency-Key': 'cursor-replacement-revision' })).json() as { id: string }
+	assert.equal((await reviewRequest(db, caller, 1, 'POST', `/chapters/${unread.chapterId}/revisions/${replacement.id}/submit`, undefined, { 'Idempotency-Key': 'cursor-replacement-submit' })).status, 200)
+	assert.equal((await reviewRequest(db, caller, 1, 'POST', `/revisions/${replacement.id}/publish`, undefined, { 'Idempotency-Key': 'cursor-replacement-publish' })).status, 200)
+	const second = await storeRequest(db, `/works?limit=2&cursor=${encodeURIComponent(firstBody.next_cursor!)}`)
+	assert.equal(second.status, 200)
+	const secondBody = await second.json() as { items: Array<{ id: string }>, next_cursor: string | null }
+	assert.equal(secondBody.items.length, 1)
+	assert.equal(secondBody.next_cursor, null)
+	assert.deepEqual(new Set([...firstBody.items, ...secondBody.items].map(work => work.id)), new Set(published.map(item => item.workId)))
+	assert.equal((await storeRequest(db, '/works?limit=0')).status, 400)
+	assert.equal((await storeRequest(db, '/works?cursor=invalid')).status, 400)
 })
 
 test('submit rechecks publish eligibility: an author who lost eligibility cannot submit a revision', async () => {
