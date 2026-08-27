@@ -5,6 +5,7 @@ import type { Env, JWTPayload } from './types/index.ts'
 import type { Context, Next } from 'hono'
 import { hashPassword, verifyPassword } from './lib/auth.ts'
 import { authMiddleware, adminMiddleware } from './middleware/auth.ts'
+import { ipSecurityMiddleware } from './middleware/ip-security.ts'
 import { queryOne, run } from './lib/db.ts'
 import auth from './routes/auth.ts'
 import beta from './routes/beta.ts'
@@ -58,6 +59,9 @@ import mastodonAbdl from './mastodon/abdl.ts'
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
 const app = new Hono<AppType>()
+
+// 必须早于所有路由执行，确保 Web、移动端和直连 API 共用同一封禁策略。
+app.use('*', ipSecurityMiddleware)
 
 app.use('*', async (c, next) => {
   // Handle /@username routes before CORS

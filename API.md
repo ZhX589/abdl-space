@@ -1611,7 +1611,7 @@ Wiki 页面详情（含 Markdown 正文）。
 ```json
 {
   "badges": [
-    { "key": "first_rating", "name": "初次评价", "icon": "⭐", "description": "发表第一条评价", "condition_type": "rating_count", "condition_value": 1 }
+    { "key": "verified", "name": "圈内认证", "icon": "verified", "description": "用户身份经过平台验证，获得圈内认证徽章。", "condition_type": "manual", "condition_value": 0 }
   ]
 }
 ```
@@ -1626,7 +1626,7 @@ Wiki 页面详情（含 Markdown 正文）。
 {
   "user_id": 1,
   "badges": [
-    { "key": "first_rating", "name": "初次评价", "icon": "⭐", "description": "...", "unlocked_at": "...", "displayed": true }
+    { "key": "verified", "name": "圈内认证", "icon": "verified", "description": "...", "unlocked_at": "2026-07-22T10:00:00Z", "displayed": true }
   ]
 }
 ```
@@ -2665,6 +2665,7 @@ Mastodon scope 映射：`follow`/`push` → `write`，`read`/`write`/`profile`/`
 
 | 端点 | 说明 | 参数 |
 |------|------|------|
+| `GET /api/v1/timelines/nbw` | NBW 独立时间线，将 `get_sync_threads` 原始帖子转换为 Mastodon Status[] | `limit`(≤40)、`fid`、`orderby`(dateline/lastpost)、`cursor`/`max_id` |
 | `GET /api/v1/abdl/nbw/sync-threads` | 拉取 NBW 待同步外发帖子并转为 Mastodon Status[]（同 `/timelines/home` 格式） | `limit`/`perpage`(≤40)、`fid`、`orderby`(dateline/lastpost)、`cursor`/`max_id` |
 
 响应：`MastodonStatus[]`（直接数组，非包裹对象）
@@ -2695,9 +2696,9 @@ Mastodon scope 映射：`follow`/`push` → `write`，`read`/`write`/`profile`/`
 ]
 ```
 
-分页：有更多时返回 `Link: </api/v1/abdl/nbw/sync-threads?max_id=...&limit=20>; rel="next"`（`max_id` 为 NBW 的 `next_cursor`）。
+分页：有更多时返回 `Link: </api/v1/timelines/nbw?max_id=...&limit=20>; rel="next"`（兼容入口返回自身路径；`max_id` 为 NBW 的 `next_cursor`）。
 
-> S2S 代理 `get_sync_threads`，仅 `abdl_space_status=2`；**不入库**。Status ID 格式 `nbw_<tid>`，Account ID 格式 `nbw_<authorid>`。未配置 `NBW_API_KEY` 返回 503。
+> 两个端点共享同一处理器，S2S 代理 `get_sync_threads`，仅 `abdl_space_status=2`；**不入库**。Status ID 格式 `nbw_<tid>`，Account ID 格式 `nbw_<authorid>`。未配置 `NBW_API_KEY` 返回 503。
 
 `/abdl/me` 响应：
 ```json

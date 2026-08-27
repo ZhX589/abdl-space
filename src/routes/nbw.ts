@@ -6,66 +6,16 @@ import { signJWT } from '../lib/auth.ts'
 import { hashPassword } from '../lib/auth.ts'
 import { authMiddleware } from '../middleware/auth.ts'
 import { getNBWConfig, getAppNBWConfig, nbwS2SRequest } from '../lib/nbw.ts'
+import { buildNBWRegisterPrefill, signNBWBindToken, verifyNBWBindToken } from '../lib/nbw-bind-token.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
 const nbw = new Hono<AppType>()
 
-/** UTF-8 安全的 base64url 编码/解码（username/avatar 可能含中文） */
-function utf8ToBase64Url(bytes: Uint8Array): string {
-  let binary = ''
-  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i])
-  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
-}
-function base64UrlToUtf8(str: string): string {
-  const b64 = str.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - (str.length % 4)) % 4)
-  const binary = atob(b64)
-  const bytes = new Uint8Array(binary.length)
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
-  return new TextDecoder().decode(bytes)
-}
-
 const NBW_TOKEN_URL = 'https://www.newbabyworld.top/oauth/token.php'
 const NBW_USERINFO_URL = 'https://www.newbabyworld.top/oauth/userinfo.php'
 
 const tokenCookieOptions = 'HttpOnly; Secure; SameSite=None; Domain=.abdl-space.top; Path=/; Max-Age=604800'
-
-
-
-/**
- * 签发短时效 NBW 绑定 token（JWT 嵌入 uid/username/avatar，10 分钟有效）
- * 解决 Workers 多实例进程内 Map 不共享的问题
- * 使用 UTF-8 安全 base64url（username/avatar 可能含中文）
- */
-async function signNBWBindToken(data: { uid: string; username: string; avatar: string | null }, secret: string): Promise<string> {
-  const header = { alg: 'HS256', typ: 'JWT' }
-  const now = Date.now()
-  const payload = { ...data, type: 'nbw_bind', iat: now, exp: now + 10 * 60 * 1000 } // 10 分钟
-  const encoder = new TextEncoder()
-  const headerB64 = utf8ToBase64Url(encoder.encode(JSON.stringify(header)))
-  const payloadB64 = utf8ToBase64Url(encoder.encode(JSON.stringify(payload)))
-  const signInput = `${headerB64}.${payloadB64}`
-  const key = await crypto.subtle.importKey('raw', encoder.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
-  const signature = await crypto.subtle.sign('HMAC', key, encoder.encode(signInput))
-  const sigB64 = utf8ToBase64Url(new Uint8Array(signature))
-  return `${signInput}.${sigB64}`
-}
-
-async function verifyNBWBindToken(token: string, secret: string): Promise<{ uid: string; username: string; avatar: string | null } | null> {
-  try {
-    const parts = token.split('.')
-    if (parts.length !== 3) return null
-    const encoder = new TextEncoder()
-    const key = await crypto.subtle.importKey('raw', encoder.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['verify'])
-    const signInput = `${parts[0]}.${parts[1]}`
-    const sig = Uint8Array.from(atob(parts[2].replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0))
-    const valid = await crypto.subtle.verify('HMAC', key, sig, encoder.encode(signInput))
-    if (!valid) return null
-    const payload = JSON.parse(base64UrlToUtf8(parts[1]))
-    if (payload.type !== 'nbw_bind' || !payload.exp || payload.exp < Date.now()) return null
-    return { uid: payload.uid, username: payload.username, avatar: payload.avatar || DEFAULT_AVATAR }
-  } catch { return null }
-}
 
 /**
  * GET /api/auth/nbw/config — 返回公开的 OAuth 配置（不含 secret）
@@ -230,6 +180,32 @@ nbw.post('/bind-existing', async (c) => {
 })
 
 /**
+ * POST /api/auth/nbw/user-info — 用 NBW 绑定 token 拉取一键注册预填信息
+ * Body: { nbw_token: string }
+ */
+nbw.post('/user-info', async (c) => {
+  let body: { nbw_token?: string }
+  try { body = await c.req.json() } catch { return c.json({ error: '无效请求' }, 400) }
+  if (!body.nbw_token) return c.json({ error: '缺少授权信息' }, 400)
+
+  const cached = await verifyNBWBindToken(body.nbw_token, c.env.JWT_SECRET)
+  if (!cached) return c.json({ error: '授权信息已过期或无效，请重新登录' }, 400)
+
+  const result = await nbwS2SRequest(c.env, 'get_user_info', { query: String(cached.uid) })
+  if (result.code !== 200 || !result.data) {
+    return c.json({ error: result.msg || '宝宝新天地资料获取失败', code: result.code }, result.code === 401 || result.code === 403 ? result.code : 502)
+  }
+
+  const prefill = buildNBWRegisterPrefill(result.data as { uid?: string | number; username?: string; email?: string; avatar?: string | null })
+  let email_registered = false
+  if (prefill.email) {
+    const existing = await queryOne<{ id: number }>(c.env.abdl_space_db, 'SELECT id FROM users WHERE email = ?', [prefill.email])
+    email_registered = !!existing
+  }
+  return c.json({ ...prefill, email_registered })
+})
+
+/**
  * POST /api/auth/nbw/bind — 绑定 NewBabyWorld 账户（需登录）
  * Body: { code?: string, access_token?: string }
  * 可传 OAuth 授权码(code) 或已有的 access_token
@@ -241,47 +217,54 @@ nbw.post('/bind', authMiddleware, async (c) => {
   try { body = await c.req.json() } catch { return c.json({ error: '无效请求' }, 400) }
   if (!body.code && !body.access_token) return c.json({ error: '缺少授权码或 access_token' }, 400)
 
-  let accessToken: string
-
-  if (body.access_token) {
-    // 直接使用已有的 access_token（mobile-callback 已交换）
-    accessToken = body.access_token
-  } else {
-    // 用授权码换 token
-    const { clientId, clientSecret, redirectUri } = getNBWConfig(c)
-    if (!clientId || !clientSecret || !redirectUri) {
-      return c.json({ error: 'NewBabyWorld OAuth 未配置' }, 500)
-    }
-    let tokenData: { access_token?: string; uid?: string }
-    try {
-      const tokenRes = await fetch(NBW_TOKEN_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({
-          client_id: clientId,
-          client_secret: clientSecret,
-          grant_type: 'authorization_code',
-          code: body.code!,
-          redirect_uri: redirectUri,
-        }),
-      })
-      if (!tokenRes.ok) return c.json({ error: 'Token 交换失败' }, 400)
-      tokenData = await tokenRes.json()
-    } catch { return c.json({ error: 'Token 请求失败' }, 502) }
-
-    if (!tokenData.access_token) return c.json({ error: '未获取到 access_token' }, 400)
-    accessToken = tokenData.access_token
-  }
-
-  // 获取用户信息
   let nbwUser: { uid: string; username: string }
-  try {
-    const userRes = await fetch(`${NBW_USERINFO_URL}?access_token=${accessToken}`)
-    if (!userRes.ok) return c.json({ error: '获取用户信息失败' }, 400)
-    const userData = await userRes.json()
-    if (userData.errcode !== 0) return c.json({ error: userData.errmsg || '获取用户信息失败' }, 400)
-    nbwUser = userData.data
-  } catch { return c.json({ error: '用户信息请求失败' }, 502) }
+
+  if (body.access_token && body.access_token.includes('.')) {
+    // nbw_bind JWT（App 一键绑定流程）：验签后直接提取 uid/username
+    const cached = await verifyNBWBindToken(body.access_token, c.env.JWT_SECRET)
+    if (!cached) return c.json({ error: '授权信息已过期或无效，请重新授权' }, 400)
+    nbwUser = { uid: cached.uid, username: cached.username }
+  } else {
+    // 原始 NBW OAuth access_token 或授权码
+    let accessToken: string
+
+    if (body.access_token) {
+      accessToken = body.access_token
+    } else {
+      const { clientId, clientSecret, redirectUri } = getNBWConfig(c)
+      if (!clientId || !clientSecret || !redirectUri) {
+        return c.json({ error: 'NewBabyWorld OAuth 未配置' }, 500)
+      }
+      let tokenData: { access_token?: string; uid?: string }
+      try {
+        const tokenRes = await fetch(NBW_TOKEN_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({
+            client_id: clientId,
+            client_secret: clientSecret,
+            grant_type: 'authorization_code',
+            code: body.code!,
+            redirect_uri: redirectUri,
+          }),
+        })
+        if (!tokenRes.ok) return c.json({ error: 'Token 交换失败' }, 400)
+        tokenData = await tokenRes.json()
+      } catch { return c.json({ error: 'Token 请求失败' }, 502) }
+
+      if (!tokenData.access_token) return c.json({ error: '未获取到 access_token' }, 400)
+      accessToken = tokenData.access_token
+    }
+
+    // 通过 NBW userinfo 获取用户信息
+    try {
+      const userRes = await fetch(`${NBW_USERINFO_URL}?access_token=${accessToken}`)
+      if (!userRes.ok) return c.json({ error: '获取用户信息失败' }, 400)
+      const userData = await userRes.json()
+      if (userData.errcode !== 0) return c.json({ error: userData.errmsg || '获取用户信息失败' }, 400)
+      nbwUser = userData.data
+    } catch { return c.json({ error: '用户信息请求失败' }, 502) }
+  }
 
   if (!nbwUser?.uid) return c.json({ error: '用户信息无效' }, 400)
 
@@ -470,9 +453,13 @@ nbw.get('/mobile-callback', async (c) => {
     return c.redirect(`abdl-space://callback?token=${encodeURIComponent(token)}`, 302)
   }
 
-  // 4. 未绑定 → 返回 need_bind + NBW access_token
+  // 4. 未绑定 → 返回 need_bind + 短时效绑定 token
   // bind/login 区分由 Android 端 SharedPreferences 处理
-  return c.redirect(`abdl-space://callback?nbw_bind=need_bind&nbw_user=${encodeURIComponent(nbwUser.username || '')}&nbw_token=${encodeURIComponent(tokenData.access_token || '')}`, 302)
+  const bindToken = await signNBWBindToken(
+    { uid: String(nbwUser.uid), username: nbwUser.username || '', avatar: nbwUser.avatar || DEFAULT_AVATAR },
+    c.env.JWT_SECRET,
+  )
+  return c.redirect(`abdl-space://callback?nbw_bind=need_bind&nbw_user=${encodeURIComponent(nbwUser.username || '')}&nbw_token=${encodeURIComponent(bindToken)}`, 302)
   } catch (e) {
     console.error('mobile-callback unhandled error:', e)
     return c.html(errorPage('服务器内部错误，请稍后重试'), 200, { 'Content-Type': 'text/html; charset=utf-8' })

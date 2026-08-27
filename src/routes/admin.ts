@@ -177,6 +177,65 @@ admin.post('/users/:id/ban', adminMiddleware, async (c) => {
 })
 
 /**
+ * POST /api/admin/security/users/:id/track-and-ban
+ * 启用定向追踪，封禁已记录的 IP；后续该账户通过任意已认证端点访问时会自动记录并封禁其 IP。
+ */
+admin.post('/security/users/:id/track-and-ban', adminMiddleware, async (c) => {
+  const id = parseInt(c.req.param('id') || '')
+  const operator = c.get('user')
+  if (!Number.isInteger(id) || id <= 0) return c.json({ error: 'Invalid user id' }, 400)
+  if (id === operator.sub) return c.json({ error: '不能追踪或封禁自己的账户' }, 400)
+
+  const db = c.env.abdl_space_db
+  const target = await queryOne<{ id: number }>(db, 'SELECT id FROM users WHERE id = ?', [id])
+  if (!target) return c.json({ error: 'User not found' }, 404)
+
+  const now = Math.floor(Date.now() / 1000)
+  await run(
+    db,
+    `INSERT INTO ip_tracking_rules (user_id, enabled, created_by, created_at)
+     VALUES (?, 1, ?, ?)
+     ON CONFLICT(user_id) DO UPDATE SET enabled = 1, created_by = excluded.created_by, created_at = excluded.created_at`,
+    [id, operator.sub, now],
+  )
+  const ips = await query<{ ip: string }>(
+    db,
+    'SELECT DISTINCT ip FROM ip_tracking_events WHERE user_id = ? AND ip <> ? AND ip <> ? ',
+    [id, '', 'unknown'],
+  )
+  for (const row of ips) {
+    await run(
+      db,
+      `INSERT INTO ip_bans (ip, source_user_id, reason, created_by, created_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(ip) DO NOTHING`,
+      [row.ip, id, 'Tracked account access', operator.sub, now],
+    )
+  }
+
+  return c.json({ tracked: true, banned_ip_count: ips.length })
+})
+
+/** 管理员查看目标账户的追踪状态；不向普通用户暴露 IP 信息。 */
+admin.get('/security/users/:id/tracking', adminMiddleware, async (c) => {
+  const id = parseInt(c.req.param('id') || '')
+  if (!Number.isInteger(id) || id <= 0) return c.json({ error: 'Invalid user id' }, 400)
+
+  const db = c.env.abdl_space_db
+  const rule = await queryOne<{ enabled: number; created_at: number }>(
+    db,
+    'SELECT enabled, created_at FROM ip_tracking_rules WHERE user_id = ?',
+    [id],
+  )
+  const events = await query<{ ip: string; path: string; created_at: number }>(
+    db,
+    'SELECT ip, path, created_at FROM ip_tracking_events WHERE user_id = ? ORDER BY created_at DESC LIMIT 50',
+    [id],
+  )
+  return c.json({ tracking: !!rule?.enabled, created_at: rule?.created_at || null, events })
+})
+
+/**
  * GET /api/admin/posts — 管理员帖子列表
  */
 admin.get('/posts', adminMiddleware, async (c) => {

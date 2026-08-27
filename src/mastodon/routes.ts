@@ -10,11 +10,12 @@ import { Hono } from 'hono'
 import type { Context } from 'hono'
 import type { Env, JWTPayload } from '../types/index.ts'
 import { query, queryOne, run } from '../lib/db.ts'
-import { toAccount, toAccountFromNBW, toStatus, toStatusFromNBW, toStatusFromComment, toNotification, toISOString } from './converter.ts'
+import { toAccount, toAccountFromNBW, toStatus, toStatusFromNBW, toStatusFromComment, toNotification, toISOString, getVerifiedUserIds } from './converter.ts'
 import { generateCardsForPosts } from './linkpreview.ts'
 import type { MastodonNotification, MastodonAccount, MastodonPoll, MastodonStatus } from './types.ts'
 import { mastodonAuth, buildInstance, resolveStatus, parseMastoIdForCursor } from './shared.ts'
 import { syncPostToNBW } from '../lib/nbw-sync.ts'
+import { dispatchStatusNotifications } from '../lib/status-notify.ts'
 import { nbwS2SRequest } from '../lib/nbw.ts'
 import { handleNBWTimeline, buildNBWTimelineParams } from './nbw-timeline.ts'
 import { mergeAllTimelinePage } from './all-timeline.ts'
@@ -452,10 +453,11 @@ mastodon.get('/accounts/verify_credentials', async (c) => {
   )
   if (!dbUser) return c.json({ error: 'User not found' }, 404)
 
-  const [postCount, followerCount, followingCount] = await Promise.all([
+  const [postCount, followerCount, followingCount, verifiedBadge] = await Promise.all([
     queryOne<{ cnt: number }>(c.env.abdl_space_db, 'SELECT COUNT(*) as cnt FROM posts WHERE user_id = ?', [user.sub]),
     queryOne<{ cnt: number }>(c.env.abdl_space_db, 'SELECT COUNT(*) as cnt FROM follows WHERE following_id = ?', [user.sub]),
     queryOne<{ cnt: number }>(c.env.abdl_space_db, 'SELECT COUNT(*) as cnt FROM follows WHERE follower_id = ?', [user.sub]),
+    queryOne<{ badge_key: string }>(c.env.abdl_space_db, 'SELECT badge_key FROM user_badges WHERE user_id = ? AND badge_key = ?', [user.sub, 'verified']),
   ])
 
   const lastPost = await queryOne<{ created_at: string }>(
@@ -476,6 +478,7 @@ mastodon.get('/accounts/verify_credentials', async (c) => {
     followers_count: followerCount?.cnt ?? 0,
     following_count: followingCount?.cnt ?? 0,
     last_status_at: lastPost?.created_at ?? null,
+    verified: !!verifiedBadge,
   })
 
   // CredentialAccount has extra `source` field
@@ -717,10 +720,11 @@ mastodon.get('/accounts/:id', async (c) => {
   )
   if (!dbUser) return c.json({ error: 'Record not found' }, 404)
 
-  const [postCount, followerCount, followingCount] = await Promise.all([
+  const [postCount, followerCount, followingCount, verifiedBadge] = await Promise.all([
     queryOne<{ cnt: number }>(c.env.abdl_space_db, 'SELECT COUNT(*) as cnt FROM posts WHERE user_id = ?', [id]),
     queryOne<{ cnt: number }>(c.env.abdl_space_db, 'SELECT COUNT(*) as cnt FROM follows WHERE following_id = ?', [id]),
     queryOne<{ cnt: number }>(c.env.abdl_space_db, 'SELECT COUNT(*) as cnt FROM follows WHERE follower_id = ?', [id]),
+    queryOne<{ badge_key: string }>(c.env.abdl_space_db, 'SELECT badge_key FROM user_badges WHERE user_id = ? AND badge_key = ?', [id, 'verified']),
   ])
 
   const lastPost = await queryOne<{ created_at: string }>(
@@ -742,6 +746,7 @@ mastodon.get('/accounts/:id', async (c) => {
     followers_count: followerCount?.cnt ?? 0,
     following_count: followingCount?.cnt ?? 0,
     last_status_at: lastPost?.created_at ?? null,
+    verified: !!verifiedBadge,
   }))
 })
 
@@ -801,7 +806,7 @@ mastodon.get('/accounts/:id/statuses', async (c) => {
     }
   }
 
-  const account = toAccount(dbUser)
+  const account = toAccount(dbUser, { verified: !!(await getVerifiedUserIds(c.env.abdl_space_db, [id])).has(id) })
   const statuses = await (async () => {
     const postIds = posts.map(r => r.id as number)
     const imagesMap = await loadPostImages(c.env.abdl_space_db, postIds)
@@ -1091,11 +1096,27 @@ mastodon.post('/statuses', async (c) => {
     role: post.role as string, bio: post.bio as string | null, created_at: post.user_created_at as string,
   })
 
-  // NBW 异步双发（不阻塞响应）
+  // NBW 异步双发（不阻塞响应，但必须用 waitUntil 保持 worker 存活）
+  // 门禁：仅根帖（非回复）且客户端版本码 >= 22（带论坛选择 UI 的版本）才同步；
+  // 旧版与 Web 端不带 X-App-Version-Code 头，自动排除，避免用户不知情被同步
   const mediaUrls = images.map(i => i.image_url)
-  syncPostToNBW(c.env, user.sub, postId, content, mediaUrls, body.nbw_fid).catch(err => {
-    console.error('NBW sync failed:', err)
-  })
+  const MIN_NBW_SYNC_VERSION = 22
+  const appVersionCode = parseInt(c.req.header('X-App-Version-Code') || '0', 10)
+  if (!body.in_reply_to_id && appVersionCode >= MIN_NBW_SYNC_VERSION) {
+    c.executionCtx.waitUntil(
+      syncPostToNBW(c.env, user.sub, postId, content, mediaUrls, body.nbw_fid).catch(err => {
+        console.error('NBW sync failed:', err)
+      })
+    )
+  }
+
+  // 全量通知分发：回复 / 提及 / 关注者新帖（waitUntil 异步）
+  c.executionCtx.waitUntil(
+    dispatchStatusNotifications(
+      c.env, postId, user.sub, post.username as string,
+      content, inReplyToAccountId, visibility,
+    )
+  )
 
   return c.json(toStatus({
     id: post.id as number, user_id: post.user_id as number, content: post.content as string,
@@ -1475,11 +1496,13 @@ mastodon.get('/timelines/home', async (c) => {
     const repostIds = posts.filter(r => r.repost_id).map(r => r.repost_id as number)
     const reblogMap = await loadReblogTargets(c.env.abdl_space_db, repostIds)
     const cardMap = await generateCardsForPosts(posts.map(r => ({ id: r.id as number, content: r.content as string, diaper_id: r.diaper_id as number | null })))
+    const userIds = [...new Set(posts.map(r => r.user_id as number))]
+    const verifiedSet = await getVerifiedUserIds(c.env.abdl_space_db, userIds)
     return posts.map(r => {
       const account = toAccount({
         id: r.user_id as number, username: r.username as string, avatar: r.avatar as string | null,
         role: r.role as string, bio: r.bio as string | null, created_at: r.user_created_at as string,
-      })
+      }, { verified: verifiedSet.has(r.user_id as number) })
       return toStatus({
         id: r.id as number, user_id: r.user_id as number, content: r.content as string,
         diaper_id: r.diaper_id as number | null, like_count: r.like_count as number,
@@ -1557,11 +1580,13 @@ mastodon.get('/timelines/public', async (c) => {
     const repostIds = posts.filter(r => r.repost_id).map(r => r.repost_id as number)
     const reblogMap = await loadReblogTargets(c.env.abdl_space_db, repostIds)
     const cardMap = await generateCardsForPosts(posts.map(r => ({ id: r.id as number, content: r.content as string, diaper_id: r.diaper_id as number | null })))
+    const userIds = [...new Set(posts.map(r => r.user_id as number))]
+    const verifiedSet = await getVerifiedUserIds(c.env.abdl_space_db, userIds)
     return posts.map(r => {
       const account = toAccount({
         id: r.user_id as number, username: r.username as string, avatar: r.avatar as string | null,
         role: r.role as string, bio: r.bio as string | null, created_at: r.user_created_at as string,
-      })
+      }, { verified: verifiedSet.has(r.user_id as number) })
       return toStatus({
         id: r.id as number, user_id: r.user_id as number, content: r.content as string,
         diaper_id: r.diaper_id as number | null, like_count: r.like_count as number,

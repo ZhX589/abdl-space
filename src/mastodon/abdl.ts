@@ -11,8 +11,6 @@ import { Hono } from 'hono'
 import type { Env, JWTPayload } from '../types/index.ts'
 import { query, queryOne } from '../lib/db.ts'
 import { mastodonAuth } from './shared.ts'
-import { nbwS2SRequest } from '../lib/nbw.ts'
-import { toStatusFromNBW } from './converter.ts'
 import { handleNBWTimeline } from './nbw-timeline.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }

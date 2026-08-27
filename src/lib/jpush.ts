@@ -25,14 +25,30 @@ export async function sendJPushToUser(
   content: string,
   extras: Record<string, string> = {},
 ): Promise<{ sent: number }> {
+  return sendJPushToUsers(env, [userId], title, content, extras)
+}
+
+/**
+ * 向多个用户批量发送（单次 JPush 调用，registration_id 上限 1000）
+ */
+export async function sendJPushToUsers(
+  env: Env,
+  userIds: number[],
+  title: string,
+  content: string,
+  extras: Record<string, string> = {},
+): Promise<{ sent: number }> {
+  if (userIds.length === 0) return { sent: 0 }
   const db = env.abdl_space_db
+  const placeholders = userIds.map(() => '?').join(',')
   const rows = await query<{ reg_id: string }>(
-    db, 'SELECT reg_id FROM jpush_registrations WHERE user_id = ?',
-    [userId],
+    db, `SELECT DISTINCT reg_id FROM jpush_registrations WHERE user_id IN (${placeholders})`,
+    userIds,
   )
   if (rows.length === 0) return { sent: 0 }
 
-  const regIds = rows.map(r => r.reg_id)
+  // JPush audience.registration_id 单次上限 1000
+  const regIds = rows.slice(0, 1000).map(r => r.reg_id)
   const appKey = env.JPUSH_APP_KEY
   const masterSecret = env.JPUSH_MASTER_SECRET
   if (!appKey || !masterSecret) {
@@ -67,8 +83,22 @@ async function sendJPushRaw(
     audience: { registration_id: regIds },
     notification: {
       alert: content,
-      android: { alert: content, title, channel_id: 'jpush_high', extras },
+      android: {
+        alert: content,
+        title,
+        // v2 channel：旧 jpush_high 渠道 importance/声音/震动创建后不可变，换新 ID 重置为系统 HIGH 默认
+        channel_id: 'jpush_high_v2',
+        priority: 2,
+        alert_type: -1,
+        intent: {
+          url: 'intent:#Intent;component=top.abdl_space.app/org.joinmastodon.android.MainActivity;end',
+        },
+        extras,
+      },
       ios: { alert: { title, body: content }, sound: 'default', extras },
+    },
+    options: {
+      time_to_live: 86400,
     },
   }
 

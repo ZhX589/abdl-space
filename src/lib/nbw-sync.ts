@@ -78,6 +78,7 @@ async function uploadImageToNBW(env: Env, nbwUid: string, imageUrl: string): Pro
 /**
  * 主同步函数：将 ABDL Space 帖子推送到 NBW
  * 异步执行，失败不阻塞主流程
+ * nbwFid 为 -1 时表示用户禁止同步到 NBW
  */
 export async function syncPostToNBW(
   env: Env,
@@ -88,11 +89,22 @@ export async function syncPostToNBW(
   nbwFid?: number
 ): Promise<void> {
   try {
+    // 0. 用户明确禁止同步
+    if (nbwFid === -1) {
+      console.log('NBW sync skipped: user opted out (nbwFid=-1)', { postId })
+      return
+    }
+
     // 1. 查 nbw_uid，为空跳过
     const user = await queryOne<{ nbw_uid: string | null }>(
       env.abdl_space_db, 'SELECT nbw_uid FROM users WHERE id = ?', [userId]
     )
-    if (!user?.nbw_uid) return
+    if (!user?.nbw_uid) {
+      console.log('NBW sync skipped: no nbw_uid', { postId, userId })
+      return
+    }
+
+    console.log('NBW sync starting', { postId, userId, nbw_uid: user.nbw_uid, nbwFid, mediaCount: mediaUrls.length })
 
     // 2. 上传图片到 NBW
     const aids: number[] = []
@@ -115,6 +127,8 @@ export async function syncPostToNBW(
       message: bbcode,
     })
 
+    console.log('NBW create_thread result', { postId, code: result.code, msg: result.msg, data: result.data })
+
     // 6. 存储 nbw_tid/nbw_pid
     if (result.code === 200 && result.data) {
       const data = result.data as { tid: number; pid: number }
@@ -126,6 +140,6 @@ export async function syncPostToNBW(
       }
     }
   } catch (e) {
-    console.error('NBW sync failed for post', postId, e)
+    console.error('NBW sync failed for post', postId, 'error:', (e as Error).message, 'stack:', (e as Error).stack)
   }
 }

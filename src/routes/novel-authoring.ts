@@ -845,15 +845,19 @@ novelAuthoring.post('/chapters/:chapterId/revisions/:revisionId/submit', async c
 	await db.batch([snapshotInsert, submitAudit])
 
 	let mimoResult: MiMoStructuredResult | null
+	let mimoDiagnostic: string | null = null
 	try {
 		const raw = await resolveMiMoCaller(c.env).review(revision.body)
 		mimoResult = coerceMiMoResult(raw)
-	} catch {
+		if (!mimoResult) mimoDiagnostic = `mimo_coerce_failed raw=${JSON.stringify(raw).slice(0, 400)}`
+	} catch (error) {
 		mimoResult = null
+		mimoDiagnostic = `mimo_call_failed ${(error as Error).message?.slice(0, 300) ?? 'unknown'}`
 	}
 	if (!mimoResult) {
+		console.log('novel_review_kept_pending', { revision_id: revision.id, diagnostic: mimoDiagnostic })
 		const keptAudit = db.prepare(`INSERT INTO novel_review_audit (owner_id, revision_id, actor_id, action, metadata)
-			VALUES (?, ?, ?, 'review_kept_pending', ?)`).bind(auth.user.sub, revision.id, auth.user.sub, JSON.stringify({ snapshot_id: snapshotId }))
+			VALUES (?, ?, ?, 'review_kept_pending', ?)`).bind(auth.user.sub, revision.id, auth.user.sub, JSON.stringify({ snapshot_id: snapshotId, diagnostic: mimoDiagnostic }))
 		const markPending = db.prepare(`UPDATE chapter_revisions SET status = 'review_pending', updated_at = ? WHERE id = ? AND owner_id = ? AND status = 'draft'`).bind(now, revision.id, auth.user.sub)
 		const opRecord = db.prepare(`INSERT INTO novel_revision_operations (owner_id, idempotency_key, revision_id, request_body, request_base_version, response_body, response_chapter_id, response_status, response_version, response_created_at, response_updated_at)
 			VALUES (?, ?, ?, '', 0, ?, ?, 'review_pending', ?, ?, ?)`)

@@ -36,12 +36,13 @@ export type NBWTimelineParams = {
 
 export function buildNBWTimelineParams(query: {
   limit?: string
+  perpage?: string
   max_id?: string
   cursor?: string
   fid?: string
   orderby?: string
 }): NBWTimelineParams {
-  const limit = Math.min(40, Math.max(1, parseInt(query.limit || '20') || 20))
+  const limit = Math.min(40, Math.max(1, parseInt(query.limit || query.perpage || '20') || 20))
   const fid = query.fid && query.fid !== '0' ? query.fid : ''
   const orderby: 'dateline' | 'lastpost' = query.orderby === 'lastpost' ? 'lastpost' : 'dateline'
   const cursor = query.cursor || query.max_id || ''
@@ -93,6 +94,7 @@ export async function handleNBWTimeline(
 
   const { limit, fid, orderby, cursor, params } = buildNBWTimelineParams({
     limit: c.req.query('limit'),
+    perpage: c.req.query('perpage'),
     max_id: c.req.query('max_id'),
     cursor: c.req.query('cursor'),
     fid: c.req.query('fid'),

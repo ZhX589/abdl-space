@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import type { Env, JWTPayload, LoginRequest, LoginResponse, User } from '../types/index.ts'
 import { hashPassword, verifyPassword, signJWT } from '../lib/auth.ts'
+import { verifyNBWBindToken } from '../lib/nbw-bind-token.ts'
 import { queryOne, query, run } from '../lib/db.ts'
 import { authMiddleware } from '../middleware/auth.ts'
 import { getNBWConfig } from '../lib/nbw.ts'
@@ -261,17 +262,10 @@ auth.post('/register', async (c) => {
   let nbw_username: string | null = null
   if (isNBW) {
     if (nbw_token) {
-      // 新流程：验证 JWT 绑定 token
-      try {
-        const parts = nbw_token.split('.')
-        if (parts.length === 3) {
-          const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')))
-          if (payload.type === 'nbw_bind' && payload.exp && payload.exp > Date.now()) {
-            nbw_uid = payload.uid
-            nbw_username = payload.username || null
-          }
-        }
-      } catch {}
+      // 新流程：验证短时效 NBW 绑定 token
+      const cached = await verifyNBWBindToken(nbw_token, c.env.JWT_SECRET)
+      nbw_uid = cached?.uid || null
+      nbw_username = cached?.username || null
       if (!nbw_uid) return c.json({ error: 'NBW 授权信息已过期或无效，请重新登录' }, 400)
     } else {
       // 旧流程：用 code 换 token

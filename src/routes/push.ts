@@ -260,6 +260,12 @@ push.post('/admin/send', adminMiddleware, async (c) => {
               android: {
                 alert: body.body,
                 title: body.title,
+                channel_id: 'jpush_high_v2',
+                priority: 2,
+                alert_type: -1,
+                intent: {
+                  url: 'intent:#Intent;component=top.abdl_space.app/org.joinmastodon.android.MainActivity;end',
+                },
                 extras: { url: body.url || '/notifications' },
               },
               ios: {
@@ -347,7 +353,13 @@ push.post('/admin/test', adminMiddleware, async (c) => {
         audience: { registration_id: [sub.registration_id] },
         notification: {
           alert: '这是一条测试推送',
-          android: { alert: '这是一条测试推送', title: 'ABDL Space 测试' },
+          android: {
+            alert: '这是一条测试推送',
+            title: 'ABDL Space 测试',
+            channel_id: 'jpush_high_v2',
+            priority: 2,
+            alert_type: -1,
+          },
           ios: { alert: { title: 'ABDL Space 测试', body: '这是一条测试推送' }, sound: 'default' },
         },
         options: { apns_production: true },

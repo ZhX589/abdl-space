@@ -12,7 +12,7 @@ const MAX_DISPLAYED_BADGES = 3
 /**
  * GET /api/users/:id/badges — 用户徽章列表
  */
-badges.get('/:id/badges', authMiddleware, async (c) => {
+badges.get('/:id/badges', async (c) => {
   const targetId = Number(c.req.param('id'))
   if (isNaN(targetId)) return c.json({ error: 'Invalid user ID' }, 400)
 

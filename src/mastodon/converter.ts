@@ -5,6 +5,7 @@
 
 import type { MastodonAccount, MastodonStatus, MastodonMediaAttachment, MastodonNotification, MastodonPoll } from './types.ts'
 import { toMastoId } from './shared.ts'
+import { query } from '../lib/db.ts'
 import { buildMediaPreviewUrl } from '../lib/media-preview.ts'
 
 const INSTANCE_DOMAIN = 'abdl-space.top'
@@ -35,6 +36,7 @@ export function toAccount(user: {
   followers_count?: number
   following_count?: number
   last_status_at?: string | null
+  verified?: boolean
 }): MastodonAccount {
   const avatar = user.avatar || DEFAULT_AVATAR
   const header = user.header || DEFAULT_HEADER
@@ -74,6 +76,7 @@ export function toAccount(user: {
       language: 'zh',
     },
     nbw_username: user.nbw_username || null,
+    verified: opts?.verified ?? false,
   }
 }
 
@@ -566,4 +569,15 @@ function escapeHtml(text: string): string {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#039;')
+}
+
+/** Batch query verified status for a list of user IDs */
+export async function getVerifiedUserIds(db: D1Database, userIds: number[]): Promise<Set<number>> {
+  if (userIds.length === 0) return new Set()
+  const rows = await query<{ user_id: number }>(
+    db,
+    `SELECT user_id FROM user_badges WHERE badge_key = 'verified' AND user_id IN (${userIds.map(() => '?').join(',')})`,
+    userIds,
+  )
+  return new Set(rows.map(r => r.user_id))
 }

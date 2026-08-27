@@ -32,6 +32,11 @@ test('uses safe defaults and ignores fid zero', () => {
   })
 })
 
+test('keeps the legacy perpage parameter compatible', () => {
+  assert.equal(buildNBWTimelineParams({ perpage: '30' }).limit, 30)
+  assert.equal(buildNBWTimelineParams({ limit: '10', perpage: '30' }).limit, 10)
+})
+
 test('builds a Mastodon next link from the NBW cursor', () => {
   assert.equal(
     buildNBWTimelineNextLink('/api/v1/timelines/nbw', 'next_cursor', 20, '27', 'lastpost'),

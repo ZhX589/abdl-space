@@ -5,6 +5,7 @@ import {
   DEFAULT_NBW_FORUM_RECOMMENDATION,
   parseNBWForumRecommendation,
 } from './nbw.ts'
+import { buildNBWRegisterPrefill, signNBWBindToken, verifyNBWBindToken } from '../lib/nbw-bind-token.ts'
 
 test('marks a valid AI forum recommendation as successful', () => {
   assert.deepEqual(
@@ -36,4 +37,28 @@ test('falls back when required AI response fields are missing or mistyped', () =
     parseNBWForumRecommendation('{"fid":3,"forum_name":"交友","confidence":"high"}'),
     DEFAULT_NBW_FORUM_RECOMMENDATION,
   )
+})
+
+test('signs and verifies NBW bind token', async () => {
+  const token = await signNBWBindToken({ uid: '4349', username: '宝宝', avatar: 'https://example.com/a.png' }, 'secret')
+  assert.deepEqual(await verifyNBWBindToken(token, 'secret'), {
+    uid: '4349',
+    username: '宝宝',
+    avatar: 'https://example.com/a.png',
+  })
+  assert.equal(await verifyNBWBindToken(token, 'wrong-secret'), null)
+})
+
+test('builds safe registration prefill from NBW user info', () => {
+  assert.deepEqual(buildNBWRegisterPrefill({
+    uid: 4349,
+    username: '宝宝',
+    email: 'baby@example.com',
+    avatar: 'https://example.com/a.png',
+  }), {
+    uid: '4349',
+    username: '宝宝',
+    email: 'baby@example.com',
+    avatar: 'https://example.com/a.png',
+  })
 })
