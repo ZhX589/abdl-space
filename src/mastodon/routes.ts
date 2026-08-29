@@ -19,6 +19,7 @@ import { dispatchStatusNotifications } from '../lib/status-notify.ts'
 import { resolveGeoFromClient, resolveProvinceFromIP } from '../lib/post-geo.ts'
 import { resolveProvinceFromBaiduIp } from '../lib/baidu-ip.ts'
 import { geoFromPost } from './converter.ts'
+import { getLastStatusProvinces } from './last-province.ts'
 import { nbwS2SRequest } from '../lib/nbw.ts'
 import { handleNBWTimeline, buildNBWTimelineParams } from './nbw-timeline.ts'
 import { mergeAllTimelinePage } from './all-timeline.ts'
@@ -487,6 +488,8 @@ mastodon.get('/accounts/verify_credentials', async (c) => {
     c.env.abdl_space_db, 'SELECT created_at FROM posts WHERE user_id = ? ORDER BY created_at DESC LIMIT 1', [user.sub]
   )
 
+  const lastProvinceMap = await getLastStatusProvinces(c.env.abdl_space_db, [dbUser.id as number])
+
   const account = toAccount({
     id: dbUser.id as number,
     username: dbUser.username as string,
@@ -501,6 +504,7 @@ mastodon.get('/accounts/verify_credentials', async (c) => {
     followers_count: followerCount?.cnt ?? 0,
     following_count: followingCount?.cnt ?? 0,
     last_status_at: lastPost?.created_at ?? null,
+    last_status_province: lastProvinceMap.get(dbUser.id as number) ?? null,
     verified: !!verifiedBadge,
   })
 
@@ -634,6 +638,8 @@ mastodon.patch('/accounts/update_credentials', async (c) => {
   )
   if (!dbUser) return c.json({ error: 'User not found' }, 404)
 
+  const lastProvinceMap = await getLastStatusProvinces(c.env.abdl_space_db, [dbUser.id as number])
+
   return c.json(toAccount({
     id: dbUser.id as number,
     username: dbUser.username as string,
@@ -644,7 +650,7 @@ mastodon.patch('/accounts/update_credentials', async (c) => {
     bio: dbUser.bio as string | null,
     profile_fields: dbUser.profile_fields as string | null,
     created_at: dbUser.created_at as string,
-  }))
+  }, { last_status_province: lastProvinceMap.get(dbUser.id as number) ?? null }))
 })
 
 // ============================================================
@@ -829,7 +835,12 @@ mastodon.get('/accounts/:id/statuses', async (c) => {
     }
   }
 
-  const account = toAccount(dbUser, { verified: !!(await getVerifiedUserIds(c.env.abdl_space_db, [id])).has(id) })
+  const verifiedIds = await getVerifiedUserIds(c.env.abdl_space_db, [id])
+  const lastProvinceMap = await getLastStatusProvinces(c.env.abdl_space_db, [id])
+  const account = toAccount(dbUser, {
+    verified: verifiedIds.has(id),
+    last_status_province: lastProvinceMap.get(id) ?? null,
+  })
   const statuses = await (async () => {
     const postIds = posts.map(r => r.id as number)
     const imagesMap = await loadPostImages(c.env.abdl_space_db, postIds)
@@ -890,10 +901,14 @@ mastodon.get('/accounts/:id/followers', async (c) => {
 
   const rows = await query<Record<string, unknown>>(c.env.abdl_space_db, sql, params)
 
+  const lastProvinceMap = await getLastStatusProvinces(
+    c.env.abdl_space_db,
+    rows.map(r => r.id as number)
+  )
   const accounts = rows.map(r => toAccount({
     id: r.id as number, username: r.username as string, avatar: r.avatar as string | null,
     role: r.role as string, bio: r.bio as string | null, created_at: r.created_at as string,
-  }))
+  }, { last_status_province: lastProvinceMap.get(r.id as number) ?? null }))
   // Use follow_id for Link header cursor
   const linkItems = rows.map(r => ({ id: r.follow_id as number }))
   const link = buildLinkHeader(`/api/v1/accounts/${id}/followers`, linkItems, limit)
@@ -924,10 +939,14 @@ mastodon.get('/accounts/:id/following', async (c) => {
 
   const rows = await query<Record<string, unknown>>(c.env.abdl_space_db, sql, params)
 
+  const lastProvinceMapFollowing = await getLastStatusProvinces(
+    c.env.abdl_space_db,
+    rows.map(r => r.id as number)
+  )
   const accounts = rows.map(r => toAccount({
     id: r.id as number, username: r.username as string, avatar: r.avatar as string | null,
     role: r.role as string, bio: r.bio as string | null, created_at: r.created_at as string,
-  }))
+  }, { last_status_province: lastProvinceMapFollowing.get(r.id as number) ?? null }))
   const linkItems = rows.map(r => ({ id: r.follow_id as number }))
   const link = buildLinkHeader(`/api/v1/accounts/${id}/following`, linkItems, limit)
   if (link) c.header('Link', link)
@@ -2210,7 +2229,11 @@ mastodon.get('/search', async (c) => {
     ),
   ])
 
-  const accounts = users.map(u => toAccount(u))
+  const lastProvinceMapSearch = await getLastStatusProvinces(
+    c.env.abdl_space_db,
+    users.map(u => u.id as number)
+  )
+  const accounts = users.map(u => toAccount(u, { last_status_province: lastProvinceMapSearch.get(u.id as number) ?? null }))
   const statuses = await (async () => {
     const postIds = posts.map(r => r.id as number)
     const imagesMap = await loadPostImages(c.env.abdl_space_db, postIds)
@@ -2931,10 +2954,14 @@ mastodon.get('/statuses/:id/favourited_by', async (c) => {
      WHERE l.target_type = ? AND l.target_id = ? LIMIT 40`,
     [targetType, resolved.realId]
   )
+  const lastProvinceMapLikers = await getLastStatusProvinces(
+    c.env.abdl_space_db,
+    rows.map(r => r.id as number)
+  )
   return c.json(rows.map(r => toAccount({
     id: r.id as number, username: r.username as string, avatar: r.avatar as string | null,
     role: r.role as string, bio: r.bio as string | null, created_at: r.created_at as string,
-  })))
+  }, { last_status_province: lastProvinceMapLikers.get(r.id as number) ?? null })))
 })
 
 // GET /api/v1/statuses/:id/reblogged_by

@@ -7,6 +7,7 @@ import { Hono } from 'hono'
 import type { Env, JWTPayload } from '../types/index.ts'
 import { query } from '../lib/db.ts'
 import { toAccount, toStatus } from './converter.ts'
+import { getLastStatusProvinces } from './last-province.ts'
 import { mastodonAuth, buildInstance } from './shared.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
@@ -44,7 +45,11 @@ mastodonV2.get('/search', async (c) => {
     ),
   ])
 
-  const accounts = users.map(u => toAccount(u))
+  const lastProvinceMap = await getLastStatusProvinces(
+    c.env.abdl_space_db,
+    users.map(u => u.id as number)
+  )
+  const accounts = users.map(u => toAccount(u, { last_status_province: lastProvinceMap.get(u.id as number) ?? null }))
   const user = await mastodonAuth(c)
   const likedSet = new Set<number>()
   if (user) {
