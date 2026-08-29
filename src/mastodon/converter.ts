@@ -36,6 +36,7 @@ export function toAccount(user: {
   followers_count?: number
   following_count?: number
   last_status_at?: string | null
+  last_status_province?: string | null
   verified?: boolean
 }): MastodonAccount {
   const avatar = user.avatar || DEFAULT_AVATAR
@@ -61,6 +62,7 @@ export function toAccount(user: {
     following_count: opts?.following_count ?? 0,
     statuses_count: opts?.statuses_count ?? 0,
     last_status_at: opts?.last_status_at ?? null,
+    last_status_province: opts?.last_status_province ?? null,
     emojis: [],
     fields: (() => { try { return JSON.parse(user.profile_fields || '[]') } catch { return [] } })(),
     roles: user.role === 'admin'
@@ -310,6 +312,7 @@ export function toAccountFromNBW(user: {
     following_count: 0,
     statuses_count: Number(user.threads ?? user.posts ?? 0),
     last_status_at: lastActivity,
+    last_status_province: null,
     emojis: [],
     fields,
     roles: user.groupid === 1
@@ -368,6 +371,7 @@ export function toStatusFromNBW(thread: {
     following_count: 0,
     statuses_count: 0,
     last_status_at: createdAt,
+    last_status_province: null,
     emojis: [],
     fields: thread.forum_name
       ? [{ name: '版块', value: escapeHtml(thread.forum_name), verified_at: null }]

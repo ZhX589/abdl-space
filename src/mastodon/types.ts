@@ -24,6 +24,7 @@ export interface MastodonAccount {
   following_count: number
   statuses_count: number
   last_status_at: string | null
+  last_status_province: string | null
   emojis: unknown[]
   fields: { name: string; value: string; verified_at: string | null }[]
   roles: { id: string; name: string; color: string; permissions: string; highlighted: boolean }[]
