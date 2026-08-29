@@ -58,6 +58,7 @@ export interface MastodonStatus {
   content: string
   reblog: MastodonStatus | null
   application: { name: string; website: string | null } | null
+  geo_location?: string | null
   account: MastodonAccount
   media_attachments: MastodonMediaAttachment[]
   mentions: { id: string; username: string; url: string; acct: string }[]

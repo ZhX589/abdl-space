@@ -109,6 +109,9 @@ CREATE TABLE IF NOT EXISTS posts (
   in_reply_to_type TEXT,                 -- 'post' 或 'comment'
   in_reply_to_account_id INTEGER,        -- 回复目标的用户ID
   poll_id INTEGER,                       -- 关联的投票ID
+  geo_province TEXT,                     -- 同城帖子：发帖时省份快照（null=不展示）
+  geo_city TEXT,                         -- 城市（仅 geo_precision 含市级时）
+  geo_district TEXT,                     -- 区县（仅 geo_precision 到区级时）
   edited_at DATETIME,                    -- 编辑时间
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (user_id) REFERENCES users(id),
@@ -117,6 +120,9 @@ CREATE TABLE IF NOT EXISTS posts (
   FOREIGN KEY (poll_id) REFERENCES polls(id)
 );
 CREATE INDEX IF NOT EXISTS idx_posts_announcement ON posts(is_announcement, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_posts_geo_province ON posts(geo_province) WHERE geo_province IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_posts_geo_city ON posts(geo_city) WHERE geo_city IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_posts_geo_district ON posts(geo_district) WHERE geo_district IS NOT NULL;
 
 -- 小说作者作品（正文、审核与发布在后续 revision 表中扩展）
 CREATE TABLE IF NOT EXISTS novels (

@@ -400,6 +400,9 @@ export interface Env {
   IMGBED_LIST_KEY?: string
   VAPID_PUBLIC_KEY?: string
   VAPID_PRIVATE_KEY?: string
+  // 百度地图 IP 定位（SN 校验）
+  BAIDU_MAP_IP_AK?: string
+  BAIDU_MAP_IP_SK?: string
 }
 
 /** JWT payload 结构 */

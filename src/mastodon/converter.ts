@@ -80,6 +80,23 @@ export function toAccount(user: {
   }
 }
 
+/** 组合省市区为展示用位置串；null 表示无位置信息 */
+function buildGeoLocation(province?: string | null, city?: string | null, district?: string | null): string | null {
+  if (district) return `${province ?? ''}${city ?? ''}${district}`
+  if (city) return `${province ?? ''}${city}`
+  if (province) return province
+  return null
+}
+
+/** 从 p.* 查询结果提取 geo 字段对象（透传给 toStatus） */
+export function geoFromPost(r: Record<string, unknown>): { geo_province: string | null; geo_city: string | null; geo_district: string | null } {
+  return {
+    geo_province: r.geo_province as string | null,
+    geo_city: r.geo_city as string | null,
+    geo_district: r.geo_district as string | null,
+  }
+}
+
 /** ABDL Post → Mastodon Status */
 export function toStatus(post: {
   id: number
@@ -106,6 +123,9 @@ export function toStatus(post: {
   in_reply_to_type?: string | null
   in_reply_to_account_id?: string | number | null
   edited_at?: string | null
+  geo_province?: string | null
+  geo_city?: string | null
+  geo_district?: string | null
   poll?: MastodonPoll | null
   linkCard?: MastodonPreviewCard | null
 }, account: MastodonAccount, opts?: {
@@ -141,6 +161,7 @@ export function toStatus(post: {
     content: contentHtml,
     reblog: opts?.reblog ?? null,
     application: { name: 'ABDL Space', website: `https://${INSTANCE_DOMAIN}` },
+    geo_location: buildGeoLocation(post.geo_province, post.geo_city, post.geo_district),
     account,
     media_attachments: images.map((img, i) => toMediaAttachment(i, img.image_url, img.alt_text, undefined, img.blurhash, img.preview_url, img.storage_provider)),
     mentions: [],

@@ -16,6 +16,9 @@ import type { MastodonNotification, MastodonAccount, MastodonPoll, MastodonStatu
 import { mastodonAuth, buildInstance, resolveStatus, parseMastoIdForCursor } from './shared.ts'
 import { syncPostToNBW } from '../lib/nbw-sync.ts'
 import { dispatchStatusNotifications } from '../lib/status-notify.ts'
+import { resolveGeoFromClient, resolveProvinceFromIP } from '../lib/post-geo.ts'
+import { resolveProvinceFromBaiduIp } from '../lib/baidu-ip.ts'
+import { geoFromPost } from './converter.ts'
 import { nbwS2SRequest } from '../lib/nbw.ts'
 import { handleNBWTimeline, buildNBWTimelineParams } from './nbw-timeline.ts'
 import { mergeAllTimelinePage } from './all-timeline.ts'
@@ -352,6 +355,26 @@ async function loadCommentImages(db: D1Database, commentIds: number[]): Promise<
 // ============================================================
 mastodon.get('/instance', async (c) => {
   return c.json(await buildInstance(c.env.abdl_space_db))
+})
+
+// ============================================================
+// GET /api/v1/geo/ip-province — 根据调用者 IP 返回所属省/市（无定位权限时兜底）
+// 走百度地图普通IP定位（SN 校验）。返回 { province, city }
+// 注意：请求经 maincdn Worker 中转，CF-Connecting-IP 是 CF 内部 IP；
+// maincdn 在边缘读取真实客户端 IP 并注入 X-Real-Client-IP，这里优先读它。
+// ============================================================
+mastodon.get('/geo/ip-province', async (c) => {
+  const ak = c.env.BAIDU_MAP_IP_AK
+  const sk = c.env.BAIDU_MAP_IP_SK
+  const clientIp = c.req.header('X-Real-Client-IP')
+    || c.req.header('CF-Connecting-IP')
+    || c.req.header('X-Forwarded-For')?.split(',')[0]?.trim()
+    || ''
+  if (!ak || !sk || !clientIp) {
+    return c.json({ province: null, city: null })
+  }
+  const result = await resolveProvinceFromBaiduIp(clientIp, ak, sk)
+  return c.json({ province: result.province, city: result.city })
 })
 
 // DEBUG: check raw content of a post
@@ -835,6 +858,7 @@ mastodon.get('/accounts/:id/statuses', async (c) => {
       in_reply_to_account_id: r.in_reply_to_account_id as number | null,
       poll: r.poll_id ? pollMap.get(r.poll_id as number) ?? null : null,
       linkCard: cardMap.get(r.id as number) ?? null,
+      ...geoFromPost(r),
     }, account, { favourited: likedSet.has(r.id as number), bookmarked: bookmarkSet.has(r.id as number), reblog: r.repost_id ? reblogMap.get(r.repost_id as number) : undefined }))
   })()
 
@@ -997,6 +1021,7 @@ mastodon.post('/statuses', async (c) => {
     scheduled_at?: string;
     media_attributes?: { id?: string; description?: string; blurhash?: string | null }[];
     nbw_fid?: number;
+    geo_province?: unknown; geo_city?: unknown; geo_district?: unknown;
   }
   try { body = await c.req.json() } catch { return c.json({ error: 'invalid body' }, 400) }
 
@@ -1034,11 +1059,20 @@ mastodon.post('/statuses', async (c) => {
     }
   }
 
+  // 同城帖子：位置快照（客户端定位优先，无省名时 IP 属地兜底）
+  const clientGeo = resolveGeoFromClient(body)
+  let geoProvince = clientGeo.province
+  const geoCity = clientGeo.city
+  const geoDistrict = clientGeo.district
+  if (geoProvince === null && body.geo_province === undefined) {
+    geoProvince = resolveProvinceFromIP(c)
+  }
+
   const result = await run(
     c.env.abdl_space_db,
-    `INSERT INTO posts (user_id, content, has_nsfw, mental_crisis, spoiler_text, visibility, language, in_reply_to_id, in_reply_to_type, in_reply_to_account_id, poll_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [user.sub, content, hasNsfw, mentalCrisis, spoilerText, visibility, language, inReplyToId, inReplyToType, inReplyToAccountId, null]
+    `INSERT INTO posts (user_id, content, has_nsfw, mental_crisis, spoiler_text, visibility, language, in_reply_to_id, in_reply_to_type, in_reply_to_account_id, poll_id, geo_province, geo_city, geo_district)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [user.sub, content, hasNsfw, mentalCrisis, spoilerText, visibility, language, inReplyToId, inReplyToType, inReplyToAccountId, null, geoProvince, geoCity, geoDistrict]
   )
   const postId = result.meta.last_row_id as number
 
@@ -1129,6 +1163,7 @@ mastodon.post('/statuses', async (c) => {
     in_reply_to_type: post.in_reply_to_type as string | null,
     in_reply_to_account_id: post.in_reply_to_account_id as number | null,
     poll,
+    ...geoFromPost(post),
   }, account))
 })
 
@@ -1216,6 +1251,7 @@ mastodon.get('/statuses/:id', async (c) => {
     in_reply_to_account_id: post.in_reply_to_account_id as number | null,
     poll,
     linkCard,
+    ...geoFromPost(post),
   }, account, { reblog }))
 })
 
@@ -1299,7 +1335,7 @@ mastodon.post('/statuses/:id/favourite', async (c) => {
      FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`, [resolved.realId])
   if (!post) return c.json({ error: 'Record not found' }, 404)
   const account = toAccount({ id: post.user_id as number, username: post.username as string, avatar: post.avatar as string | null, role: post.role as string, bio: post.bio as string | null, created_at: post.user_created_at as string })
-  return c.json(toStatus({ id: post.id as number, user_id: post.user_id as number, content: post.content as string, like_count: post.like_count as number, comment_count: post.comment_count as number, created_at: post.created_at as string }, account, { favourited: true }))
+  return c.json(toStatus({ id: post.id as number, user_id: post.user_id as number, content: post.content as string, like_count: post.like_count as number, comment_count: post.comment_count as number, created_at: post.created_at as string, ...geoFromPost(post) }, account, { favourited: true }))
 })
 
 // ============================================================
@@ -1517,6 +1553,7 @@ mastodon.get('/timelines/home', async (c) => {
         in_reply_to_account_id: r.in_reply_to_account_id as number | null,
         poll: r.poll_id ? pollMap.get(r.poll_id as number) ?? null : null,
         linkCard: cardMap.get(r.id as number) ?? null,
+        ...geoFromPost(r),
       }, account, { favourited: likedSet.has(r.id as number), bookmarked: bookmarkSet.has(r.id as number), reblog: r.repost_id ? reblogMap.get(r.repost_id as number) : undefined })
     })
   })()
@@ -1524,6 +1561,82 @@ mastodon.get('/timelines/home', async (c) => {
   const link = buildLinkHeader('/api/v1/timelines/home', homeStatuses, limit)
   if (link) c.header('Link', link)
   return c.json(homeStatuses)
+})
+
+// ============================================================
+// GET /api/v1/timelines/geo — 同城时间线：按省（可选市/区）筛选的公开根帖
+// ============================================================
+mastodon.get('/timelines/geo', async (c) => {
+  const province = (c.req.query('province') || '').trim()
+  const city = (c.req.query('city') || '').trim()
+  const district = (c.req.query('district') || '').trim()
+  if (!province || province.length > 50)
+    return c.json({ error: 'province query parameter is required' }, 400)
+
+  const limit = Math.min(40, Math.max(1, parseInt(c.req.query('limit') || '20')))
+  const maxId = c.req.query('max_id')
+  const sinceId = c.req.query('since_id')
+
+  let sql = `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
+    (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
+    (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) + (SELECT COUNT(*) FROM posts WHERE in_reply_to_id = p.id) as comment_count,
+    (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count,
+     (SELECT COUNT(*) FROM likes WHERE target_type = 'bookmark' AND target_id = p.id) as bookmarks_count
+    FROM posts p JOIN users u ON p.user_id = u.id
+    WHERE p.geo_province = ? AND p.in_reply_to_id IS NULL AND p.repost_id IS NULL`
+  const params: unknown[] = [province]
+  if (city) { sql += ' AND p.geo_city = ?'; params.push(city) }
+  if (district) { sql += ' AND p.geo_district = ?'; params.push(district) }
+  if (maxId) { sql += ' AND p.id < ?'; params.push(parseMastoIdForCursor(maxId) ?? 0) }
+  if (sinceId) { sql += ' AND p.id > ?'; params.push(parseMastoIdForCursor(sinceId) ?? 0) }
+  sql += ' ORDER BY p.created_at DESC LIMIT ?'
+  params.push(limit)
+
+  const posts = await query<Record<string, unknown>>(c.env.abdl_space_db, sql, params)
+
+  const user = await mastodonAuth(c)
+  const likedSet = new Set<number>()
+  const bookmarkSet = new Set<number>()
+  if (user) {
+    const postIds = posts.map(r => r.id as number)
+    if (postIds.length > 0) {
+      const liked = await query<{ target_id: number; target_type: string }>(
+        c.env.abdl_space_db,
+        `SELECT target_id, target_type FROM likes WHERE user_id = ? AND target_type IN ('post','bookmark') AND target_id IN (${postIds.map(() => '?').join(',')})`,
+        [user.sub, ...postIds]
+      )
+      for (const l of liked) {
+        if (l.target_type === 'post') likedSet.add(l.target_id)
+        else bookmarkSet.add(l.target_id)
+      }
+    }
+  }
+
+  const geoStatuses = await (async () => {
+    const postIds = posts.map(r => r.id as number)
+    const imagesMap = await loadPostImages(c.env.abdl_space_db, postIds)
+    const pollIds = posts.filter(r => r.poll_id).map(r => r.poll_id as number)
+    const pollMap = await loadPolls(c.env.abdl_space_db, pollIds)
+    return posts.map(r => toStatus({
+      id: r.id as number, user_id: r.user_id as number, content: r.content as string,
+      like_count: r.like_count as number, comment_count: r.comment_count as number,
+      reblogs_count: r.reblogs_count as number, bookmarks_count: r.bookmarks_count as number,
+      shares_count: 0, has_nsfw: !!r.has_nsfw, mental_crisis: !!r.mental_crisis,
+      created_at: r.created_at as string, images: imagesMap.get(r.id as number),
+      spoiler_text: r.spoiler_text || '', visibility: r.visibility as string,
+      language: r.language as string,
+      in_reply_to_id: null, in_reply_to_type: null, in_reply_to_account_id: null,
+      poll: r.poll_id ? pollMap.get(r.poll_id as number) ?? null : null,
+      ...geoFromPost(r),
+    }, toAccount({
+      id: r.user_id as number, username: r.username as string, avatar: r.avatar as string | null,
+      role: r.role as string, bio: r.bio as string | null, created_at: r.user_created_at as string,
+    }), { favourited: likedSet.has(r.id as number), reblogged: false }))
+  })()
+
+  const link = buildLinkHeader('/api/v1/timelines/geo', geoStatuses, limit)
+  if (link) c.header('Link', link)
+  return c.json(geoStatuses)
 })
 
 // ============================================================
@@ -1601,6 +1714,7 @@ mastodon.get('/timelines/public', async (c) => {
         in_reply_to_account_id: r.in_reply_to_account_id as number | null,
         poll: r.poll_id ? pollMap.get(r.poll_id as number) ?? null : null,
         linkCard: cardMap.get(r.id as number) ?? null,
+        ...geoFromPost(r),
       }, account, { favourited: likedSet.has(r.id as number), bookmarked: bookmarkSet.has(r.id as number), reblog: r.repost_id ? reblogMap.get(r.repost_id as number) : undefined })
     })
   })()
