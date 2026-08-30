@@ -43,12 +43,21 @@ async function safeGetCommentImages(db: D1Database, commentId: number): Promise<
   }
 }
 
-async function safeGetImages(db: D1Database, postId: number): Promise<{image_url: string; is_nsfw: number}[]> {
+async function safeGetImages(db: D1Database, postId: number): Promise<{image_url: string; is_nsfw: number; preview_url: string | null}[]> {
   try {
-    const result = await db.prepare('SELECT image_url, is_nsfw, alt_text FROM post_images WHERE post_id = ? ORDER BY sort_order').bind(postId).all();
-    return (result.results || []) as {image_url: string; is_nsfw: number}[];
+    const result = await db.prepare('SELECT image_url, is_nsfw, alt_text, preview_url FROM post_images WHERE post_id = ? ORDER BY sort_order').bind(postId).all();
+    return (result.results || []) as {image_url: string; is_nsfw: number; preview_url: string | null}[];
   } catch {
     return [];
+  }
+}
+
+// 网页端图片下发：带上小图地址（preview_url），原图供点击大图使用
+function shapeImage(img: { image_url: string; is_nsfw: number; preview_url?: string | null }) {
+  return {
+    image_url: img.image_url,
+    is_nsfw: !!img.is_nsfw,
+    ...(img.preview_url ? { preview_url: img.preview_url } : {}),
   }
 }
 
@@ -155,16 +164,16 @@ posts.get('/', async (c) => {
 
   // Batch: all images for posts
   const allImages = postIds.length > 0
-    ? await query<{ post_id: number; image_url: string; is_nsfw: number }>(
+    ? await query<{ post_id: number; image_url: string; is_nsfw: number; preview_url: string | null }>(
         c.env.abdl_space_db,
-        `SELECT post_id, image_url, is_nsfw, alt_text FROM post_images WHERE post_id IN (${postIds.map(() => '?').join(',')}) ORDER BY sort_order`,
+        `SELECT post_id, image_url, is_nsfw, alt_text, preview_url FROM post_images WHERE post_id IN (${postIds.map(() => '?').join(',')}) ORDER BY sort_order`,
         postIds
       )
     : []
-  const imagesMap = new Map<number, { image_url: string; is_nsfw: number }[]>()
+  const imagesMap = new Map<number, { image_url: string; is_nsfw: number; preview_url: string | null }[]>()
   for (const img of allImages) {
     if (!imagesMap.has(img.post_id)) imagesMap.set(img.post_id, [])
-    imagesMap.get(img.post_id)!.push({ image_url: img.image_url, is_nsfw: img.is_nsfw })
+    imagesMap.get(img.post_id)!.push({ image_url: img.image_url, is_nsfw: img.is_nsfw, preview_url: img.preview_url })
   }
 
   // Batch: repost data + repost images
@@ -176,22 +185,22 @@ posts.get('/', async (c) => {
        FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id IN (${repostIds.map(() => '?').join(',')})`,
       repostIds
     )
-    const repostImages = await query<{ post_id: number; image_url: string; is_nsfw: number }>(
+    const repostImages = await query<{ post_id: number; image_url: string; is_nsfw: number; preview_url: string | null }>(
       c.env.abdl_space_db,
-      `SELECT post_id, image_url, is_nsfw, alt_text FROM post_images WHERE post_id IN (${repostIds.map(() => '?').join(',')}) ORDER BY sort_order`,
+      `SELECT post_id, image_url, is_nsfw, alt_text, preview_url FROM post_images WHERE post_id IN (${repostIds.map(() => '?').join(',')}) ORDER BY sort_order`,
       repostIds
     )
-    const repostImagesMap = new Map<number, { image_url: string; is_nsfw: number }[]>()
+    const repostImagesMap = new Map<number, { image_url: string; is_nsfw: number; preview_url: string | null }[]>()
     for (const img of repostImages) {
       if (!repostImagesMap.has(img.post_id)) repostImagesMap.set(img.post_id, [])
-      repostImagesMap.get(img.post_id)!.push({ image_url: img.image_url, is_nsfw: img.is_nsfw })
+      repostImagesMap.get(img.post_id)!.push({ image_url: img.image_url, is_nsfw: img.is_nsfw, preview_url: img.preview_url })
     }
     for (const orig of repostRows) {
       repostMap.set(orig.id as number, {
         id: orig.id,
         user: { id: orig.user_id, username: orig.username, avatar: orig.avatar ?? DEFAULT_AVATAR, role: orig.role, is_beta_user: !!orig.is_beta_user },
         content: orig.content,
-        images: (repostImagesMap.get(orig.id as number) || []).map(img => ({ image_url: img.image_url, is_nsfw: !!img.is_nsfw })),
+        images: (repostImagesMap.get(orig.id as number) || []).map(shapeImage),
         created_at: orig.created_at
       })
     }
@@ -209,7 +218,7 @@ posts.get('/', async (c) => {
     like_count: r.like_count,
     has_liked: likedSet.has(r.id as number),
     comment_count: r.comment_count,
-    images: (imagesMap.get(r.id as number) || []).map(img => ({ image_url: img.image_url, is_nsfw: !!img.is_nsfw })),
+    images: (imagesMap.get(r.id as number) || []).map(shapeImage),
     created_at: r.created_at
   }))
 
@@ -245,7 +254,7 @@ posts.get('/announcements/latest', async (c) => {
       id: post.id,
       user: { id: post.user_id, username: post.username, avatar: post.avatar ?? DEFAULT_AVATAR, role: post.role },
       content: post.content,
-      images: images.map(img => ({ image_url: img.image_url, is_nsfw: !!img.is_nsfw })),
+      images: images.map(shapeImage),
       created_at: post.created_at
     }
   })
@@ -351,7 +360,7 @@ posts.get('/:id', async (c) => {
     user: { id: cmt.user_id, username: cmt.username, avatar: cmt.avatar ?? DEFAULT_AVATAR, role: cmt.role, is_beta_user: !!cmt.is_beta_user },
     parent_id: cmt.parent_id ?? null,
     content: cmt.content,
-    images: (cmtImagesMap.get(cmt.id as number) || []).map(img => ({ image_url: img.image_url, is_nsfw: !!img.is_nsfw })),
+    images: (cmtImagesMap.get(cmt.id as number) || []).map(shapeImage),
     like_count: cmtLikeMap.get(cmt.id as number) ?? 0,
     has_liked: cmtLikedSet.has(cmt.id as number),
     created_at: cmt.created_at
@@ -375,7 +384,7 @@ posts.get('/:id', async (c) => {
         id: origPost.id,
         user: { id: origPost.user_id, username: origPost.username, avatar: origPost.avatar ?? DEFAULT_AVATAR, role: origPost.role, is_beta_user: !!origPost.is_beta_user },
         content: origPost.content,
-        images: origImages.map(img => ({ image_url: img.image_url, is_nsfw: !!img.is_nsfw })),
+        images: origImages.map(shapeImage),
         created_at: origPost.created_at
       }
     } else {
@@ -398,7 +407,7 @@ posts.get('/:id', async (c) => {
       like_count: post.like_count,
       has_liked: hasLiked,
       comment_count: post.comment_count,
-      images: postImages.map(img => ({ image_url: img.image_url, is_nsfw: !!img.is_nsfw })),
+      images: postImages.map(shapeImage),
       created_at: post.created_at
     },
     comments: commentsWithLikes
