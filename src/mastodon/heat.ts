@@ -41,7 +41,32 @@ export function computeHeat(input: HeatInput): number {
   return Math.round(heat)
 }
 
-/** 12 小时滑窗阈值（秒）。同一用户对同一帖子在此窗口内重复浏览不计数。 */
+/** 供 computeHeatFromRow 读取的查询行结构（任意 SQL 行，字段缺失按 0/false 处理）。 */
+export interface HeatRow {
+  shares_count?: number | null
+  like_count?: number | null
+  bookmarks_count?: number | null
+  views_count?: number | null
+  created_at?: string | null
+  has_image?: number | null
+}
+
+/**
+ * 直接由一条查询行计算热度，避免各端点重复拼 computeHeat 入参。
+ * hasImage 优先取显式传入值；未传时读行内 has_image（EXISTS 子查询结果 0/1）。
+ */
+export function computeHeatFromRow(r: HeatRow, hasImage?: boolean): number {
+  return computeHeat({
+    sharesCount: (r.shares_count as number) ?? 0,
+    favouritesCount: (r.like_count as number) ?? 0,
+    bookmarksCount: (r.bookmarks_count as number) ?? 0,
+    viewsCount: (r.views_count as number) ?? 0,
+    hasImage: typeof hasImage === 'boolean' ? hasImage : !!(r.has_image as number),
+    within24h: isWithin24h(r.created_at as string),
+  })
+}
+
+/** 12 小时滑窗阈值（秒）。同一用户对同一帖在次窗口内重复浏览只计数 1 次。 */
 export const VIEW_DEDUP_WINDOW_SECONDS = 12 * 60 * 60
 
 /**
