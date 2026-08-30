@@ -860,7 +860,7 @@ mastodon.get('/accounts/:id/statuses', async (c) => {
       is_announcement: !!r.is_announcement,
       like_count: r.like_count as number,
       comment_count: r.comment_count as number,
-      reblogs_count: r.reblogs_count as number, bookmarks_count: r.bookmarks_count as number, shares_count: 0,
+      reblogs_count: r.reblogs_count as number, bookmarks_count: r.bookmarks_count as number, shares_count: (r.shares_count as number) ?? 0,
       created_at: r.created_at as string,
       images: imagesMap.get(r.id as number),
       spoiler_text: r.spoiler_text || '', visibility: r.visibility as string,
@@ -1175,7 +1175,7 @@ mastodon.post('/statuses', async (c) => {
   return c.json(toStatus({
     id: post.id as number, user_id: post.user_id as number, content: post.content as string,
     like_count: post.like_count as number, comment_count: post.comment_count as number,
-    reblogs_count: post.reblogs_count as number, bookmarks_count: post.bookmarks_count as number, shares_count: 0, has_nsfw: !!post.has_nsfw, mental_crisis: !!post.mental_crisis,
+    reblogs_count: post.reblogs_count as number, bookmarks_count: post.bookmarks_count as number, shares_count: (post.shares_count as number) ?? 0, has_nsfw: !!post.has_nsfw, mental_crisis: !!post.mental_crisis,
     created_at: post.created_at as string, images,
     spoiler_text: post.spoiler_text || '', visibility: post.visibility as string,
     language: post.language as string,
@@ -1438,7 +1438,7 @@ mastodon.post('/statuses/:id/reblog', async (c) => {
     if (!post) return c.json({ error: 'Record not found' }, 404)
     const account = toAccount({ id: post.user_id as number, username: post.username as string, avatar: post.avatar as string | null, role: post.role as string, bio: post.bio as string | null, created_at: post.user_created_at as string })
     const images = await query<PostImageRow>(c.env.abdl_space_db, `${POST_IMAGE_SELECT} FROM post_images WHERE post_id = ? ORDER BY sort_order`, [realId])
-    return c.json(toStatus({ id: post.id as number, user_id: post.user_id as number, content: post.content as string, like_count: post.like_count as number, comment_count: post.comment_count as number, reblogs_count: post.reblogs_count as number, bookmarks_count: post.bookmarks_count as number, shares_count: 0, created_at: post.created_at as string, images }, account, { reblogged: true }))
+    return c.json(toStatus({ id: post.id as number, user_id: post.user_id as number, content: post.content as string, like_count: post.like_count as number, comment_count: post.comment_count as number, reblogs_count: post.reblogs_count as number, bookmarks_count: post.bookmarks_count as number, shares_count: (post.shares_count as number) ?? 0, created_at: post.created_at as string, images }, account, { reblogged: true }))
   }
 
   // Create repost (reblog = new post with repost_id pointing to original)
@@ -1467,7 +1467,7 @@ mastodon.post('/statuses/:id/reblog', async (c) => {
   if (!post) return c.json({ error: 'Record not found' }, 404)
   const account = toAccount({ id: post.user_id as number, username: post.username as string, avatar: post.avatar as string | null, role: post.role as string, bio: post.bio as string | null, created_at: post.user_created_at as string })
   const images = await query<PostImageRow>(c.env.abdl_space_db, `${POST_IMAGE_SELECT} FROM post_images WHERE post_id = ? ORDER BY sort_order`, [realId])
-  return c.json(toStatus({ id: post.id as number, user_id: post.user_id as number, content: post.content as string, like_count: post.like_count as number, comment_count: post.comment_count as number, reblogs_count: post.reblogs_count as number, bookmarks_count: post.bookmarks_count as number, shares_count: 0, created_at: post.created_at as string, images }, account, { reblogged: true }))
+  return c.json(toStatus({ id: post.id as number, user_id: post.user_id as number, content: post.content as string, like_count: post.like_count as number, comment_count: post.comment_count as number, reblogs_count: post.reblogs_count as number, bookmarks_count: post.bookmarks_count as number, shares_count: (post.shares_count as number) ?? 0, created_at: post.created_at as string, images }, account, { reblogged: true }))
 })
 
 // ============================================================
@@ -1506,7 +1506,7 @@ mastodon.post('/statuses/:id/unreblog', async (c) => {
   if (!post) return c.json({ error: 'Record not found' }, 404)
   const account = toAccount({ id: post.user_id as number, username: post.username as string, avatar: post.avatar as string | null, role: post.role as string, bio: post.bio as string | null, created_at: post.user_created_at as string })
   const images = await query<PostImageRow>(c.env.abdl_space_db, `${POST_IMAGE_SELECT} FROM post_images WHERE post_id = ? ORDER BY sort_order`, [realId])
-  return c.json(toStatus({ id: post.id as number, user_id: post.user_id as number, content: post.content as string, like_count: post.like_count as number, comment_count: post.comment_count as number, reblogs_count: post.reblogs_count as number, bookmarks_count: post.bookmarks_count as number, shares_count: 0, created_at: post.created_at as string, images }, account, { reblogged: false }))
+  return c.json(toStatus({ id: post.id as number, user_id: post.user_id as number, content: post.content as string, like_count: post.like_count as number, comment_count: post.comment_count as number, reblogs_count: post.reblogs_count as number, bookmarks_count: post.bookmarks_count as number, shares_count: (post.shares_count as number) ?? 0, created_at: post.created_at as string, images }, account, { reblogged: false }))
 })
 
 // ============================================================
@@ -1575,7 +1575,7 @@ mastodon.get('/timelines/home', async (c) => {
       return toStatus({
         id: r.id as number, user_id: r.user_id as number, content: r.content as string,
         diaper_id: r.diaper_id as number | null, like_count: r.like_count as number,
-        comment_count: r.comment_count as number, reblogs_count: r.reblogs_count as number, bookmarks_count: r.bookmarks_count as number, shares_count: 0,
+        comment_count: r.comment_count as number, reblogs_count: r.reblogs_count as number, bookmarks_count: r.bookmarks_count as number, shares_count: (r.shares_count as number) ?? 0,
         has_nsfw: !!r.has_nsfw, mental_crisis: !!r.mental_crisis,
         created_at: r.created_at as string,
         images: imagesMap.get(r.id as number),
@@ -1654,7 +1654,7 @@ mastodon.get('/timelines/geo', async (c) => {
       id: r.id as number, user_id: r.user_id as number, content: r.content as string,
       like_count: r.like_count as number, comment_count: r.comment_count as number,
       reblogs_count: r.reblogs_count as number, bookmarks_count: r.bookmarks_count as number,
-      shares_count: 0, has_nsfw: !!r.has_nsfw, mental_crisis: !!r.mental_crisis,
+      shares_count: (r.shares_count as number) ?? 0, has_nsfw: !!r.has_nsfw, mental_crisis: !!r.mental_crisis,
       created_at: r.created_at as string, images: imagesMap.get(r.id as number),
       spoiler_text: r.spoiler_text || '', visibility: r.visibility as string,
       language: r.language as string,
@@ -1823,7 +1823,7 @@ mastodon.get('/timelines/public', async (c) => {
       return toStatus({
         id: r.id as number, user_id: r.user_id as number, content: r.content as string,
         diaper_id: r.diaper_id as number | null, like_count: r.like_count as number,
-        comment_count: r.comment_count as number, reblogs_count: r.reblogs_count as number, bookmarks_count: r.bookmarks_count as number, shares_count: 0,
+        comment_count: r.comment_count as number, reblogs_count: r.reblogs_count as number, bookmarks_count: r.bookmarks_count as number, shares_count: (r.shares_count as number) ?? 0,
         has_nsfw: !!r.has_nsfw, mental_crisis: !!r.mental_crisis,
         created_at: r.created_at as string,
         images: imagesMap.get(r.id as number),
@@ -1878,7 +1878,7 @@ async function fetchAbdlPosts(c: Context<{ Bindings: Env }>, limit: number, maxI
     return toStatus({
       id: r.id as number, user_id: r.user_id as number, content: r.content as string,
       diaper_id: r.diaper_id as number | null, like_count: r.like_count as number,
-      comment_count: r.comment_count as number, reblogs_count: r.reblogs_count as number, bookmarks_count: r.bookmarks_count as number, shares_count: 0,
+      comment_count: r.comment_count as number, reblogs_count: r.reblogs_count as number, bookmarks_count: r.bookmarks_count as number, shares_count: (r.shares_count as number) ?? 0,
       has_nsfw: !!r.has_nsfw, mental_crisis: !!r.mental_crisis, created_at: r.created_at as string,
       images: imagesMap.get(r.id as number), spoiler_text: r.spoiler_text || '',
       visibility: r.visibility as string, language: r.language as string,
@@ -1989,7 +1989,7 @@ mastodon.get('/timelines/tag/:hashtag', async (c) => {
       return toStatus({
         id: r.id as number, user_id: r.user_id as number, content: r.content as string,
         like_count: r.like_count as number, comment_count: r.comment_count as number,
-        reblogs_count: r.reblogs_count as number, bookmarks_count: r.bookmarks_count as number, shares_count: 0,
+        reblogs_count: r.reblogs_count as number, bookmarks_count: r.bookmarks_count as number, shares_count: (r.shares_count as number) ?? 0,
         has_nsfw: !!r.has_nsfw, mental_crisis: !!r.mental_crisis,
         created_at: r.created_at as string,
         images: imagesMap.get(r.id as number),
@@ -2350,7 +2350,7 @@ mastodon.get('/search', async (c) => {
       return toStatus({
         id: r.id as number, user_id: r.user_id as number, content: r.content as string,
         like_count: r.like_count as number, comment_count: r.comment_count as number,
-        reblogs_count: r.reblogs_count as number, bookmarks_count: r.bookmarks_count as number, shares_count: 0,
+        reblogs_count: r.reblogs_count as number, bookmarks_count: r.bookmarks_count as number, shares_count: (r.shares_count as number) ?? 0,
         has_nsfw: !!r.has_nsfw, mental_crisis: !!r.mental_crisis,
         created_at: r.created_at as string,
         images: imagesMap.get(r.id as number),
@@ -2446,7 +2446,7 @@ mastodon.get('/favourites', async (c) => {
     return toStatus({
       id: r.id as number, user_id: r.user_id as number, content: r.content as string,
       like_count: r.like_count as number, comment_count: r.comment_count as number,
-      reblogs_count: r.reblogs_count as number, bookmarks_count: r.bookmarks_count as number, shares_count: 0, has_nsfw: !!r.has_nsfw, mental_crisis: !!r.mental_crisis,
+      reblogs_count: r.reblogs_count as number, bookmarks_count: r.bookmarks_count as number, shares_count: (r.shares_count as number) ?? 0, has_nsfw: !!r.has_nsfw, mental_crisis: !!r.mental_crisis,
       created_at: r.created_at as string,
       images: imagesMap.get(r.id as number),
       spoiler_text: r.spoiler_text || '', visibility: r.visibility as string,
@@ -2512,7 +2512,7 @@ mastodon.get('/bookmarks', async (c) => {
     return toStatus({
       id: r.id as number, user_id: r.user_id as number, content: r.content as string,
       like_count: r.like_count as number, comment_count: r.comment_count as number,
-      reblogs_count: r.reblogs_count as number, bookmarks_count: r.bookmarks_count as number, shares_count: 0, has_nsfw: !!r.has_nsfw, mental_crisis: !!r.mental_crisis,
+      reblogs_count: r.reblogs_count as number, bookmarks_count: r.bookmarks_count as number, shares_count: (r.shares_count as number) ?? 0, has_nsfw: !!r.has_nsfw, mental_crisis: !!r.mental_crisis,
       created_at: r.created_at as string,
       images: imagesMap.get(r.id as number),
       spoiler_text: r.spoiler_text || '', visibility: r.visibility as string,
@@ -2561,7 +2561,7 @@ mastodon.post('/statuses/:id/bookmark', async (c) => {
   return c.json(toStatus({
     id: post.id as number, user_id: post.user_id as number, content: post.content as string,
     has_nsfw: !!post.has_nsfw, mental_crisis: !!post.mental_crisis, like_count: post.like_count as number, comment_count: post.comment_count as number,
-    reblogs_count: post.reblogs_count as number, bookmarks_count: post.bookmarks_count as number, shares_count: 0, created_at: post.created_at as string,
+    reblogs_count: post.reblogs_count as number, bookmarks_count: post.bookmarks_count as number, shares_count: (post.shares_count as number) ?? 0, created_at: post.created_at as string,
     images: images.get(resolved.realId), bookmarked: true,
   }, account, { bookmarked: true }))
 })
@@ -2598,7 +2598,7 @@ mastodon.post('/statuses/:id/unbookmark', async (c) => {
   return c.json(toStatus({
     id: post.id as number, user_id: post.user_id as number, content: post.content as string,
     has_nsfw: !!post.has_nsfw, mental_crisis: !!post.mental_crisis, like_count: post.like_count as number, comment_count: post.comment_count as number,
-    reblogs_count: post.reblogs_count as number, bookmarks_count: post.bookmarks_count as number, shares_count: 0, created_at: post.created_at as string,
+    reblogs_count: post.reblogs_count as number, bookmarks_count: post.bookmarks_count as number, shares_count: (post.shares_count as number) ?? 0, created_at: post.created_at as string,
     images: images.get(resolved.realId), bookmarked: false,
   }, account, { bookmarked: false }))
 })
@@ -2677,7 +2677,7 @@ mastodon.get('/statuses/:id/context', async (c) => {
     return toStatus({
       id: r.id as number, user_id: r.user_id as number, content: r.content as string,
       diaper_id: r.diaper_id as number | null, like_count: r.like_count as number,
-      comment_count: r.comment_count as number, reblogs_count: r.reblogs_count as number, bookmarks_count: r.bookmarks_count as number, shares_count: 0,
+      comment_count: r.comment_count as number, reblogs_count: r.reblogs_count as number, bookmarks_count: r.bookmarks_count as number, shares_count: (r.shares_count as number) ?? 0,
       has_nsfw: !!r.has_nsfw, mental_crisis: !!r.mental_crisis, created_at: r.created_at as string,
       images: replyImagesMap.get(r.id as number),
       spoiler_text: r.spoiler_text || '', visibility: r.visibility as string,
@@ -2716,7 +2716,7 @@ mastodon.get('/statuses/:id/context', async (c) => {
         ancestors.unshift(toStatus({
           id: parent.id as number, user_id: parent.user_id as number, content: parent.content as string,
           diaper_id: parent.diaper_id as number | null, like_count: parent.like_count as number,
-          comment_count: parent.comment_count as number, reblogs_count: parent.reblogs_count as number, bookmarks_count: parent.bookmarks_count as number, shares_count: 0,
+          comment_count: parent.comment_count as number, reblogs_count: parent.reblogs_count as number, bookmarks_count: parent.bookmarks_count as number, shares_count: (parent.shares_count as number) ?? 0,
           has_nsfw: !!parent.has_nsfw, created_at: parent.created_at as string,
           images: undefined,
           spoiler_text: parent.spoiler_text || '', visibility: parent.visibility as string,
@@ -3215,7 +3215,7 @@ mastodon.get('/trends/statuses', async (c) => {
     return toStatus({
       id: r.id as number, user_id: r.user_id as number, content: r.content as string,
       like_count: r.like_count as number, comment_count: r.comment_count as number,
-      reblogs_count: r.reblogs_count as number, bookmarks_count: r.bookmarks_count as number, shares_count: 0,
+      reblogs_count: r.reblogs_count as number, bookmarks_count: r.bookmarks_count as number, shares_count: (r.shares_count as number) ?? 0,
       has_nsfw: !!r.has_nsfw, mental_crisis: !!r.mental_crisis,
       created_at: r.created_at as string,
       images: imagesMap.get(r.id as number),
