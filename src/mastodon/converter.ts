@@ -114,6 +114,8 @@ export function toStatus(post: {
   reblogs_count?: number
   bookmarks_count?: number
   shares_count?: number
+  views_count?: number
+  heat?: number
   has_liked?: boolean
   created_at: string
   images?: { image_url: string; is_nsfw?: boolean | number; alt_text?: string | null; blurhash?: string | null; preview_url?: string | null; storage_provider?: string | null }[]
@@ -155,6 +157,8 @@ export function toStatus(post: {
     favourites_count: post.like_count ?? 0,
     bookmarks_count: post.bookmarks_count ?? 0,
     shares_count: post.shares_count ?? 0,
+    views_count: post.views_count ?? 0,
+    heat: post.heat ?? 0,
     favourited: opts?.favourited ?? false,
     reblogged: opts?.reblogged ?? false,
     muted: false,
@@ -220,6 +224,10 @@ export function toStatusFromComment(comment: {
     replies_count: 0,
     reblogs_count: 0,
     favourites_count: comment.like_count ?? 0,
+    bookmarks_count: 0,
+    shares_count: 0,
+    views_count: 0,
+    heat: 0,
     favourited: comment.has_liked ?? false,
     reblogged: false,
     muted: false,
@@ -410,6 +418,8 @@ export function toStatusFromNBW(thread: {
     favourites_count: 0,
     bookmarks_count: 0,
     shares_count: 0,
+    views_count: 0,
+    heat: 0,
     favourited: false,
     reblogged: false,
     muted: false,

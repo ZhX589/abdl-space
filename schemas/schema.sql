@@ -113,6 +113,8 @@ CREATE TABLE IF NOT EXISTS posts (
   geo_city TEXT,                         -- 城市（仅 geo_precision 含市级时）
   geo_district TEXT,                     -- 区县（仅 geo_precision 到区级时）
   edited_at DATETIME,                    -- 编辑时间
+  views_count INTEGER NOT NULL DEFAULT 0,-- 浏览量（旧帖 0 → 热度公式中权重为 0 不纳入）
+  shares_count INTEGER NOT NULL DEFAULT 0,-- 原生分享次数
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (user_id) REFERENCES users(id),
   FOREIGN KEY (diaper_id) REFERENCES diapers(id),
@@ -123,6 +125,17 @@ CREATE INDEX IF NOT EXISTS idx_posts_announcement ON posts(is_announcement, crea
 CREATE INDEX IF NOT EXISTS idx_posts_geo_province ON posts(geo_province) WHERE geo_province IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_posts_geo_city ON posts(geo_city) WHERE geo_city IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_posts_geo_district ON posts(geo_district) WHERE geo_district IS NOT NULL;
+
+-- 帖子浏览归因：12 小时滑窗去重（同一用户对同一帖子每 12h 计 1 次浏览）
+CREATE TABLE IF NOT EXISTS post_views (
+  user_id INTEGER NOT NULL,
+  post_id INTEGER NOT NULL,
+  viewed_at INTEGER NOT NULL,             -- Unix 秒，最近一次计入浏览的时间
+  UNIQUE(user_id, post_id),
+  FOREIGN KEY (user_id) REFERENCES users(id),
+  FOREIGN KEY (post_id) REFERENCES posts(id)
+);
+CREATE INDEX IF NOT EXISTS idx_post_views_post ON post_views(post_id);
 
 -- 小说作者作品（正文、审核与发布在后续 revision 表中扩展）
 CREATE TABLE IF NOT EXISTS novels (

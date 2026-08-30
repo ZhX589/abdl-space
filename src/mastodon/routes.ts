@@ -23,6 +23,7 @@ import { getLastStatusProvinces } from './last-province.ts'
 import { nbwS2SRequest } from '../lib/nbw.ts'
 import { handleNBWTimeline, buildNBWTimelineParams } from './nbw-timeline.ts'
 import { mergeAllTimelinePage } from './all-timeline.ts'
+import { computeHeat, isWithin24h, VIEW_DEDUP_WINDOW_SECONDS } from './heat.ts'
 import { generateBlurhash, sanitizeBlurhash } from '../lib/blurhash.ts'
 import { buildMediaPreviewUrl, canonicalMediaPreviewCacheUrl, fetchTrustedMediaSource, inspectMediaImageDimensions, parseMediaPreviewSource, resizeMediaPreview } from '../lib/media-preview.ts'
 import { buildMediaObjectKey, validateMediaUpload } from '../lib/media-upload.ts'
@@ -1221,7 +1222,8 @@ mastodon.get('/statuses/:id', async (c) => {
      (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
      (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) + (SELECT COUNT(*) FROM posts WHERE in_reply_to_id = p.id) as comment_count,
      (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count,
-     (SELECT COUNT(*) FROM likes WHERE target_type = 'bookmark' AND target_id = p.id) as bookmarks_count
+     (SELECT COUNT(*) FROM likes WHERE target_type = 'bookmark' AND target_id = p.id) as bookmarks_count,
+     EXISTS(SELECT 1 FROM post_images WHERE post_id = p.id) as has_image
      FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?`,
     [resolved.realId]
   )
@@ -1230,6 +1232,15 @@ mastodon.get('/statuses/:id', async (c) => {
   const images = await query<PostImageRow>(
     c.env.abdl_space_db, `${POST_IMAGE_SELECT} FROM post_images WHERE post_id = ? ORDER BY sort_order`, [resolved.realId]
   )
+
+  const heat = computeHeat({
+    sharesCount: (post.shares_count as number) ?? 0,
+    favouritesCount: (post.like_count as number) ?? 0,
+    bookmarksCount: (post.bookmarks_count as number) ?? 0,
+    viewsCount: (post.views_count as number) ?? 0,
+    hasImage: !!(post.has_image as number),
+    within24h: isWithin24h(post.created_at as string),
+  })
 
   const account = toAccount({
     id: post.user_id as number, username: post.username as string, avatar: post.avatar as string | null,
@@ -1258,7 +1269,10 @@ mastodon.get('/statuses/:id', async (c) => {
     has_nsfw: !!post.has_nsfw, mental_crisis: !!post.mental_crisis,
     like_count: post.like_count as number,
     comment_count: post.comment_count as number,
-    reblogs_count: post.reblogs_count as number, bookmarks_count: post.bookmarks_count as number, shares_count: 0,
+    reblogs_count: post.reblogs_count as number, bookmarks_count: post.bookmarks_count as number,
+    shares_count: (post.shares_count as number) ?? 0,
+    views_count: (post.views_count as number) ?? 0,
+    heat,
     created_at: post.created_at as string,
     images,
     spoiler_text: post.spoiler_text || '',
@@ -1656,6 +1670,93 @@ mastodon.get('/timelines/geo', async (c) => {
   const link = buildLinkHeader('/api/v1/timelines/geo', geoStatuses, limit)
   if (link) c.header('Link', link)
   return c.json(geoStatuses)
+})
+
+// ============================================================
+// GET /api/v1/timelines/popular — 热门时间线：按热度降序排列的公开根帖
+// 热度 = (分享*0.6 + 点赞*0.4 + 收藏*0.3 + 浏览*0.25) * 人气加成 * 100
+// 用 offset 分页（热度排序下 max_id 游标无意义）。
+// ============================================================
+mastodon.get('/timelines/popular', async (c) => {
+  const limit = Math.min(40, Math.max(1, parseInt(c.req.query('limit') || '20')))
+  const offset = Math.max(0, parseInt(c.req.query('offset') || '0'))
+
+  // 热度在 SQL 内计算用于排序；最终下发的 heat 由 computeHeat 在每行复算（避免浮点/取整差异）。
+  const posts = await query<Record<string, unknown>>(
+    c.env.abdl_space_db,
+    `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
+       (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
+       (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) + (SELECT COUNT(*) FROM posts WHERE in_reply_to_id = p.id) as comment_count,
+       (SELECT COUNT(*) FROM posts WHERE repost_id = p.id) as reblogs_count,
+       (SELECT COUNT(*) FROM likes WHERE target_type = 'bookmark' AND target_id = p.id) as bookmarks_count,
+       EXISTS(SELECT 1 FROM post_images WHERE post_id = p.id) as has_image
+     FROM posts p JOIN users u ON p.user_id = u.id
+     WHERE p.in_reply_to_id IS NULL AND p.repost_id IS NULL AND p.mental_crisis = 0
+     ORDER BY
+       ((p.shares_count * 0.6 + (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) * 0.4
+         + (SELECT COUNT(*) FROM likes WHERE target_type = 'bookmark' AND target_id = p.id) * 0.3
+         + p.views_count * 0.25)
+        * (1 + (CASE WHEN (strftime('%s','now') - strftime('%s', p.created_at)) < 86400 THEN 0.5 ELSE 0 END)
+           + (CASE WHEN EXISTS(SELECT 1 FROM post_images WHERE post_id = p.id) THEN 0.1 ELSE 0 END))
+        * 100) DESC, p.created_at DESC
+     LIMIT ? OFFSET ?`,
+    [limit, offset]
+  )
+
+  const user = await mastodonAuth(c)
+  const likedSet = new Set<number>()
+  const bookmarkSet = new Set<number>()
+  if (user) {
+    const postIds = posts.map(r => r.id as number)
+    if (postIds.length > 0) {
+      const liked = await query<{ target_id: number; target_type: string }>(
+        c.env.abdl_space_db,
+        `SELECT target_id, target_type FROM likes WHERE user_id = ? AND target_type IN ('post','bookmark') AND target_id IN (${postIds.map(() => '?').join(',')})`,
+        [user.sub, ...postIds]
+      )
+      for (const l of liked) {
+        if (l.target_type === 'post') likedSet.add(l.target_id)
+        else bookmarkSet.add(l.target_id)
+      }
+    }
+  }
+
+  const popularStatuses = await (async () => {
+    const postIds = posts.map(r => r.id as number)
+    const imagesMap = await loadPostImages(c.env.abdl_space_db, postIds)
+    const pollIds = posts.filter(r => r.poll_id).map(r => r.poll_id as number)
+    const pollMap = await loadPolls(c.env.abdl_space_db, pollIds)
+    return posts.map(r => {
+      const heat = computeHeat({
+        sharesCount: (r.shares_count as number) ?? 0,
+        favouritesCount: r.like_count as number,
+        bookmarksCount: r.bookmarks_count as number,
+        viewsCount: (r.views_count as number) ?? 0,
+        hasImage: !!(r.has_image as number),
+        within24h: isWithin24h(r.created_at as string),
+      })
+      return toStatus({
+        id: r.id as number, user_id: r.user_id as number, content: r.content as string,
+        like_count: r.like_count as number, comment_count: r.comment_count as number,
+        reblogs_count: r.reblogs_count as number, bookmarks_count: r.bookmarks_count as number,
+        shares_count: (r.shares_count as number) ?? 0,
+        views_count: (r.views_count as number) ?? 0,
+        heat,
+        has_nsfw: !!r.has_nsfw, mental_crisis: !!r.mental_crisis,
+        created_at: r.created_at as string, images: imagesMap.get(r.id as number),
+        spoiler_text: r.spoiler_text || '', visibility: r.visibility as string,
+        language: r.language as string,
+        in_reply_to_id: null, in_reply_to_type: null, in_reply_to_account_id: null,
+        poll: r.poll_id ? pollMap.get(r.poll_id as number) ?? null : null,
+        ...geoFromPost(r),
+      }, toAccount({
+        id: r.user_id as number, username: r.username as string, avatar: r.avatar as string | null,
+        role: r.role as string, bio: r.bio as string | null, created_at: r.user_created_at as string,
+      }), { favourited: likedSet.has(r.id as number), reblogged: false })
+    })
+  })()
+
+  return c.json(popularStatuses)
 })
 
 // ============================================================
@@ -2966,6 +3067,76 @@ mastodon.get('/statuses/:id/favourited_by', async (c) => {
 
 // GET /api/v1/statuses/:id/reblogged_by
 mastodon.get('/statuses/:id/reblogged_by', async (c) => c.json([]))
+
+// ============================================================
+// POST /api/v1/statuses/:id/view — 浏览打点（12 小时滑窗去重）
+// 同一用户对同一帖子在 12 小时内重复浏览只计 1 次。
+// 用户打开帖子详情页或查看大图时由 App 调用。
+// ============================================================
+mastodon.post('/statuses/:id/view', async (c) => {
+  const user = await mastodonAuth(c)
+  const rawId = c.req.param('id')
+  const resolved = await resolveStatus(c.env.abdl_space_db, rawId)
+  if (!resolved) return c.json({ error: 'Record not found' }, 404)
+  if (resolved.kind !== 'post') return c.json({ error: 'Record not found' }, 404)
+
+  // 匿名请求不打点，直接返回当前计数
+  if (!user) {
+    const row = await queryOne<{ views_count: number }>(
+      c.env.abdl_space_db, 'SELECT views_count FROM posts WHERE id = ?', [resolved.realId]
+    )
+    return c.json({ views_count: row?.views_count ?? 0 })
+  }
+
+  const nowSec = Math.floor(Date.now() / 1000)
+  const last = await queryOne<{ viewed_at: number }>(
+    c.env.abdl_space_db,
+    'SELECT viewed_at FROM post_views WHERE user_id = ? AND post_id = ?',
+    [user.sub, resolved.realId]
+  )
+
+  // 不存在 或 距上次计入已超 12h → 计入一次并刷新 viewed_at
+  const shouldCount = !last || (nowSec - last.viewed_at) >= VIEW_DEDUP_WINDOW_SECONDS
+  if (shouldCount) {
+    await run(
+      c.env.abdl_space_db,
+      `INSERT INTO post_views (user_id, post_id, viewed_at) VALUES (?, ?, ?)
+       ON CONFLICT(user_id, post_id) DO UPDATE SET viewed_at = excluded.viewed_at`,
+      [user.sub, resolved.realId, nowSec]
+    )
+    await run(c.env.abdl_space_db, 'UPDATE posts SET views_count = views_count + 1 WHERE id = ?', [resolved.realId])
+  }
+
+  const row = await queryOne<{ views_count: number }>(
+    c.env.abdl_space_db, 'SELECT views_count FROM posts WHERE id = ?', [resolved.realId]
+  )
+  return c.json({ views_count: row?.views_count ?? 0, counted: shouldCount })
+})
+
+// ============================================================
+// POST /api/v1/statuses/:id/share — 原生分享打点（每次 +1，不去重）
+// ============================================================
+mastodon.post('/statuses/:id/share', async (c) => {
+  const user = await mastodonAuth(c)
+  const rawId = c.req.param('id')
+  const resolved = await resolveStatus(c.env.abdl_space_db, rawId)
+  if (!resolved) return c.json({ error: 'Record not found' }, 404)
+  if (resolved.kind !== 'post') return c.json({ error: 'Record not found' }, 404)
+
+  // 匿名请求不打点
+  if (!user) {
+    const row = await queryOne<{ shares_count: number }>(
+      c.env.abdl_space_db, 'SELECT shares_count FROM posts WHERE id = ?', [resolved.realId]
+    )
+    return c.json({ shares_count: row?.shares_count ?? 0 })
+  }
+
+  await run(c.env.abdl_space_db, 'UPDATE posts SET shares_count = shares_count + 1 WHERE id = ?', [resolved.realId])
+  const row = await queryOne<{ shares_count: number }>(
+    c.env.abdl_space_db, 'SELECT shares_count FROM posts WHERE id = ?', [resolved.realId]
+  )
+  return c.json({ shares_count: row?.shares_count ?? 0 })
+})
 
 // GET /api/v1/accounts/:id/featured_tags
 mastodon.get('/accounts/:id/featured_tags', async (c) => c.json([]))
