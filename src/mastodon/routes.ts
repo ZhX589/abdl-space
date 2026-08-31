@@ -23,6 +23,7 @@ import { getLastStatusProvinces } from './last-province.ts'
 import { nbwS2SRequest } from '../lib/nbw.ts'
 import { handleNBWTimeline, buildNBWTimelineParams } from './nbw-timeline.ts'
 import { mergeAllTimelinePage } from './all-timeline.ts'
+import { fetchFriendRequestPosts } from './friend-timeline.ts'
 import { computeHeat, computeHeatFromRow, isWithin24h, VIEW_DEDUP_WINDOW_SECONDS } from './heat.ts'
 import { generateBlurhash, sanitizeBlurhash } from '../lib/blurhash.ts'
 import { buildMediaPreviewUrl, canonicalMediaPreviewCacheUrl, fetchTrustedMediaSource, inspectMediaImageDimensions, parseMediaPreviewSource, resizeMediaPreview } from '../lib/media-preview.ts'
@@ -1924,43 +1925,49 @@ async function fetchNBWPosts(c: Context<{ Bindings: Env }>, limit: number, curso
 
 // ============================================================
 // GET /api/v1/timelines/all
-// 合并时间线：ABDL Space 本站帖子 + NBW 同步帖子，按时间排序
+// 合并时间线：ABDL Space 本站帖子 + NBW 同步帖子 + 交友宇宙请求，按时间排序
 // ============================================================
 mastodon.get('/timelines/all', async (c) => {
   try {
     const limit = Math.min(40, Math.max(1, parseInt(c.req.query('limit') || '20')))
 
-    // 解码游标：base64(JSON({ a: lastAbdlId, n: nbwCursor }))
+    // 解码游标：base64(JSON({ a: lastAbdlId, n: nbwCursor, f: lastFriendId }))
     let abdlMaxId: number | undefined
     let nbwCursor = ''
+    let friendMaxId: number | undefined
     const rawCursor = c.req.query('max_id')
     if (rawCursor) {
       try {
         const decoded = JSON.parse(atob(rawCursor))
         if (typeof decoded.a === 'number') abdlMaxId = decoded.a
         if (typeof decoded.n === 'string') nbwCursor = decoded.n
+        if (typeof decoded.f === 'number') friendMaxId = decoded.f
       } catch { /* first page */ }
     }
 
-    // 并行拉取两个数据源
-    const [abdlStatuses, nbwResult] = await Promise.all([
+    // 并行拉取三个数据源
+    const [abdlStatuses, nbwResult, friendStatuses] = await Promise.all([
       // ABDL Space 本站帖子
       abdlMaxId === -1 ? Promise.resolve([]) : fetchAbdlPosts(c, limit, abdlMaxId),
       // NBW 同步帖子
       nbwCursor === '!' ? Promise.resolve({ statuses: [], nextCursor: '', hasMore: false }) : fetchNBWPosts(c, limit, nbwCursor),
+      // 交友宇宙（交友请求作为帖子渲染）
+      friendMaxId === -1 ? Promise.resolve([]) : fetchFriendRequestPosts(c, limit, friendMaxId),
     ])
 
     const page = mergeAllTimelinePage(
       abdlStatuses,
       nbwResult.statuses,
+      friendStatuses,
       limit,
       abdlMaxId,
       nbwCursor,
+      friendMaxId,
       nbwResult.hasMore,
       nbwResult.nextCursor,
     )
     if (page.hasMore) {
-      const nextCursor = btoa(JSON.stringify({ a: page.nextAbdlMaxId, n: page.nextNBWCursor }))
+      const nextCursor = btoa(JSON.stringify({ a: page.nextAbdlMaxId, n: page.nextNBWCursor, f: page.nextFriendMaxId }))
       const query = new URLSearchParams({ limit: String(limit), max_id: nextCursor })
       c.header('Link', `</api/v1/timelines/all?${query}>; rel="next"`)
     }
