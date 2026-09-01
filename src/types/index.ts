@@ -392,6 +392,8 @@ export interface Env {
 	JPUSH_MASTER_SECRET?: string
 	// 应急广播鉴权（零数据库通知通道，独立于用户鉴权）
 	BROADCAST_KEY?: string
+	// 服务公告存储（零 D1 持久化，限流/事故期间仍可读写）
+	NOTICE_KV?: KVNamespace
 	// 其他
 	TURNSTILE_SITE_KEY?: string
   TURNSTILE_SECRET_KEY?: string

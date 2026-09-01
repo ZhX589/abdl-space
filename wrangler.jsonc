@@ -35,6 +35,12 @@
 			"database_id": "159f81ba-ea32-4667-a3ce-d72cb1659d93"
 		}
 	],
+	"kv_namespaces": [
+		{
+			"binding": "NOTICE_KV",
+			"id": "fd44da29479c48d291215aa98c5427fb"
+		}
+	],
 	"durable_objects": {
 		"bindings": [
 			{
