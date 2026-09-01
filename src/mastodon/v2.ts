@@ -18,7 +18,7 @@ const mastodonV2 = new Hono<AppType>()
 // GET /api/v2/instance
 // ============================================================
 mastodonV2.get('/instance', async (c) => {
-  return c.json(await buildInstance(c.env.abdl_space_db))
+  return c.json(await buildInstance(c.env.abdl_space_db, c.env.NOTICE_KV))
 })
 
 // ============================================================

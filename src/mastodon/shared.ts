@@ -5,6 +5,7 @@
 import type { Env, JWTPayload } from '../types/index.ts'
 import { queryOne } from '../lib/db.ts'
 import { cacheGet, cacheSet } from '../lib/ttl-cache.ts'
+import { kvCacheGet, kvCacheSet } from '../lib/kv-cache.ts'
 import type { MastodonInstance } from './types.ts'
 
 // 鉴权缓存：只缓存 users 行（每用户 60s），把 token 鉴权里的用户查询
@@ -14,6 +15,11 @@ const AUTH_CACHE_TTL_MS = 60_000
 
 // 实例统计（全表 COUNT）缓存 5 分钟，避免每次拉实例信息都全表扫描。
 const INSTANCE_CACHE_TTL_MS = 300_000
+// KV 缓存 TTL（秒）：15 分钟回填 ≈ 96 次写/天/key，低于免费层 1000 次/天 上限。
+const INSTANCE_KV_TTL_SEC = 900
+
+// trends/statuses 首页骨架 KV 缓存 TTL（秒），与 instance 一致。
+export const TRENDS_KV_TTL_SEC = 900
 
 // ============================================================
 // Auth — shared between routes.ts and v2.ts
@@ -74,10 +80,20 @@ export async function mastodonAuth(c: { req: { header: (name: string) => string 
 // ============================================================
 // Instance — shared between v1 and v2
 // ============================================================
-export async function buildInstance(db: D1Database): Promise<MastodonInstance> {
+const INSTANCE_KV_KEY = 'instance:summary'
+
+export async function buildInstance(db: D1Database, kv?: KVNamespace): Promise<MastodonInstance> {
   const cacheKey = 'instance:summary'
   const cached = cacheGet<MastodonInstance>(cacheKey)
   if (cached) return cached
+
+  // L1 KV 缓存（跨实例共享；KV 占位/异常时静默回退 D1）。
+  // 进程内 TTL 与 KV TTL 搭配：KV 长缓存（15 分钟）兜住 限流期，进程内短缓存做热加速。
+  const kvCached = await kvCacheGet<MastodonInstance>(kv, INSTANCE_KV_KEY)
+  if (kvCached) {
+    cacheSet(cacheKey, kvCached, INSTANCE_CACHE_TTL_MS)
+    return kvCached
+  }
 
   const [userCount, postCount] = await Promise.all([
     queryOne<{ cnt: number }>(db, 'SELECT COUNT(*) as cnt FROM users'),
@@ -122,6 +138,7 @@ export async function buildInstance(db: D1Database): Promise<MastodonInstance> {
   }
 
   cacheSet(cacheKey, instance, INSTANCE_CACHE_TTL_MS)
+  await kvCacheSet(kv, INSTANCE_KV_KEY, instance, INSTANCE_KV_TTL_SEC)
   return instance
 }
 

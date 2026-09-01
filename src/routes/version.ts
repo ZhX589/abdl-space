@@ -3,6 +3,7 @@ import { cors } from 'hono/cors'
 import type { Env } from '../types/index.ts'
 import { queryOne, run } from '../lib/db.ts'
 import { cacheGet, cacheSet, cacheDelete } from '../lib/ttl-cache.ts'
+import { kvCacheGet, kvCacheSet, kvCacheInvalidate } from '../lib/kv-cache.ts'
 import { getCompletedUploadReference } from '../lib/upload-consumer.ts'
 
 type AppType = { Bindings: Env }
@@ -10,6 +11,9 @@ type AppType = { Bindings: Env }
 // 版本信息属于低频变更数据，缓存 5 分钟，避免每个客户端频繁查 kv_store。
 const VERSION_CACHE_KEY = 'version:app_version_latest'
 const VERSION_CACHE_TTL_MS = 300_000
+// KV 缓存 TTL 比进程内更长（免费层写配额 1 次/天 上限，15 分钟回填 ≈ 96 次/天/key）
+const VERSION_KV_KEY = 'version:latest'
+const VERSION_KV_TTL_SEC = 900
 
 const version = new Hono<AppType>()
 
@@ -37,9 +41,15 @@ export function resolveReleaseUpload(db: D1Database, reference: string, userId: 
  */
 version.get('/', async (c) => {
   const db = c.env.abdl_space_db
+  const kv = c.env.NOTICE_KV
 
+  // L0 进程内缓存（单实例最近 5 分钟）
   const cached = cacheGet<Record<string, unknown>>(VERSION_CACHE_KEY)
   if (cached) return c.json(cached)
+
+  // L1 KV 缓存（跨实例共享，命中即不触 D1；KV 未配置/异常时静默回退 D1）
+  const kvBody = await kvCacheGet<Record<string, unknown>>(kv, VERSION_KV_KEY)
+  if (kvBody) return c.json(kvBody)
 
   const latest = await queryOne<{
     value: string
@@ -48,6 +58,7 @@ version.get('/', async (c) => {
   if (!latest) {
     const body = { hasUpdate: false, message: '暂无版本信息' }
     cacheSet(VERSION_CACHE_KEY, body, VERSION_CACHE_TTL_MS)
+    await kvCacheSet(kv, VERSION_KV_KEY, body, VERSION_KV_TTL_SEC)
     return c.json(body)
   }
 
@@ -63,10 +74,12 @@ version.get('/', async (c) => {
       apkSize: info.apkSize || 0,
     }
     cacheSet(VERSION_CACHE_KEY, body, VERSION_CACHE_TTL_MS)
+    await kvCacheSet(kv, VERSION_KV_KEY, body, VERSION_KV_TTL_SEC)
     return c.json(body)
   } catch {
     const body = { hasUpdate: false, message: '版本信息格式错误' }
     cacheSet(VERSION_CACHE_KEY, body, VERSION_CACHE_TTL_MS)
+    await kvCacheSet(kv, VERSION_KV_KEY, body, VERSION_KV_TTL_SEC)
     return c.json(body)
   }
 })
@@ -197,8 +210,9 @@ version.post('/upload', async (c) => {
     [versionInfo]
   )
 
-  // 新版本上传成功后立即失效 GET 缓存，让客户端尽快看到更新
+  // 新版本上传成功后立即失效 GET 缓存（进程内 + KV），让客户端尽快看到更新
   cacheDelete(VERSION_CACHE_KEY)
+  await kvCacheInvalidate(c.env.NOTICE_KV, VERSION_KV_KEY)
 
   return c.json({
     success: true,

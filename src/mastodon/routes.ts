@@ -11,10 +11,11 @@ import type { Context } from 'hono'
 import type { Env, JWTPayload } from '../types/index.ts'
 import { query, queryOne, run } from '../lib/db.ts'
 import { cacheGet, cacheSet } from '../lib/ttl-cache.ts'
+import { kvCacheGet, kvCacheSet } from '../lib/kv-cache.ts'
 import { toAccount, toAccountFromNBW, toStatus, toStatusFromNBW, toStatusFromComment, toNotification, toISOString, getVerifiedUserIds } from './converter.ts'
 import { generateCardsForPosts } from './linkpreview.ts'
 import type { MastodonNotification, MastodonAccount, MastodonPoll, MastodonStatus } from './types.ts'
-import { mastodonAuth, buildInstance, resolveStatus, parseMastoIdForCursor } from './shared.ts'
+import { mastodonAuth, buildInstance, resolveStatus, parseMastoIdForCursor, TRENDS_KV_TTL_SEC } from './shared.ts'
 import { syncPostToNBW } from '../lib/nbw-sync.ts'
 import { dispatchStatusNotifications } from '../lib/status-notify.ts'
 import { resolveGeoFromClient, resolveProvinceFromIP } from '../lib/post-geo.ts'
@@ -358,7 +359,7 @@ async function loadCommentImages(db: D1Database, commentIds: number[]): Promise<
 // GET /api/v1/instance
 // ============================================================
 mastodon.get('/instance', async (c) => {
-  return c.json(await buildInstance(c.env.abdl_space_db))
+  return c.json(await buildInstance(c.env.abdl_space_db, c.env.NOTICE_KV))
 })
 
 // ============================================================
@@ -3240,6 +3241,22 @@ mastodon.get('/trends/statuses', async (c) => {
   const limit = Math.min(40, Math.max(1, parseInt(c.req.query('limit') || '20')))
   const offset = parseInt(c.req.query('offset') || '0') || 0
 
+  // 趋势榜单 KV 缓存（保守型）：仅缓存首页（offset=0）披露 limit ∈ {10,20,40} 的公共行。
+  // 原因：trends 主 SQL 含 4 个整表 COUNT 子查询，是 D1 读取大头；索引到 KV 后限流期也能读。
+  // 只缓存「公共行」（不含 favourited/bookmarked 等用户字段），用户互动集合仍实时查询，杜绝串号。
+  // key 数量受限（3 个）+ TTL 长 → 单 key 每天回填 ≤96 次，远离免费层 1000 次/天 写配额。
+  const cacheable = offset === 0 && [10, 20, 40].includes(limit)
+  const cacheKey = cacheable ? `trends:statuses:${limit}` : null
+
+  let cachedRows = cacheable ? cacheGet<Record<string, unknown>[]>(cacheKey) : undefined
+  if (cachedRows === undefined && cacheKey) {
+    const kvRows = await kvCacheGet<Record<string, unknown>[]>(c.env.NOTICE_KV, cacheKey)
+    if (kvRows) {
+      cacheSet(cacheKey, kvRows, 60_000) // 命中 KV 后写 L0 内存缓存（60s），减少同实例重复 read KV
+      cachedRows = kvRows
+    }
+  }
+
   const sql = `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
      (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
      (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) + (SELECT COUNT(*) FROM posts WHERE in_reply_to_id = p.id) as comment_count,
@@ -3250,7 +3267,12 @@ mastodon.get('/trends/statuses', async (c) => {
      ORDER BY p.created_at DESC LIMIT ? OFFSET ?`
   const params: unknown[] = [limit, offset]
 
-  const posts = await query<Record<string, unknown>>(c.env.abdl_space_db, sql, params)
+  const posts = cachedRows ?? await query<Record<string, unknown>>(c.env.abdl_space_db, sql, params)
+
+  if (!cachedRows && cacheKey) {
+    cacheSet(cacheKey, posts, 60_000)
+    await kvCacheSet(c.env.NOTICE_KV, cacheKey, posts, TRENDS_KV_TTL_SEC)
+  }
 
   const user = await mastodonAuth(c)
   const postIds = posts.map(r => r.id as number)
