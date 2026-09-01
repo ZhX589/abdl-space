@@ -18,7 +18,8 @@ notifications.get('/', authMiddleware, async (c) => {
     `SELECT id, type, message, related_id, read, created_at
      FROM notifications
      WHERE user_id = ?
-     ORDER BY created_at DESC`,
+     ORDER BY created_at DESC
+     LIMIT 100`,
     [user.sub]
   )
 

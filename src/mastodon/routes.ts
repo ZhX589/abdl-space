@@ -10,6 +10,7 @@ import { Hono } from 'hono'
 import type { Context } from 'hono'
 import type { Env, JWTPayload } from '../types/index.ts'
 import { query, queryOne, run } from '../lib/db.ts'
+import { cacheGet, cacheSet } from '../lib/ttl-cache.ts'
 import { toAccount, toAccountFromNBW, toStatus, toStatusFromNBW, toStatusFromComment, toNotification, toISOString, getVerifiedUserIds } from './converter.ts'
 import { generateCardsForPosts } from './linkpreview.ts'
 import type { MastodonNotification, MastodonAccount, MastodonPoll, MastodonStatus } from './types.ts'
@@ -1697,8 +1698,13 @@ mastodon.get('/timelines/popular', async (c) => {
   const limit = Math.min(40, Math.max(1, parseInt(c.req.query('limit') || '20')))
   const offset = Math.max(0, parseInt(c.req.query('offset') || '0'))
 
+  // 热门列表 60s 缓存：热度计算含 4 个整表 COUNT/EXISTS 子查询，是读取配额大头。
+  // 结果按 (limit, offset) 缓存，翻页各自独立；缓存窗口内热度/计数允许轻微陈旧。
+  const cacheKey = `popular:${limit}:${offset}`
+  const cachedRows = cacheGet<Record<string, unknown>[]>(cacheKey)
+
   // 热度在 SQL 内计算用于排序；最终下发的 heat 由 computeHeat 在每行复算（避免浮点/取整差异）。
-  const posts = await query<Record<string, unknown>>(
+  const posts = cachedRows ?? await query<Record<string, unknown>>(
     c.env.abdl_space_db,
     `SELECT p.*, u.username, u.avatar, u.role, u.bio, u.created_at as user_created_at,
        (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
@@ -1718,6 +1724,9 @@ mastodon.get('/timelines/popular', async (c) => {
      LIMIT ? OFFSET ?`,
     [limit, offset]
   )
+  if (!cachedRows) {
+    cacheSet(cacheKey, posts, 60_000)
+  }
 
   const user = await mastodonAuth(c)
   const likedSet = new Set<number>()
@@ -3207,10 +3216,16 @@ mastodon.get('/blocks', async (c) => c.json([]))
 mastodon.get('/notifications/unread_count', async (c) => {
   const user = await mastodonAuth(c)
   if (!user) return c.json({ error: 'The access token is invalid' }, 401)
+  // 未读数允许 30s 陈旧，避免每次轮询都跑一次 COUNT
+  const cacheKey = `unread:${user.sub}`
+  const cached = cacheGet<{ count: number }>(cacheKey)
+  if (cached) return c.json(cached)
   const row = await queryOne<{ cnt: number }>(
     c.env.abdl_space_db, 'SELECT COUNT(*) as cnt FROM notifications WHERE user_id = ? AND read = 0', [user.sub]
   )
-  return c.json({ count: row?.cnt ?? 0 })
+  const body = { count: row?.cnt ?? 0 }
+  cacheSet(cacheKey, body, 30_000)
+  return c.json(body)
 })
 
 // ============================================================

@@ -2,9 +2,14 @@ import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import type { Env } from '../types/index.ts'
 import { queryOne, run } from '../lib/db.ts'
+import { cacheGet, cacheSet, cacheDelete } from '../lib/ttl-cache.ts'
 import { getCompletedUploadReference } from '../lib/upload-consumer.ts'
 
 type AppType = { Bindings: Env }
+
+// 版本信息属于低频变更数据，缓存 5 分钟，避免每个客户端频繁查 kv_store。
+const VERSION_CACHE_KEY = 'version:app_version_latest'
+const VERSION_CACHE_TTL_MS = 300_000
 
 const version = new Hono<AppType>()
 
@@ -33,17 +38,22 @@ export function resolveReleaseUpload(db: D1Database, reference: string, userId: 
 version.get('/', async (c) => {
   const db = c.env.abdl_space_db
 
+  const cached = cacheGet<Record<string, unknown>>(VERSION_CACHE_KEY)
+  if (cached) return c.json(cached)
+
   const latest = await queryOne<{
     value: string
   }>(db, `SELECT value FROM kv_store WHERE key = 'app_version_latest'`)
 
   if (!latest) {
-    return c.json({ hasUpdate: false, message: '暂无版本信息' })
+    const body = { hasUpdate: false, message: '暂无版本信息' }
+    cacheSet(VERSION_CACHE_KEY, body, VERSION_CACHE_TTL_MS)
+    return c.json(body)
   }
 
   try {
     const info = JSON.parse(latest.value)
-    return c.json({
+    const body = {
       hasUpdate: true,
       versionName: info.versionName,
       versionCode: info.versionCode,
@@ -51,9 +61,13 @@ version.get('/', async (c) => {
       changelog: info.changelog || '',
       releasedAt: info.releasedAt || '',
       apkSize: info.apkSize || 0,
-    })
+    }
+    cacheSet(VERSION_CACHE_KEY, body, VERSION_CACHE_TTL_MS)
+    return c.json(body)
   } catch {
-    return c.json({ hasUpdate: false, message: '版本信息格式错误' })
+    const body = { hasUpdate: false, message: '版本信息格式错误' }
+    cacheSet(VERSION_CACHE_KEY, body, VERSION_CACHE_TTL_MS)
+    return c.json(body)
   }
 })
 
@@ -182,6 +196,9 @@ version.post('/upload', async (c) => {
      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
     [versionInfo]
   )
+
+  // 新版本上传成功后立即失效 GET 缓存，让客户端尽快看到更新
+  cacheDelete(VERSION_CACHE_KEY)
 
   return c.json({
     success: true,

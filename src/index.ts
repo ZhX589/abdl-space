@@ -34,6 +34,7 @@ import oauth from './routes/oauth.ts'
 import oauthClients from './routes/oauth_clients.ts'
 import contentKeys from './routes/content_keys.ts'
 import version from './routes/version.ts'
+import broadcast from './routes/broadcast.ts'
 import uploads from './routes/uploads.ts'
 import contentV1 from './routes/content_v1.ts'
 import nbw from './routes/nbw.ts'
@@ -258,6 +259,7 @@ app.route('/api/v1', mastodon)
 app.route('/api/v1/push', mastodonPush)
 app.route('/api/v1/abdl', mastodonAbdl)
 app.route('/api/v1/version', version)
+app.route('/api/broadcast', broadcast)
 app.route('/api/v2', mastodonV2)
 app.route('/api/oauth', oauth)
 app.route('/api/oauth/clients', oauthClients)

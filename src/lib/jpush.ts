@@ -117,3 +117,60 @@ async function sendJPushRaw(
   }
   return result.code === 0
 }
+
+/**
+ * 全量广播 — 不查询注册表，直接向 JPush 全量 audience 推送。
+ * 用于数据库限流/事故场景的应急通知通道（零数据库读取）。
+ */
+export async function sendJPushBroadcast(
+  env: Env,
+  title: string,
+  content: string,
+  extras: Record<string, string> = {},
+): Promise<boolean> {
+  const appKey = env.JPUSH_APP_KEY
+  const masterSecret = env.JPUSH_MASTER_SECRET
+  if (!appKey || !masterSecret) {
+    console.error('JPush secrets not configured')
+    return false
+  }
+
+  const payload = {
+    platform: 'all',
+    audience: { all: true },
+    notification: {
+      alert: content,
+      android: {
+        alert: content,
+        title,
+        channel_id: 'jpush_high_v2',
+        priority: 2,
+        alert_type: -1,
+        intent: {
+          url: 'intent:#Intent;component=top.abdl_space.app/org.joinmastodon.android.MainActivity;end',
+        },
+        extras,
+      },
+      ios: { alert: { title, body: content }, sound: 'default', extras },
+    },
+    options: {
+      time_to_live: 86400,
+    },
+  }
+
+  const response = await fetch('https://api.jpush.cn/v3/push', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Basic ${btoa(`${appKey}:${masterSecret}`)}`,
+    },
+    body: JSON.stringify(payload),
+  })
+
+  const result: any = await response.json()
+  if (result.code !== 0) {
+    console.error('JPush broadcast failed:', result.message)
+    return false
+  }
+  return true
+}

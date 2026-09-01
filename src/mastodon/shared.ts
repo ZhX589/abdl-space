@@ -4,7 +4,16 @@
 
 import type { Env, JWTPayload } from '../types/index.ts'
 import { queryOne } from '../lib/db.ts'
+import { cacheGet, cacheSet } from '../lib/ttl-cache.ts'
 import type { MastodonInstance } from './types.ts'
+
+// 鉴权缓存：只缓存 users 行（每用户 60s），把 token 鉴权里的用户查询
+// 从「每次 1 次读」降为「每 60s 1 次」。oauth_tokens 表按需实时读取，
+// 注销/过期/scope 变更不受缓存影响。用户被删后最多 60s 内旧资料仍可见。
+const AUTH_CACHE_TTL_MS = 60_000
+
+// 实例统计（全表 COUNT）缓存 5 分钟，避免每次拉实例信息都全表扫描。
+const INSTANCE_CACHE_TTL_MS = 300_000
 
 // ============================================================
 // Auth — shared between routes.ts and v2.ts
@@ -25,9 +34,16 @@ export async function mastodonAuthDetails(c: { req: { header: (name: string) => 
     const { introspectToken } = await import('../lib/oauth.ts')
     const result = await introspectToken(c.env.abdl_space_db, token)
     if (result.active && result.sub) {
-      const user = await queryOne<{ id: number; username: string; email: string; role: string }>(
-        c.env.abdl_space_db, 'SELECT id, username, email, role FROM users WHERE id = ?', [result.sub]
-      )
+      // 用户行缓存 60s：OAuth token 鉴权从「每次 2 次 D1 读」降为「每 60s 2 次」。
+      // 只缓存用户资料行；token 表读取不缓存，注销/过期/scope 变更即时生效。
+      const userCacheKey = `user:${result.sub}`
+      let user = cacheGet<{ id: number; username: string; email: string; role: string } | null>(userCacheKey)
+      if (user === undefined) {
+        user = await queryOne<{ id: number; username: string; email: string; role: string }>(
+          c.env.abdl_space_db, 'SELECT id, username, email, role FROM users WHERE id = ?', [result.sub]
+        )
+        if (user) cacheSet(userCacheKey, user, AUTH_CACHE_TTL_MS)
+      }
       if (user) {
         return {
           user: { sub: user.id, username: user.username, email: user.email, role: user.role, iat: 0, exp: 0 },
@@ -59,12 +75,16 @@ export async function mastodonAuth(c: { req: { header: (name: string) => string 
 // Instance — shared between v1 and v2
 // ============================================================
 export async function buildInstance(db: D1Database): Promise<MastodonInstance> {
+  const cacheKey = 'instance:summary'
+  const cached = cacheGet<MastodonInstance>(cacheKey)
+  if (cached) return cached
+
   const [userCount, postCount] = await Promise.all([
     queryOne<{ cnt: number }>(db, 'SELECT COUNT(*) as cnt FROM users'),
     queryOne<{ cnt: number }>(db, 'SELECT COUNT(*) as cnt FROM posts'),
   ])
 
-  return {
+  const instance: MastodonInstance = {
     uri: 'abdl-space.top',
     domain: 'abdl-space.top',
     title: 'ABDL Space',
@@ -100,6 +120,9 @@ export async function buildInstance(db: D1Database): Promise<MastodonInstance> {
     },
     api_versions: { mastodon: 1 },
   }
+
+  cacheSet(cacheKey, instance, INSTANCE_CACHE_TTL_MS)
+  return instance
 }
 
 // ============================================================
