@@ -1793,6 +1793,12 @@ mastodon.get('/timelines/popular', async (c) => {
 // ============================================================
 // GET /api/v1/timelines/public
 // ============================================================
+// D1 故障时返回最近一次成功构建的公开时间线快照（KV 零数据库），
+// 避免公共首页在 D1 配额耗尽期间 500 —— 与 instance/version 的降级策略一致。
+const PUBLIC_TIMELINE_SNAPSHOT_KEY = 'public-timeline:snapshot'
+const PUBLIC_TIMELINE_SNAPSHOT_TTL_SEC = 900 // KV TTL；配合内存写闸门控制免费层写入配额
+const PUBLIC_TIMELINE_SNAPSHOT_WRITE_GATE_MS = 5 * 60_000 // 内存写闸：同一 isolate 5 分钟内最多写 1 次
+
 mastodon.get('/timelines/public', async (c) => {
   const limit = Math.min(40, Math.max(1, parseInt(c.req.query('limit') || '20')))
   const maxId = c.req.query('max_id')
@@ -1813,7 +1819,18 @@ mastodon.get('/timelines/public', async (c) => {
   sql += ' ORDER BY p.created_at DESC LIMIT ?'
   params.push(limit)
 
-  const posts = await query<Record<string, unknown>>(c.env.abdl_space_db, sql, params)
+  let posts: Record<string, unknown>[]
+  try {
+    posts = await query<Record<string, unknown>>(c.env.abdl_space_db, sql, params)
+  } catch (err) {
+    // D1 配额/故障：降级返回最近成功快照（匿名化公开数据），而不是给首页 500。
+    const snapshot = await kvCacheGet<Record<string, unknown>[]>(c.env.NOTICE_KV, PUBLIC_TIMELINE_SNAPSHOT_KEY)
+    if (snapshot) {
+      c.header('X-ABDL-Timeline-Fallback', 'snapshot')
+      return c.json(snapshot)
+    }
+    throw err
+  }
 
   // Check which posts the current user has liked (if authenticated)
   const user = await mastodonAuth(c)
@@ -1875,6 +1892,20 @@ mastodon.get('/timelines/public', async (c) => {
 
   const link = buildLinkHeader('/api/v1/timelines/public', publicStatuses, limit, { local: c.req.query('local') || '' })
   if (link) c.header('Link', link)
+
+  // 缓存快照供 D1 故障降级：只缓存匿名化公开数据（favourited/bookmarked 归零），
+  // 内存写闸 + KV TTL 双保险，控制免费层 KV 写配额（默认最多每 5 分钟 1 次/ isolate）。
+  if (!maxId && !sinceId) {
+    const gateKey = PUBLIC_TIMELINE_SNAPSHOT_KEY + ':gate'
+    const gated = cacheGet<number>(gateKey)
+    const now = Date.now()
+    if (gated === undefined || now - gated >= PUBLIC_TIMELINE_SNAPSHOT_WRITE_GATE_MS) {
+      cacheSet(gateKey, now, PUBLIC_TIMELINE_SNAPSHOT_WRITE_GATE_MS)
+      const snapshotBody = publicStatuses.map(s => ({ ...s, favourited: false, bookmarked: false }))
+      await kvCacheSet(c.env.NOTICE_KV, PUBLIC_TIMELINE_SNAPSHOT_KEY, snapshotBody, PUBLIC_TIMELINE_SNAPSHOT_TTL_SEC)
+    }
+  }
+
   return c.json(publicStatuses)
 })
 
