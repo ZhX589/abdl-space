@@ -15,8 +15,9 @@ const AUTH_CACHE_TTL_MS = 60_000
 
 // 实例统计（全表 COUNT）缓存 5 分钟，避免每次拉实例信息都全表扫描。
 const INSTANCE_CACHE_TTL_MS = 300_000
-// KV 缓存 TTL（秒）：15 分钟回填 ≈ 96 次写/天/key，低于免费层 1000 次/天 上限。
-const INSTANCE_KV_TTL_SEC = 900
+// KV 缓存 TTL（秒）：1 天，跨实例共享；D1 限流/中断期间旧值可兜底一整天。
+// 免费层 KV 写配额 1000 次/天，每日回填 1 次/key 远低于上限。
+const INSTANCE_KV_TTL_SEC = 86_400
 
 // trends/statuses 首页骨架 KV 缓存 TTL（秒），与 instance 一致。
 export const TRENDS_KV_TTL_SEC = 900
@@ -82,19 +83,56 @@ export async function mastodonAuth(c: { req: { header: (name: string) => string 
 // ============================================================
 const INSTANCE_KV_KEY = 'instance:summary'
 
+/** 静态降级 instance：D1 不可用时返回（保证 App 冷启动 / 实例信息不因 D1 限流而 500） */
+function fallbackInstance(): MastodonInstance {
+  return {
+    uri: 'abdl-space.top',
+    domain: 'abdl-space.top',
+    title: 'ABDL Space',
+    version: '4.2.0 (compatible; ABDL Space 1.0)',
+    source_url: 'https://github.com/ZYongX09/abdl-space-v2',
+    description: 'ABDL Space — 纸尿裤评分社区',
+    short_description: '纸尿裤评分社区',
+    usage: { users: { active_month: 0 } },
+    thumbnail: 'https://img.abdl-space.top/file/system/1781439303787_play_store_512.png',
+    languages: ['zh', 'en'],
+    configuration: {
+      urls: { streaming: null, status: null, about: 'https://abdl-space.top', privacy_policy: null, terms_of_service: null },
+      vapid: { public_key: '' },
+      accounts: { max_featured_tags: 10, max_pinned_statuses: 5 },
+      statuses: { max_characters: 5000, max_media_attachments: 4, characters_reserved_per_url: 23 },
+      media_attachments: {
+        supported_mime_types: ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'video/mp4', 'video/webm', 'video/quicktime'],
+        image_size_limit: 5242880,
+        image_matrix_limit: 33177600,
+        video_size_limit: 52428800,
+        video_frame_rate_limit: 60,
+        video_matrix_limit: 33177600,
+      },
+      polls: { max_options: 4, max_characters_per_option: 50, min_expiration: 300, max_expiration: 2629746 },
+    },
+    registrations: true,
+    contact: { email: null, account: null },
+    rules: [],
+    stats: { user_count: 0, status_count: 0, domain_count: 1 },
+    api_versions: { mastodon: 1 },
+  }
+}
+
 export async function buildInstance(db: D1Database, kv?: KVNamespace): Promise<MastodonInstance> {
   const cacheKey = 'instance:summary'
   const cached = cacheGet<MastodonInstance>(cacheKey)
   if (cached) return cached
 
   // L1 KV 缓存（跨实例共享；KV 占位/异常时静默回退 D1）。
-  // 进程内 TTL 与 KV TTL 搭配：KV 长缓存（15 分钟）兜住 限流期，进程内短缓存做热加速。
+  // 进程内 TTL 与 KV TTL 搭配：KV 长缓存（1 天）兜住 限流期，进程内短缓存做热加速。
   const kvCached = await kvCacheGet<MastodonInstance>(kv, INSTANCE_KV_KEY)
   if (kvCached) {
     cacheSet(cacheKey, kvCached, INSTANCE_CACHE_TTL_MS)
     return kvCached
   }
 
+  try {
   const [userCount, postCount] = await Promise.all([
     queryOne<{ cnt: number }>(db, 'SELECT COUNT(*) as cnt FROM users'),
     queryOne<{ cnt: number }>(db, 'SELECT COUNT(*) as cnt FROM posts'),
@@ -140,6 +178,11 @@ export async function buildInstance(db: D1Database, kv?: KVNamespace): Promise<M
   cacheSet(cacheKey, instance, INSTANCE_CACHE_TTL_MS)
   await kvCacheSet(kv, INSTANCE_KV_KEY, instance, INSTANCE_KV_TTL_SEC)
   return instance
+  } catch (e) {
+    // D1 故障（配额耗尽等）：CPU 内存短暂缓存兜底，避免每请求都重建。
+    cacheSet(cacheKey, fallbackInstance(), INSTANCE_CACHE_TTL_MS)
+    return fallbackInstance()
+  }
 }
 
 // ============================================================

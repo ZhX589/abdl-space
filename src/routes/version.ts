@@ -11,9 +11,9 @@ type AppType = { Bindings: Env }
 // 版本信息属于低频变更数据，缓存 5 分钟，避免每个客户端频繁查 kv_store。
 const VERSION_CACHE_KEY = 'version:app_version_latest'
 const VERSION_CACHE_TTL_MS = 300_000
-// KV 缓存 TTL 比进程内更长（免费层写配额 1 次/天 上限，15 分钟回填 ≈ 96 次/天/key）
+// KV 缓存 TTL 比进程内更长（免费层写配额 1000 次/天，1 天回填 ≈ 1 次/天/key）
 const VERSION_KV_KEY = 'version:latest'
-const VERSION_KV_TTL_SEC = 900
+const VERSION_KV_TTL_SEC = 86_400
 
 const version = new Hono<AppType>()
 
@@ -51,9 +51,17 @@ version.get('/', async (c) => {
   const kvBody = await kvCacheGet<Record<string, unknown>>(kv, VERSION_KV_KEY)
   if (kvBody) return c.json(kvBody)
 
-  const latest = await queryOne<{
-    value: string
-  }>(db, `SELECT value FROM kv_store WHERE key = 'app_version_latest'`)
+  let latest: { value: string } | null = null
+  try {
+    latest = await queryOne<{
+      value: string
+    }>(db, `SELECT value FROM kv_store WHERE key = 'app_version_latest'`)
+  } catch {
+    // D1 故障（配额耗尽等）：返回降级体，避免冷启动被 500 阻断。
+    const body = { hasUpdate: false, message: '版本服务暂不可用' }
+    cacheSet(VERSION_CACHE_KEY, body, VERSION_CACHE_TTL_MS)
+    return c.json(body)
+  }
 
   if (!latest) {
     const body = { hasUpdate: false, message: '暂无版本信息' }
