@@ -479,6 +479,11 @@ CREATE INDEX IF NOT EXISTS idx_posts_pinned_created ON posts(pinned DESC, create
 CREATE INDEX IF NOT EXISTS idx_post_comments_post_id ON post_comments(post_id);
 CREATE INDEX IF NOT EXISTS idx_post_comments_created ON post_comments(post_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_likes_target ON likes(target_type, target_id);
+-- 低成本降本（0059）：消除时间线计数子查询的全表扫描
+CREATE INDEX IF NOT EXISTS idx_posts_repost_id      ON posts(repost_id)      WHERE repost_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_posts_in_reply_to_id ON posts(in_reply_to_id) WHERE in_reply_to_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_posts_created_at     ON posts(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_likes_user_target    ON likes(user_id, target_type, target_id);
 CREATE INDEX IF NOT EXISTS idx_wiki_pages_slug ON wiki_pages(slug);
 CREATE INDEX IF NOT EXISTS idx_wiki_pages_diaper_id ON wiki_pages(diaper_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_wiki_pages_diaper_id_unique ON wiki_pages(diaper_id) WHERE diaper_id IS NOT NULL;
