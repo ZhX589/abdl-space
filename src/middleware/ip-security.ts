@@ -15,11 +15,21 @@ export async function ipSecurityMiddleware(c: Context<AppType>, next: Next): Pro
   const db = c.env.abdl_space_db
 
   if (ip) {
-    const ban = await queryOne<{ ip: string }>(db, 'SELECT ip FROM ip_bans WHERE ip = ?', [ip])
-    if (ban) return c.json({ error: 'Access denied' }, 403)
+    try {
+      const ban = await queryOne<{ ip: string }>(db, 'SELECT ip FROM ip_bans WHERE ip = ?', [ip])
+      if (ban) return c.json({ error: 'Access denied' }, 403)
+    } catch {
+      // D1 故障（配额耗尽等）：fail-open 放行，避免把每个请求都拖成 500。
+      // 代价：故障期间封禁列表不生效，但优先保证 API 仍可响应。
+    }
   }
 
-  const user = await extractUser(c)
+  let user: JWTPayload | null = null
+  try {
+    user = await extractUser(c)
+  } catch {
+    // D1 故障：视为未认证请求放行（fail-open），避免 500。
+  }
   if (!user) return next()
 
   const tracking = await queryOne<{ user_id: number }>(

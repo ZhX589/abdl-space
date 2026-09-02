@@ -10,6 +10,7 @@ import { Hono } from 'hono'
 import type { Context } from 'hono'
 import type { Env, JWTPayload } from '../types/index.ts'
 import { query, queryOne, run } from '../lib/db.ts'
+import { rateLimit } from '../lib/rate-limit.ts'
 import { cacheGet, cacheSet } from '../lib/ttl-cache.ts'
 import { kvCacheGet, kvCacheSet } from '../lib/kv-cache.ts'
 import { toAccount, toAccountFromNBW, toStatus, toStatusFromNBW, toStatusFromComment, toNotification, toISOString, getVerifiedUserIds } from './converter.ts'
@@ -76,6 +77,10 @@ function buildLinkHeader(
 }
 
 const mastodon = new Hono<AppType>()
+
+// 全局限流：mastodon 兼容端点是最大攻击面（public timeline 无认证且高消耗）。
+// 每 IP/分钟 120 次：正常客户端轮询（App 30-60s + Web 60s）远低于此，刷量/爬虫立刻 429。
+mastodon.use('*', rateLimit('mastodon-api', 60_000, 120))
 
 const IMGBED_HOST = 'https://img.abdl-space.top'
 export const IMGBED_FALLBACK_HEADER = 'X-ABDL-Upload-Fallback'
