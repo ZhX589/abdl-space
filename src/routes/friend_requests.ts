@@ -34,7 +34,7 @@ friendRequests.get('/list', async (c) => {
       OR u.username LIKE ? OR u.display_name LIKE ? OR u.bio LIKE ?
       OR EXISTS (
         SELECT 1 FROM friend_request_fields frf
-        WHERE frf.request_id = fr.id AND frf.value LIKE ?
+        WHERE frf.request_id = fr.id AND frf.field_value LIKE ?
       )
     )`
     params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`)
