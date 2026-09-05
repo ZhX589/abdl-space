@@ -1,0 +1,539 @@
+================================================================================
+后端服务器化改造方案（Cloudflare Workers → 自托管 Node 服务器）
+================================================================================
+日期：2026-07-02（核验基准：后端仓库 main 分支当前代码）
+性质：规划文档 —— 本阶段只做探索、方案设计、核验，不实施。
+范围：以当前 abdl-space 后端仓库为基准 clone 新项目独立改造；线上保持
+      不变，新项目验证通过后再切换。
+
+--------------------------------------------------------------------------------
+一、结论摘要
+--------------------------------------------------------------------------------
+本项目是一个 Hono(4.12) 应用，代码本身与运行时解耦得比较干净：
+  - 路由层（src/index.ts + src/routes/* + src/mastodon/*）用的是标准
+    Web API（Request/Response/fetch），不依赖 Workers 专属 API；
+  - 运行时依赖仅 4 个：hono、@cf-wasm/photon（已确认 Node 目标可用）、
+    @simplewebauthn/server、blurhash —— 全部支持 Node；
+  - 测试已通过 `node --experimental-strip-types --test` 跑通（231 个用例），
+    说明 TS 代码本身在 Node 下可直接运行（类型剥离模式）。
+
+真正需要替换的 Cloudflare 平台能力只有 7 类：
+
+  1. D1（SQL 数据库，工作量最大）
+  2. KV（NOTICE_KV + d1kv:* 缓存层）
+  3. Durable Object UserPresence（WebSocket 实时推送中枢）
+  4. Queue message-outbox（消息分发队列）
+  5. 定时触发器（每分钟一个 Cron）
+  6. caches.default（仅媒体预览缩略图一处使用）
+  7. CF-Connecting-IP 等专属标头（由反向代理注入复刻）
+
+推荐方案：单服务器、单 Node 进程、better-sqlite3 替代 D1、进程内内存 KV
+替代 Cloudflare KV、进程内 WS Hub 替代 DO、node-cron 替代 Cron、进程内
+任务队列替代 Cloudflare Queue。这满足「2 核 4G 香港三网直连」的规格，
+且是改动面最小、回滚最可控的路径。
+
+--------------------------------------------------------------------------------
+二、现状盘点（均来自源码核验）
+--------------------------------------------------------------------------------
+
+【1】D1 数据库 abdl_space_db
+  - 绑定见 wrangler.jsonc（database_id 159f81ba-ea32-4667-a3ce-d72cb1659d93）
+  - 42 个迁移文件（migrations/*.sql），schema 与 SQL 全部是 SQLite 方言：
+    unixepoch()、RETURNING、LIMIT/OFFSET 等，SQLite 3.38+ 均支持；
+    better-sqlite3 内置 SQLite 3.46+，无兼容问题。
+  - 18 个文件直接调用 c.env.DB.prepare(sql).bind(...).all()/.run()/.first()
+  - 另有 src/lib/db.ts 一层封装（query/queryAll/queryOne/run + 评分函数），
+    20+ 个文件调用它
+  - .batch() 使用点：9 个文件共 23 处（likes、ratings、posts、badges、
+    auth、checkin、webauthn、beta、novel-authoring），语义 = 按顺序
+    执行一组语句
+  - 特殊点：INSERT ... RETURNING（webauthn.ts:74）
+
+【2】KV —— 两块用途
+  a. NOTICE_KV：
+     - 服务公告 notice:current（广播/公告接口，零 D1 依赖的应急通道）
+     - 键前缀 d1kv:* 的缓存层，封装在 src/lib/kv-cache.ts：
+       kvCacheGet / kvCacheSet / kvCacheInvalidate
+     - 被用于：version 接口（版本信息缓存）、instance 摘要缓存
+       （instance:summary）、公开时间线快照（兜底）、trends 骨架等
+     - 特点：所有读写都 try/catch 静默失败，fail-open —— 「缓存缺失自动
+       回落 D1 主查询」的语义已经内置
+  b. 读失败语义：KV 挂了不会挂服务，只影响延迟和兜底快照的可用性
+
+【3】Durable Object —— UserPresence()
+  - 每个用户一个 DO：env.USER_PRESENCE.getByName('user:<uid>')
+  - 功能：WebSocket 连接的服务端中枢，App 与服务端之间实时通知
+  - 关键行为（决定替换实现）：
+    * /api/ws 升级：extractUser() 鉴权 → headers 注入 X-Verified-Account-Id、
+      X-Device-Id → 转发给 DO
+    * DO 收升级后立即发送 {"type":"sync.ready","sync_boundary":<max id>}
+    * 收到内部 /push（stub.fetch）：对该用户所有 WS 广播事件
+    * setWebSocketAutoResponse（ping/pong 保活）
+  - 对应 App 端协议（ChatRealtimeClient.java）：
+    * 连接 wss://api.abdl-space.top/api/ws
+    * 携带 Authorization、X-Device-Id
+    * 服务端推送 JSON 事件；App 侧有心跳
+
+【4】Queue —— MESSAGE_OUTBOX_QUEUE (message-outbox)
+  - producer：scheduled 每分钟扫描 message_outbox 中
+    WHERE dispatched_at IS NULL AND next_attempt_at <= unixepoch() LIMIT 50
+    → queue.send({ eventId })
+  - consumer：handleOutboxBatch → dispatchEvent()：
+    查 message_events → 推送到对应用户 DO 的 /push → message.new 时额外
+    对接收者发送 JPush → 更新 outbox 状态
+  - 消息可靠性靠：message_outbox 表 + dispatched_at / attempts /
+    next_attempt_at 字段 + 死信队列（DLQ）
+
+【5】Cron —— 每分钟（triggers.crons ["* * * * *"]）
+  - handleScheduled()：
+    a. 清理私有小说过期对象 cleanupPrivateNovelObjects()
+    b. outbox 轮询入队（上述）
+
+【6】Cache API —— media preview v3
+  - 仅一处：src/mastodon/routes.ts GET /media/preview/v3/:source
+  - 用 caches.default.match/put 做缩略图缓存（Cache-Control 台 30 天）
+  - 失败时 fallback 是 302 跳原图 —— 缓存故障不影响正确性
+
+【7】IP 边界/专属标头 —— Cloudflare 专属头
+  - 读取位置（均为 c.req.header(...)）：
+    * src/middleware/ip-security.ts：CF-Connecting-IP || X-Forwarded-For
+    * src/routes/auth.ts：CF-Connecting-IP || X-Forwarded-For（多处）
+    * rate-limit.ts、captcha.ts、captcha_v1.ts、nbw.ts、baidu-ip.ts
+    * mastodon /geo/ip-province 还会读取 X-Real-Client-IP
+  - 本质：只需反向代理（nginx）注入这些头（一组 proxy_set_header）
+
+【8】其它小项
+  - executionCtx.waitUntil：共 7 个文件使用 —— captcha.ts、
+    captcha_v1.ts、content_v1.ts、friend_requests.ts、scheduled.ts、
+    status-notify.ts、mastodon/routes.ts（请求响应后仍需执行的异步
+    副作用，如缓存回写、通知发送）→ 统一改为 await 或 void+catch
+  - crypto.subtle / getRandomValues：Node 18+ 有全局 webcrypto，无需改
+  - 除上述外没有任何 Workers Runtime API 依赖
+
+--------------------------------------------------------------------------------
+二. 目标架构（TARGET）
+--------------------------------------------------------------------------------
+
+  浏览器 / App（https + wss）
+        │
+        ▼
+   nginx（HTTPS 终结；注入 CF-Connecting-IP / X-Real-Client-IP /
+         X-Forwarded-*；媒体直传 COS，不落服务器）
+        │
+        ▼
+   [abdl-space-api] Node 24 + Hono（app.fetch 由 https server 提供服务）
+        │
+        ├─ better-sqlite3（单文件，WAL 模式）      ← 替代 D1
+        ├─ 进程内 KV 实现（TTL + JSON）            ← 替代 KV
+        ├─ 进程内 WebSocketHub（ws 库，按 userId
+        │   维护 socket 集合）                     ← 替代 DO
+        ├─ 进程内任务队列（Array + 定时轮询 outbox）← 替代 Queue
+        ├─ node-cron（每分钟触发 handleScheduled） ← 替代 Cron
+        ├─ 进程内缓存 Map（media preview）         ← 替代 caches.default
+        └─ tencent-cos / jpush / 百度地图：本来就是外部 HTTP fetch，不改
+
+  重算引擎：@cf-wasm/photon —— 已确认 Node 目标可用（media-preview 等
+  test 已在 Node 下通过），保留同一依赖不换库。
+
+- 存储：SQLite 单文件（WAL）放在服务器本地磁盘；COS（对象存储）不变，
+  媒体文件仍存 COS，不占服务器磁盘。
+- 缓存：单进程全部用内存；将来若多进程再引入 Redis（本期不做）。
+
+--------------------------------------------------------------------------------
+三. 逐项改造方案（对应上文【1】~【8】）
+--------------------------------------------------------------------------------
+
+【改动原则】
+1. clone 独立仓库：git clone 到 new-abdl-space-api 目录，独立分支开发，
+   原仓库保持冻结，互不干扰。
+2. 只重构「运行时/平台对接」层，不重写业务路由代码。
+3. 每个 commit 都是一个可运行的里程碑，每个阶段可回滚。
+
+-----------------------------------------------------------------------
+① D1 → better-sqlite3（配一层 D1 兼容适配）
+-----------------------------------------------------------------------
+- 不逐文件改 .prepare().bind().all()（18 处直接调用）。更稳的做法规
+  做一层与 D1 接口兼容的异步 wrapper：
+    * 新建 src/db-sqlite.ts，导出 sqlite 单例：
+      - prepare(sql) 返回 { bind(...params) → { all() / first() / run() } }
+        —— 与 D1 的 Promise 风格对齐，调用处几乎不用改
+      - batch([stmts]) 内部用事务顺序执行（16 个调用点语义吻合）
+    * src/lib/db.ts 的 query/queryAll/queryOne 改为走同一实例
+- 迁移：migrations/*.sql 按文件名顺序执行一遍（启动时自动建表，或
+  单独迁移命令工具手动执行）
+- 数据导出/导入：
+    + 导出当前 D1：wrangler d1 export abdl-space-db --remote
+                    --output=schemas/dump.sql
+    + 本地导入：sqlite3 data/abdl.db < dump.sql
+    + .mimocode-backups/ 里已有若干格式 dump 可作为降级数据源
+  - 打开 WAL：PRAGMA journal_mode=WAL; busy_timeout=5000; synchronous=NORMAL
+
+- bigint 注意点（user id / post id 等）：
+    D1 返回的是 number；SQLite 下 INTEGER PRIMARY KEY 原生是 64 位整数。
+    只要 id 不超过 2^53-1，JS number 就安全。当前自增 id 远未到 2^53，
+    但仍建议在读写层对 id 字段做 number 约束/校验，专项验证。
+
+-----------------------------------------------------------------------
+② KV → 进程内 KV
+-----------------------------------------------------------------------
+- 替换 lib/kv-cache.ts 的实现：提供 get/put/delete/expiration 的进程内
+  Map 版本（带 TTL，过期自动删除）。
+- KV 的最终一致性/读后变语义在单进程内存中不存在，行为反而更强。
+- notice:current 建议两种实现取一：
+    a) 也放内存 KV + 启动时从 JSON 文件加载（服务器崩溃/重启后可恢复）；
+    b) 改存 SQLite 一张 notice 表。
+  保留「读不到就算未发布」的 fail-open 语义，行为完全一致。
+- 失败语义保持 fail-open：KV 异常一律返回 null，主流程回落 D1。
+
+-----------------------------------------------------------------------
+③ Durable Object(UserPresence) → 进程内 WS Hub
+-----------------------------------------------------------------------
+- 新建 src/ws/hub.ts：
+      const hub = new Map<userId, Set<WebSocket>>()
+      pushToUser(userId, payload)  —— 遍历该用户 socket 集合发布 JSON
+- 升级路径 /api/ws（src/index.ts）在 Node 下改走：
+    * 用 ws 库 WebSocketServer({ noServer: true }) 挂到 http server，
+      在 server 'upgrade' 事件里按 path === '/api/ws' 接管
+    * 鉴权逻辑不变：先在 HTTP 阶段用 extractUser() 校验（同一套 JWT），
+      通过才 allowWebSocket；之后立即发 sync.ready（boundary 来自
+      SELECT MAX(id) FROM message_events）—— 复刻 DO 原有逻辑
+    * 心跳：ws 库自带 ping/pong 处理（App 端已有心跳/重连）
+- 内部 /push 调用：原先 DO stub.fetch('/push') 改为
+  hub.pushToUser(userId, payload)，调用点只有 outbox-dispatcher.ts 一处
+- App 端协议不变 → 客户端零改动。
+
+--------------------------------------------------------------------
+④ Queue → 进程内任务队列
+--------------------------------------------------------------------
+- 删除 Cloudflare Queue producer/consumer；
+   handleScheduled 里 poll outbox（SELECT ... LIMIT 50）后直接开一个
+   异步循环调 dispatchEvent()（跳过 queue 层）
+- 保留 message_outbox 表机制（dispatched_at / attempts / next_attempt_at），
+   崩溃重启后继续「重投」
+- dispatchEvent 内 = pushUser（WS Hub）+（可选）JPush（外部 HTTP）
+- 并发上限：同时 dispatch 不超过 8（自行池化）
+- 失败处理：attempts++，next_attempt_at = now + backoff；达到 max 后
+  标记死信留记录
+
+--------------------------------------------------------------------
+⑤ Cron → node-cron
+--------------------------------------------------------------------
+- 安装 node-cron，注册每分钟任务：
+   cron.schedule('* * * * *', () => handleScheduled({ scheduledTime: Date.now() }))
+- 因为 handleScheduled 只用了 ScheduledController.scheduledTime，
+  定义/改进为参数占位对象即可
+- 进程退出要 clearInterval / 优雅关闭
+
+--------------------------------------------------------------------
+⑥ caches.default → 进程内缓存
+--------------------------------------------------------------------
+- media preview v3 里 cache.match/put 换成内部 Map（LRU 或 TTL 缓存，
+  如 max 500 条 / ttl 24h），key = canonical URL，value = Response
+- 单进程内共享；暂不做多进程（302 fallback 兜底正确性不受影响）
+
+--------------------------------------------------------------------
+⑦ 头注入 —— 由 nginx 复刻 Cloudflare 行为
+--------------------------------------------------------------------
+nginx 配置（443 的 server block 内）：
+    proxy_set_header CF-Connecting-IP    $remote_addr;   # 核心
+    proxy_set_header X-Real-Client-IP    $remote_addr;   # geo/ip-province
+    proxy_set_header X-Forwarded-For     $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto   $scheme;
+代码里「CF-Connecting-IP || X-Forwarded-For」的 fallback 逻辑无需改。
+安全：Node app 只监听 127.0.0.1:3000，nginx 反代唯一入口；
+可选 allow 127.0.0.1 / deny all 加固。
+
+--------------------------------------------------------------------
+⑧ 其它运行时小改
+--------------------------------------------------------------------
+- waitUntil(promise) → 统一换成：await promise（需要等它）或
+  void promise.catch(log)（不需要）。全部是缓存写回/通知类副作用。
+- ExecutionContext/ScheduledController/DurableObjectNamespace/Queue 等
+  类型 import：全部改为自定义轻量 interface，去掉
+  @cloudflare/workers-types 后即可编译
+- TS：保留 type: module + 剥离类型运行（node --experimental-strip-types
+  已使测试跑通）；生产服务与测试用同一套 strict 方法
+  （Node 22.6+ / 24 均支持 --experimental-strip-types）
+
+--------------------------------------------------------------------------------
+四. 环境变量 / 密钥
+--------------------------------------------------------------------------------
+- wrangler secret 迁移到 Node .env（完整清单来自 src/types/index.ts Env，
+  interface 共 41 个字段，其中 USER_PRESENCE / MESSAGE_OUTBOX_QUEUE 是
+  Cloudflare 绑定在服务器侧删除，其余全部转入 .env）：
+    JWT_SECRET、FRONTEND_ORIGIN、
+    TENCENT_SECRET_ID / TENCENT_SECRET_KEY / SES_FROM_EMAIL /
+    SES_TEMPLATE_ID / SES_REGION、
+    COS_SECRET_ID / COS_SECRET_KEY / COS_BUCKET / COS_REGION /
+    COS_PUBLIC_ORIGIN、NOVEL_COS_SECRET_ID / NOVEL_COS_SECRET_KEY /
+    NOVEL_PRIVATE_COS_BUCKET / NOVEL_PRIVATE_COS_REGION、
+    NBW_API_KEY、NBW_CLIENT_ID/SECRET/REDIRECT_URI（×3 套：Web/Mobile/App）、
+    MIMO_ENDPOINT / MIMO_API_KEY / MIMO_TIMEOUT_MS、
+    TURNSTILE_SECRET_KEY、DEEPSEEK_API_KEY、ENCRYPT_KEY、
+    IMGBED_UPLOAD_KEY / IMGBED_DELETE_KEY / IMGBED_LIST_KEY、
+    VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY、
+    BAIDU_MAP_IP_AK / BAIDU_MAP_IP_SK、
+    JPUSH_APP_KEY / JPUSH_MASTER_SECRET、BROADCAST_KEY
+    → 全部进 .env（gitignored）
+- BROADCAST_KEY.local 是原仓库现存唯一的明文密钥文件；留在原仓库不改，
+  部署到新服务器时手动 export 或写进 .env（不 commit）
+- 交付前把 .env.example 的示例值全部改为占位符（当前 .env.example
+  还含非占位符示例值，需清理后再入仓）
+- .env 权限设 600；服务器上禁用 shell history 记录密钥
+
+安全提醒：
+  - 绝不把真实 secret 写进源码 / 文档 / 测试；
+  - 所有 DB 查询必须参数绑定（本项目已是，迁移时保持）；
+  - 反向代理下不信任外部传入的 CF-Connecting-IP（只信 nginx 注入的值）。
+
+--------------------------------------------------------------------------------
+五. 部署拓扑 / 服务器配置建议
+--------------------------------------------------------------------------------
+服务器规格验证：2 核 4G、三回连通（香港）、8M 上行 / 15M 下行 —— 足够：
+- 媒体在 COS，源站 API 带宽需求小（主带宽几乎只走 WS 和 API 文本）；
+- SQLite 全本地，无网络 IO 瓶颈；
+- WS 在线容量：按规模预估，单 Node 4G 内存支撑数千连接没问题。
+
+软件栈：
+  - OS：Debian 12 / Ubuntu 22.04 LTS
+  - Node.js 24（LTS），npm
+  - 进程管理：pm2（或 systemd），开机自启
+  - 反向代理 + TLS：nginx + certbot（Let's Encrypt），复用
+    api.abdl-space.top 域名（443）
+  - 备份：每日 cron 把 data/abdl.db 用 .backup 快照 + 定期加密传 COS
+
+目录布局（/opt/abdl-api）：
+    src/        迁移后的源码
+    data/       abdl.db + WAL/SHM
+    .env        密钥（600）
+    backups/    每日备份
+    logs/       pm2/nginx 日志
+
+监控与告警：
+  - 已有 /api/health → Uptime Kuma（或 uptimerobot）每分钟探活
+  - pm2 内存/重启告警；nginx 错误日志
+
+--------------------------------------------------------------------------------
+六. 分阶段实施路径（每步可回归）
+--------------------------------------------------------------------------------
+
+Phase 0 clone + 数据导入
+  - git clone 到独立目录，checkout 至新分支 server-version
+  - wrangler d1 export --remote → dump.sql → 灌入本地 SQLite 文件
+  - 核对：全部表记录数 / 最新自增 id 与线上一致
+
+Phase 1 运行时骨架
+  - 安装 better-sqlite3、node-cron（ws 如需要）
+  - src/env.ts：读取 .env（dotenv 或自读）构造 Bindings 对象
+  - src/server.ts：http server + upgrade 处理 + app.fetch 挂载 + /healthz
+  - 启动跑通一个最简路由（如 /api/health、/api/v1/instances）
+
+Phase 2 D1 适配完成
+  - prepare/bind/all/first/run/batch 全兼容
+  - 集成验证：注册/登录、发帖、时间线、点赞、评论
+
+Phase 3 消息链路（outbox + WS Hub + JPush）
+  - A 发消息 → B 在线收到 WS；B 离线收到 JPush
+  - 心跳断连恢复（App 重连）
+
+Phase 4 Cron / 清理 / 公告 / 缓存
+  - 私有小说清理、outbox 轮询、notice 公告读写、media preview 缓存
+
+Phase 5 nginx + TLS + 域名切流
+  - 本地全量验证后，把 api.abdl-space.top 的 DNS A 记录临时指向
+    新服务器（保留 Cloudflare 网关作为即时回滚）
+  - 全量回归清单（见第七节）
+
+Phase 6 正式切换
+  - DNS 切换，观察 24 小时；保留旧 Web 域名备用 48 小时后下线
+
+--------------------------------------------------------------------------------
+七. 风险与回滚
+--------------------------------------------------------------------------------
+1. WS 语义是最大风险点（不是 SQL）：
+   - DO 每个用户一个对象、状态跨请求；Node 单进程内 Map 能满足同样
+     语义，但进程重启会掉连接 —— 需要 pm2 restart-delay + App 心跳
+     重连（客户端已自带，OK）
+   - 不做多实例（多实例会打破内存语义）；要扩时再引入 Redis
+2. SQLite 并发：better-sqlite3 同步 API，WAL 模式读写不互锁；
+   写密集批处理环节（likes/checkin/notications 等 16 处 batch）加
+   busy_timeout 兜底即可
+3. 大整数：Post ID / User ID 确认在 number 安全范围内（专项验证）
+4. 安全：服务只监听 127.0.0.1，nginx 反代唯一入口
+5. 回滚方案：原 Cloudflare 部署保持不动，DNS 随时切回 —— 风险最低
+6. 后续若扩容量（2 台起），需引入 Redis：缓存 / KV / WS Hub / 队列
+   都要重做 —— 本期不涉及，届时独立立项
+
+--------------------------------------------------------------------------------
+八. 验收清单（切换门禁）
+--------------------------------------------------------------------------------
+□ curl /api/v1/instances → 200 且数据正确
+□ curl /api/v1/version   → 200 且版本正确（含缓存路径）
+□ 登录 /api/auth/... 成功、JWT 签发正确
+□ 时间线 /api/v1/timelines/public 返回帖子（含兜底快照路径）
+□ WebSocket：连接 /api/ws 收到 sync.ready 且 boundary=最新
+□ 私聊：A→B 在线 → WS 秒级收到；B 离线 → JPush 送达
+□ 公告：POST /api/broadcast/notice（带 X-Broadcast-Key）→ GET 可见
+□ 通知：status-notify / push 流程冒烟
+□ 媒体预览：/api/v1/media/preview/v3/... 返回图片（或 302 降级）
+□ cron：每分钟 outbox 出队无堆积、无死信暴增
+□ /healthz 200
+□ 备份可还原：dump 放入新实例后整链路仍通
+□ App 真机全量冒烟通过
+
+--------------------------------------------------------------------------------
+九. 需要新增 / 修改 / 保持不动的文件清单
+--------------------------------------------------------------------------------
+
+新增：
+  src/server.ts              Node HTTP 入口 + ws upgrade + cron 注册
+  src/db/d1-compat.ts        D1 兼容层（better-sqlite3）
+  src/db/migrate.ts          启动跑 migrations（幂等）
+  src/lib/kv-store.ts        进程内 KV 实现（替换 kv-cache 的 KV 后盾）
+  src/ws/hub.ts              统一 WS Hub
+  src/config.ts / env.ts     process.env → Bindings 对象映射
+  .env.example               占位符版本重写
+
+小改：
+  src/api-worker.ts          迁到 src/server.ts 入口；可选兼容原入口
+  src/lib/scheduled.ts      scheduledTime 参数化，去掉 Controller 类型
+  src/lib/outbox-dispatcher.ts → dispatch 直连（去 MessageBatch/ack/retry）
+  src/index.ts (/api/ws)    升级流程改由 Node ws Hub 负责
+  src/mastodon/routes.ts    caches.default → 内存缓存
+  src/lib/kv-cache.ts       KV 实现可注入
+  src/types/index.ts        Bindings 类型移除 Cloudflare 依赖
+  src/routes/version.ts     若有环境差异按 README 处理
+
+保持不动：
+  - 所有业务路由 src/routes/*、src/mastodon/*
+  - lib/{jpush,tencent-cos,oauth,blurhash,media-preview,rate-limit,...}
+  - migrations/ 目录（42 个文件原样保留，迁移器按序执行）
+  - App 端：零改动（域名、协议、接口不变）
+
+--------------------------------------------------------------------------------
+十.（备选）Docker 化附录
+--------------------------------------------------------------------------------
+如想用 Docker 封装（便于回滚、迁移能力更强），可给出一份
+Dockerfile + docker-compose.yml 模板：
+  - 官方 node:24-slim 镜像
+  - 挂载 data/（SQLite）+ .env
+  - 端口 3000 仅暴露给本机 nginx
+本期默认走「裸机 + pm2/systemd」，Docker 作为附录，不主推。
+
+--------------------------------------------------------------------------------
+十一. 核验补充：D1 大查询分析（2026-07-02 用户反馈 + 源码核验）
+--------------------------------------------------------------------------------
+用户观察到云 D1 控制台的历史查询里，有几条 SQL 一直是读取量的大头。
+逐条定位到源码并分析如下。这三条全部「缺索引 + 高频 + 大聚合」，
+既是 D1 配额爆掉的推手，也是服务器化之后（better-sqlite3 同样适用）
+需要优先优化的点。
+
+--------------------------------------------------------------------------------
+11.1 SQL-1：公开时间线聚合查询
+--------------------------------------------------------------------------------
+出处：src/mastodon/routes.ts /timelines/public（约 1801 行）—— 公共首页
+      每次刷新的必查 SQL，全 App 请求量最大的接口之一。
+特征：
+  - 主表 join + 每行 6 个相关子查询（like_count / comment_count /
+    reblogs_count / bookmarks_count / has_image 等）
+  - ORDER BY posts.created_at DESC + LIMIT（分页又是再一次全查询）
+配额影响：
+  - 每页 20~40 条 × 6 个相关子查询；子查询走时若无合适索引，属于
+    「每行触发一次全表扫描」的最坏形态 —— likes / post_comments /
+    post_images 每行各扫一遍。
+  - 每刷新一次首页 = 数十次全表级子查询 reads。这是 D1 每日配额
+    最大的单一来源（与「公开时间线」是 app 活跃入口一致）。
+核验索引（migrations/*.sql）：
+  - posts：有 idx_posts_created_at、idx_posts_in_reply_to_id、
+    idx_posts_repost_id、idx_posts_announcement —— 排序 OK
+  - likes：只有 idx_likes_user_target(user_id,target_type,target_id) —— 复合
+    (target_type,target_id) 正向查询—— LIKE 的 count 子查询
+    靠它正确
+  - post_comments / post_images：无任何索引 —— 这两个子查询是
+    「每行全表扫」的主犯
+建议：
+  1) 迁移后的 SQLite 上逐一 EXPLAIN QUERY PLAN 验证；
+  2) 增加：
+      CREATE INDEX idx_post_comments_post_id ON post_comments(post_id);
+      CREATE INDEX idx_post_images_post_id   ON post_images(post_id);
+      CREATE INDEX idx_likes_target_type_id  ON likes(target_type,target_id);
+     （三行都是纯 SQLite/D1 兼容 DDL，可在同一份迁移文件里带上）
+  3) 已存在的 KV 快照兜底（PUBLIC_TIMELINE_SNAPSHOT）相当于热点查询
+     的“缓存层”—— 在服务器化后保留（见【】kv-cache），命中时完全不
+     触 DB，配额的兜底更稳。
+
+  —— App 端增量现状（补充核验，2026-07-02）——
+  - 服务端：/timelines/public 已支持 max_id / since_id / min_id 三种
+    游标，增量能力本身是齐的（routes.ts）。
+  - HomeTimelineFragment（App 首页）：有真正增量 —— loadNewPosts()
+    用 since_id（以列表第二条 id 为锚点）拉新增后拼接。但触发时机
+    只有 onShown()（回到该页/切换 tab 时），不是周期轮询。
+  - LocalTimelineFragment / CustomLocalTimelineFragment（发现页本地
+    时间线）：**没有增量** —— 下拉刷新 = 重新拉最新一页
+    （local 用 getMaxID() ≈ null，custom 刷新时 max_id 传 null），
+    即每次下拉都重复查询最新 20~40 条 + 6 个子查询，这是 D1 配额
+    消耗的常态路径。
+  - 结论：请求量最大的首页(SQL-1)最终大部分时间在重复查询同一个
+    最新页 —— 这就是 KV/内存缓存(哪怕 5 分钟 TTL)收益特别大的原因：
+    5 分钟内最新 20 条几乎不变，缓存命中即可免 DB。
+
+--------------------------------------------------------------------------------
+11.2 SQL-2：getUserTokens（已授权客户端列表）
+--------------------------------------------------------------------------------
+- 源码：src/lib/oauth.ts getUserTokens()（约 425 行）
+- 用于：设置页「已授权应用」列表，用户主动打开时触发一次
+特征：
+  - 每个用户扫同 user_id 下全部 oauth_tokens，子查询按 client_id
+    GROUP BY 取 MAX(created_at)，再左连 oauth_clients
+  - 高频：低（仅用户打开授权管理页时）；低频大表：中等
+  - 已有 idx_oauth_tokens_user (user_id, client_id) —— 子查询的
+    WHERE user_id = ? 能走索引，问题不大；GROUP BY 用的 client_id
+    也在复合索引前面，搜索较小
+配额影响：中等偏低，非大头，但用户日常会触发
+建议：
+  - 服务器化后确认 EXPLAIN：WHERE user_id 走 idx_oauth_tokens_user
+    即可；若表增长，可考虑 (user_id, revoked) 前缀，目前不必改。
+
+--------------------------------------------------------------------------------
+11.3 SQL-3：纸尿裤评分聚合（五处重复的同款大聚合）
+--------------------------------------------------------------------------------
+- 源码：src/routes/recommend.ts（约 178 / 276 行）、
+       src/routes/search.ts（约 32 行）、
+       src/routes/content_v1.ts（约 234 / 250 行）
+- 特征：
+  - ratings 与 feelings 两张**无索引**的表，LEFT JOIN + GROUP BY d.id
+    + AVG/COUNT 聚合 —— 该 SQL 在 5 处重复出现（recommend / search /
+    content 各自有一份几乎一样的）
+  - 每执行一次 = ratings 全表 + feelings 全表 + 扫描 + diapers
+    全量聚合；且每次都只能对全表
+- 是“once a session”级查询，但内容重复 5 份，说明被多处调用；
+  一旦首页/搜索/推荐同时命中，read 叠加明显
+- 注意 5 处代码出现重复 → 结论部分附带一个「同一聚合 5 处重复」
+  的质量问题
+
+建议：
+  1) ratings / feelings 增加复合索引：
+       CREATE INDEX idx_ratings_diaper_id ON ratings(diaper_id);
+       CREATE INDEX idx_feelings_diaper_id ON feelings(diaper_id);
+       -- 联合查询把 JOIN 的驱动器缩小到个别尿裤记录
+  2) 把五处重复 SQL 抽成一个共享函数（如 src/lib/diapers-stats.ts
+     buildDiaperRanking()），一处改、处处生效；
+  3) 若用户量再大，可按“日快照”预聚合成一张表（diaper_scores），
+     cron 重建，把这些 AVG/COUNT 从请求路径移除。
+
+--------------------------------------------------------------------------------
+11.4 总结：对 D1 配额 / 服务器化两次优化的权重
+--------------------------------------------------------------------------------
+- 最高优先级：SQL-1（公开时间线）—— 先加 3 个索引，配额立即下降
+  大半；再有给 5 分钟级 KV 快照在服务器侧改成内存缓存。
+- 中优先级：SQL-3（纸尿裤聚合）—— 加 2 个索引 + 抽公共函数省掉
+  重复全扫。
+- 低优先级：SQL-2 —— 已有索引，仅验证执行计划即可。
+- 迁移到 SQLite 后同一份 SQL 直接可用，条件：migration 与
+  新索引 DDL 一起跑；EXPLAIN QUERY PLAN 做为大数据量回归项。
+- 结论：三条「热量」SQL 没有技术壁垒，加索引 + 缓存分层即可
+  解决，且是服务器化和租配额双赢。
+
+--------------------------------------------------------------------------------
+（完）
+--------------------------------------------------------------------------------

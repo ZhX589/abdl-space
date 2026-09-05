@@ -28,8 +28,16 @@ friendRequests.get('/list', async (c) => {
   const params: any[] = []
 
   if (search) {
-    where += ' AND (fr.title LIKE ? OR fr.description LIKE ?)'
-    params.push(`%${search}%`, `%${search}%`)
+    // 扩大搜索范围：交友请求标题/描述/目标 + 发布者昵称/用户名/简介 + 结构化字段值（城市、爱好、性别等）
+    where += ` AND (
+      fr.title LIKE ? OR fr.description LIKE ? OR fr.looking_for LIKE ?
+      OR u.username LIKE ? OR u.display_name LIKE ? OR u.bio LIKE ?
+      OR EXISTS (
+        SELECT 1 FROM friend_request_fields frf
+        WHERE frf.request_id = fr.id AND frf.value LIKE ?
+      )
+    )`
+    params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`)
   }
   if (lookingFor) {
     where += ' AND fr.looking_for = ?'
@@ -49,7 +57,9 @@ friendRequests.get('/list', async (c) => {
 
   const countResult = await queryOne<{ total: number }>(
     db,
-    `SELECT COUNT(*) as total FROM friend_requests fr WHERE ${where}`,
+    `SELECT COUNT(*) as total FROM friend_requests fr
+     JOIN users u ON fr.user_id = u.id
+     WHERE ${where}`,
     params
   )
 

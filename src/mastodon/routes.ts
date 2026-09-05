@@ -20,7 +20,7 @@ import { mastodonAuth, buildInstance, resolveStatus, parseMastoIdForCursor, TREN
 import { syncPostToNBW } from '../lib/nbw-sync.ts'
 import { dispatchStatusNotifications } from '../lib/status-notify.ts'
 import { resolveGeoFromClient, resolveProvinceFromIP } from '../lib/post-geo.ts'
-import { resolveProvinceFromBaiduIp } from '../lib/baidu-ip.ts'
+import { resolveProvinceFromBaiduIpCached } from '../lib/baidu-ip.ts'
 import { geoFromPost } from './converter.ts'
 import { getLastStatusProvinces } from './last-province.ts'
 import { nbwS2SRequest } from '../lib/nbw.ts'
@@ -383,7 +383,7 @@ mastodon.get('/geo/ip-province', async (c) => {
   if (!ak || !sk || !clientIp) {
     return c.json({ province: null, city: null })
   }
-  const result = await resolveProvinceFromBaiduIp(clientIp, ak, sk)
+  const result = await resolveProvinceFromBaiduIpCached(clientIp, ak, sk)
   return c.json({ province: result.province, city: result.city })
 })
 

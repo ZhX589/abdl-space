@@ -109,3 +109,47 @@ export async function resolveProvinceFromBaiduIp(
     city: detail.city || null,
   }
 }
+
+/**
+ * 带缓存的 IP 定位：
+ *  - 百度普通 IP 定位免费档 QPS≈3，App 端多处（冷启动、发帖、个人资料等）会在
+ *    同一秒并发请求 /geo/ip-province，直打百度会触发 QPS 限制导致 province 为空。
+ *  - 同一 IP 的定位结果基本不变：按 IP 缓存 24h；失败（province 为空）短缓存 5 分钟。
+ *  - 同 IP 并发请求合并为一次百度调用（in-flight 去重）。
+ */
+const IP_PROVINCE_OK_TTL_MS = 24 * 60 * 60 * 1000
+const IP_PROVINCE_FAIL_TTL_MS = 5 * 60 * 1000
+const IP_PROVINCE_CACHE_MAX = 2000
+const ipProvinceCache = new Map<string, { result: BaiduIpResult; expires: number }>()
+const ipProvinceInFlight = new Map<string, Promise<BaiduIpResult>>()
+
+export async function resolveProvinceFromBaiduIpCached(
+  clientIp: string,
+  ak: string,
+  sk: string,
+): Promise<BaiduIpResult> {
+  const cached = ipProvinceCache.get(clientIp)
+  if (cached && cached.expires > Date.now()) return cached.result
+
+  const inFlight = ipProvinceInFlight.get(clientIp)
+  if (inFlight) return inFlight
+
+  const promise = (async () => {
+    let result: BaiduIpResult
+    try {
+      result = await resolveProvinceFromBaiduIp(clientIp, ak, sk)
+    } catch {
+      result = { province: null, city: null }
+    }
+    // 缓存上限保护：超限直接清空（低频路径，可接受）
+    if (ipProvinceCache.size >= IP_PROVINCE_CACHE_MAX) ipProvinceCache.clear()
+    ipProvinceCache.set(clientIp, {
+      result,
+      expires: Date.now() + (result.province ? IP_PROVINCE_OK_TTL_MS : IP_PROVINCE_FAIL_TTL_MS),
+    })
+    ipProvinceInFlight.delete(clientIp)
+    return result
+  })()
+  ipProvinceInFlight.set(clientIp, promise)
+  return promise
+}

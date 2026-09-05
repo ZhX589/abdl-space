@@ -643,94 +643,10 @@ novelAuthoring.put('/revisions/:revisionId/draft', async c => {
 	}
 })
 
-// === MiMo 审核、评级与申诉 (spec S9 / migration 0054) ===
+// === 评级展示与申诉 (migration 0054)；MiMo 自动审核已下线，改为先发布后人工审核/举报 ===
 
 const RATING_LABELS = new Set(['all_ages', 'suggest_12', 'suggest_15', 'suggest_18'])
 const APPEAL_REASON_LIMIT = 2000
-const MIMO_DEFAULT_TIMEOUT_MS = 30_000
-
-interface MiMoRiskCategory {
-	category: string
-	confidence: number
-}
-
-interface MiMoStructuredResult {
-	violation_flag: boolean
-	risk_categories: MiMoRiskCategory[]
-	rating: string
-	content_hint: string
-	summary: string
-}
-
-export interface MiMoCaller {
-	review(body: string): Promise<MiMoStructuredResult>
-}
-
-interface MiMoResponseShape {
-	violation_flag: unknown
-	risk_categories: unknown
-	rating: unknown
-	content_hint: unknown
-	summary: unknown
-}
-
-function coerceMiMoResult(raw: unknown): MiMoStructuredResult | null {
-	if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null
-	const value = raw as MiMoResponseShape
-	if (typeof value.violation_flag !== 'boolean') return null
-	if (!Array.isArray(value.risk_categories)) return null
-	const riskCategories: MiMoRiskCategory[] = []
-	for (const entry of value.risk_categories) {
-		if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) return null
-		const item = entry as { category?: unknown, confidence?: unknown }
-		if (typeof item.category !== 'string' || item.category.length === 0 || item.category.length > 64) return null
-		if (typeof item.confidence !== 'number' || !Number.isFinite(item.confidence) || item.confidence < 0 || item.confidence > 1) return null
-		riskCategories.push({ category: item.category, confidence: item.confidence })
-	}
-	if (riskCategories.length > 16) return null
-	if (typeof value.rating !== 'string' || !RATING_LABELS.has(value.rating)) return null
-	if (typeof value.content_hint !== 'string' || value.content_hint.length > 500) return null
-	if (typeof value.summary !== 'string' || value.summary.length > 1000) return null
-	return {
-		violation_flag: value.violation_flag,
-		risk_categories: riskCategories,
-		rating: value.rating,
-		content_hint: value.content_hint,
-		summary: value.summary,
-	}
-}
-
-function WorkerSecretMiMoCaller(env: Env): MiMoCaller {
-	return {
-		async review(body: string): Promise<MiMoStructuredResult> {
-			const endpoint = env.MIMO_ENDPOINT
-			const apiKey = env.MIMO_API_KEY
-			if (!endpoint || !apiKey) throw new Error('MiMo credentials not configured')
-			const timeoutMs = env.MIMO_TIMEOUT_MS ? Number(env.MIMO_TIMEOUT_MS) : MIMO_DEFAULT_TIMEOUT_MS
-			const controller = new AbortController()
-			const timer = setTimeout(() => controller.abort(), Number.isFinite(timeoutMs) ? timeoutMs : MIMO_DEFAULT_TIMEOUT_MS)
-			try {
-				const response = await fetch(endpoint, {
-					method: 'POST',
-					headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-					body: JSON.stringify({ content: body }),
-					signal: controller.signal,
-				})
-				if (!response.ok) throw new Error(`MiMo HTTP ${response.status}`)
-				const parsed: unknown = await response.json()
-				const coerced = coerceMiMoResult(parsed)
-				if (!coerced) throw new Error('MiMo returned invalid structured result')
-				return coerced
-			} finally {
-				clearTimeout(timer)
-			}
-		},
-	}
-}
-
-function resolveMiMoCaller(env: Env): MiMoCaller {
-	return (env.novel_mimo_caller as MiMoCaller | undefined) ?? WorkerSecretMiMoCaller(env)
-}
 
 interface ReviewResultRow {
 	id: string
@@ -833,7 +749,6 @@ novelAuthoring.post('/chapters/:chapterId/revisions/:revisionId/submit', async c
 	if (revision.status !== 'draft') return c.json({ error: 'Only draft revisions can be submitted', code: 'revision_not_draft' }, 409)
 
 	const snapshotId = crypto.randomUUID()
-	const resultId = crypto.randomUUID()
 	const now = Math.floor(Date.now() / 1000)
 	const bodyBytes = new Blob([revision.body]).size
 
@@ -844,46 +759,19 @@ novelAuthoring.post('/chapters/:chapterId/revisions/:revisionId/submit', async c
 
 	await db.batch([snapshotInsert, submitAudit])
 
-	let mimoResult: MiMoStructuredResult | null
-	let mimoDiagnostic: string | null = null
-	try {
-		const raw = await resolveMiMoCaller(c.env).review(revision.body)
-		mimoResult = coerceMiMoResult(raw)
-		if (!mimoResult) mimoDiagnostic = `mimo_coerce_failed raw=${JSON.stringify(raw).slice(0, 400)}`
-	} catch (error) {
-		mimoResult = null
-		mimoDiagnostic = `mimo_call_failed ${(error as Error).message?.slice(0, 300) ?? 'unknown'}`
-	}
-	if (!mimoResult) {
-		console.log('novel_review_kept_pending', { revision_id: revision.id, diagnostic: mimoDiagnostic })
-		const keptAudit = db.prepare(`INSERT INTO novel_review_audit (owner_id, revision_id, actor_id, action, metadata)
-			VALUES (?, ?, ?, 'review_kept_pending', ?)`).bind(auth.user.sub, revision.id, auth.user.sub, JSON.stringify({ snapshot_id: snapshotId, diagnostic: mimoDiagnostic }))
-		const markPending = db.prepare(`UPDATE chapter_revisions SET status = 'review_pending', updated_at = ? WHERE id = ? AND owner_id = ? AND status = 'draft'`).bind(now, revision.id, auth.user.sub)
-		const opRecord = db.prepare(`INSERT INTO novel_revision_operations (owner_id, idempotency_key, revision_id, request_body, request_base_version, response_body, response_chapter_id, response_status, response_version, response_created_at, response_updated_at)
-			VALUES (?, ?, ?, '', 0, ?, ?, 'review_pending', ?, ?, ?)`)
-			.bind(auth.user.sub, key, revision.id, JSON.stringify({ status: 'review_pending' }), revision.chapter_id, revision.version, revision.created_at, now)
-		await db.batch([keptAudit, markPending, opRecord])
-		return c.json({ id: revision.id, chapter_id: revision.chapter_id, status: 'review_pending', snapshot_id: snapshotId })
-	}
-
-	const violation = mimoResult.violation_flag ? 1 : 0
-	const nextStatus = mimoResult.violation_flag ? 'rejected' : 'approved'
-	const action = mimoResult.violation_flag ? 'auto_reject' : 'auto_approve'
-	const riskJson = JSON.stringify(mimoResult.risk_categories)
-
-	const resultInsert = db.prepare(`INSERT INTO novel_review_results (id, owner_id, revision_id, snapshot_id, violation_flag, risk_categories, rating, content_hint, summary, model_id, decided_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?)`).bind(resultId, auth.user.sub, revision.id, snapshotId, violation, riskJson, mimoResult.rating, mimoResult.content_hint, mimoResult.summary, now)
-	const revisionUpdate = db.prepare(`UPDATE chapter_revisions SET status = ?, updated_at = ? WHERE id = ? AND owner_id = ? AND status = 'draft'`)
-		.bind(nextStatus, now, revision.id, auth.user.sub)
-	const decisionAudit = db.prepare(`INSERT INTO novel_review_audit (owner_id, revision_id, actor_id, action, metadata)
-		VALUES (?, ?, ?, ?, ?)`).bind(auth.user.sub, revision.id, auth.user.sub, action, JSON.stringify({ result_id: resultId, snapshot_id: snapshotId, rating: mimoResult.rating }))
+	// MiMo 自动审核已下线（改为「先公开发布，后人工审核/举报」）。
+	// submit 仅保留兼容语义：冻结快照后直接通过，作者随后调用 publish 即可公开发布。
+	const approveAudit = db.prepare(`INSERT INTO novel_review_audit (owner_id, revision_id, actor_id, action, metadata)
+		VALUES (?, ?, ?, 'auto_approve', ?)`).bind(auth.user.sub, revision.id, auth.user.sub, JSON.stringify({ snapshot_id: snapshotId, idempotency_key: key, mode: 'publish_first' }))
+	const markApproved = db.prepare(`UPDATE chapter_revisions SET status = 'approved', updated_at = ? WHERE id = ? AND owner_id = ? AND status = 'draft'`)
+		.bind(now, revision.id, auth.user.sub)
 	const opRecord = db.prepare(`INSERT INTO novel_revision_operations (owner_id, idempotency_key, revision_id, request_body, request_base_version, response_body, response_chapter_id, response_status, response_version, response_created_at, response_updated_at)
-		VALUES (?, ?, ?, '', 0, ?, ?, ?, ?, ?, ?)`)
-		.bind(auth.user.sub, key, revision.id, JSON.stringify({ status: nextStatus, result_id: resultId }), revision.chapter_id, nextStatus, revision.version, revision.created_at, now)
+		VALUES (?, ?, ?, '', 0, ?, ?, 'approved', ?, ?, ?)`)
+		.bind(auth.user.sub, key, revision.id, JSON.stringify({ status: 'approved' }), revision.chapter_id, revision.version, revision.created_at, now)
 
-	await db.batch([resultInsert, revisionUpdate, decisionAudit, opRecord])
+	await db.batch([approveAudit, markApproved, opRecord])
 
-	return c.json({ id: revision.id, chapter_id: revision.chapter_id, status: nextStatus, snapshot_id: snapshotId, result_id: resultId, rating: mimoResult.rating, violation_flag: mimoResult.violation_flag })
+	return c.json({ id: revision.id, chapter_id: revision.chapter_id, status: 'approved', snapshot_id: snapshotId })
 })
 
 novelAuthoring.get('/revisions/:revisionId/review', async c => {
@@ -1025,14 +913,15 @@ novelAuthoring.post('/revisions/:revisionId/publish', async c => {
 	}
 	if (existing && existing.revision_id !== revision.id) return c.json({ error: 'Idempotency metadata conflict', code: 'idempotency_conflict' }, 409)
 
-	if (revision.status !== 'approved') return c.json({ error: 'Only approved revisions can be published', code: 'revision_not_approved' }, 409)
+	// 「先公开发布，后人工审核/举报」：draft 与 approved（历史数据）均可直接发布
+	if (revision.status !== 'approved' && revision.status !== 'draft') return c.json({ error: 'Only draft or approved revisions can be published', code: 'revision_not_publishable' }, 409)
 
 	const now = Math.floor(Date.now() / 1000)
 	const supersedeOld = db.prepare(`UPDATE chapter_revisions SET status = 'superseded', updated_at = ?
 		WHERE chapter_id = ? AND owner_id = ? AND status = 'published' AND id != ?`)
 		.bind(now, revision.chapter_id, auth.user.sub, revision.id)
 	const publishNew = db.prepare(`UPDATE chapter_revisions SET status = 'published', updated_at = ?
-		WHERE id = ? AND owner_id = ? AND status = 'approved'`)
+		WHERE id = ? AND owner_id = ? AND status IN ('approved', 'draft')`)
 		.bind(now, revision.id, auth.user.sub)
 	const publishAudit = db.prepare(`INSERT INTO novel_review_audit (owner_id, revision_id, actor_id, action, metadata)
 		VALUES (?, ?, ?, 'publish', ?)`).bind(auth.user.sub, revision.id, auth.user.sub, JSON.stringify({ idempotency_key: key }))
@@ -1047,9 +936,70 @@ novelAuthoring.post('/revisions/:revisionId/publish', async c => {
 		const current = await getOwnedRevision(db, auth.user.sub, revision.id)
 		if (!current) return c.json({ error: 'Revision not found', code: 'revision_not_found' }, 404)
 		if (current.status === 'published') return c.json({ id: revision.id, chapter_id: revision.chapter_id, status: 'published', published_revision_id: revision.id })
-		return c.json({ error: 'Revision is no longer approved', code: 'revision_not_approved' }, 409)
+		return c.json({ error: 'Revision is no longer publishable', code: 'revision_not_publishable' }, 409)
 	}
 	return new Response(responseBody, { status: 200, headers: { 'Content-Type': 'application/json' } })
+})
+
+// === 公开书城举报（先发布后人工审核模式的读者入口）===
+
+novelAuthoring.post('/works/:workId/report', async c => {
+	const auth = await authenticate(c, 'write')
+	if (auth instanceof Response) return auth
+	const key = idempotencyKey(c)
+	if (!key) return c.json({ error: 'A valid idempotency key is required', code: 'invalid_idempotency_key' }, 400)
+	const input = await readJsonObjectLimited(c)
+	if (input === 'too_large') return c.json({ error: 'Request is too large', code: 'request_too_large' }, 413)
+	const reason = typeof input?.reason === 'string' ? input.reason.trim() : ''
+	if (!reason || reason.length > APPEAL_REASON_LIMIT) return c.json({ error: 'Invalid report reason', code: 'invalid_report' }, 400)
+
+	const db = c.env.abdl_space_db
+	const workId = c.req.param('workId')
+	const work = await db.prepare(`SELECT id FROM novels WHERE id = ? AND deleted_at IS NULL`).bind(workId).first<{ id: string }>()
+	if (!work) return c.json({ error: 'Work not found', code: 'work_not_found' }, 404)
+
+	const existing = await db.prepare(`SELECT id, status FROM novel_reports WHERE reporter_id = ? AND work_id = ? AND idempotency_key = ?`)
+		.bind(auth.user.sub, workId, key).first<{ id: string, status: string }>()
+	if (existing) return c.json({ id: existing.id, work_id: workId, status: existing.status }, 200)
+
+	const reportId = crypto.randomUUID()
+	const now = Math.floor(Date.now() / 1000)
+	await db.batch([
+		db.prepare(`INSERT INTO novel_reports (id, reporter_id, work_id, reason, status, idempotency_key, created_at, updated_at)
+			VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)`).bind(reportId, auth.user.sub, workId, reason, key, now, now),
+	])
+	return c.json({ id: reportId, work_id: workId, status: 'pending' }, 201)
+})
+
+novelAuthoring.get('/admin/reports', async c => {
+	const auth = await authenticate(c, 'read')
+	if (auth instanceof Response) return auth
+	const denied = await requireAdmin(c, auth)
+	if (denied) return denied
+	const rows = await c.env.abdl_space_db.prepare(`SELECT id, reporter_id, work_id, reason, status, created_at
+		FROM novel_reports WHERE status IN ('pending', 'reviewing') ORDER BY created_at, id LIMIT 100`).bind().all<{ id: string, reporter_id: number, work_id: string, reason: string, status: string, created_at: number }>()
+	return c.json({ items: rows.results })
+})
+
+novelAuthoring.post('/admin/reports/:reportId/resolve', async c => {
+	const auth = await authenticate(c, 'write')
+	if (auth instanceof Response) return auth
+	const denied = await requireAdmin(c, auth)
+	if (denied) return denied
+	const input = await readJsonObjectLimited(c)
+	if (input === 'too_large') return c.json({ error: 'Request is too large', code: 'request_too_large' }, 413)
+	const decision = input?.decision === 'dismissed' ? 'dismissed' : input?.decision === 'actioned' ? 'actioned' : null
+	if (!decision) return c.json({ error: 'Invalid decision', code: 'invalid_decision' }, 400)
+
+	const db = c.env.abdl_space_db
+	const reportId = c.req.param('reportId')
+	const report = await db.prepare(`SELECT id, status FROM novel_reports WHERE id = ?`).bind(reportId).first<{ id: string, status: string }>()
+	if (!report) return c.json({ error: 'Report not found', code: 'report_not_found' }, 404)
+	const now = Math.floor(Date.now() / 1000)
+	const result = await db.prepare(`UPDATE novel_reports SET status = ?, updated_at = ? WHERE id = ? AND status IN ('pending', 'reviewing')`)
+		.bind(decision, now, reportId).run()
+	if (!result.success || result.meta.changes !== 1) return c.json({ error: 'Report changed before decision', code: 'report_changed' }, 409)
+	return c.json({ id: reportId, status: decision })
 })
 
 novelAuthoring.get('/chapters/:chapterId/published', async c => {
