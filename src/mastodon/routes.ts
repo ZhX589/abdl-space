@@ -1952,6 +1952,7 @@ async function fetchAbdlPosts(c: Context<{ Bindings: Env }>, limit: number, maxI
       in_reply_to_account_id: r.in_reply_to_account_id as number | null,
       poll: r.poll_id ? pollMap.get(r.poll_id as number) ?? null : null,
       linkCard: cardMap.get(r.id as number) ?? null,
+      ...geoFromPost(r),
     }, account)
   })
 }
@@ -2071,6 +2072,7 @@ mastodon.get('/timelines/tag/:hashtag', async (c) => {
         in_reply_to_account_id: r.in_reply_to_account_id as number | null,
         poll: r.poll_id ? pollMap.get(r.poll_id as number) ?? null : null,
         linkCard: cardMap.get(r.id as number) ?? null,
+        ...geoFromPost(r),
       }, account, { reblog: r.repost_id ? reblogMap.get(r.repost_id as number) : undefined })
     })
   })()
@@ -2431,6 +2433,7 @@ mastodon.get('/search', async (c) => {
         in_reply_to_type: r.in_reply_to_type as string | null,
         in_reply_to_account_id: r.in_reply_to_account_id as number | null,
         poll: r.poll_id ? pollMap.get(r.poll_id as number) ?? null : null,
+        ...geoFromPost(r),
       }, account, { reblog: r.repost_id ? reblogMap.get(r.repost_id as number) : undefined })
     })
   })()
@@ -2526,6 +2529,7 @@ mastodon.get('/favourites', async (c) => {
       in_reply_to_type: r.in_reply_to_type as string | null,
       in_reply_to_account_id: r.in_reply_to_account_id as number | null,
       poll: r.poll_id ? pollMap.get(r.poll_id as number) ?? null : null,
+      ...geoFromPost(r),
     }, account, { favourited: likedSet.has(r.id as number), bookmarked: bookmarkSet.has(r.id as number) })
   })
 
@@ -2592,6 +2596,7 @@ mastodon.get('/bookmarks', async (c) => {
       in_reply_to_type: r.in_reply_to_type as string | null,
       in_reply_to_account_id: r.in_reply_to_account_id as number | null,
       poll: r.poll_id ? pollMap.get(r.poll_id as number) ?? null : null,
+      ...geoFromPost(r),
     }, account, { favourited: likedSet.has(r.id as number), bookmarked: true })
   })
 
@@ -2759,6 +2764,7 @@ mastodon.get('/statuses/:id/context', async (c) => {
       in_reply_to_type: r.in_reply_to_type as string | null,
       in_reply_to_account_id: r.in_reply_to_account_id as number | null,
       poll: null, linkCard: replyCardMap.get(r.id as number) ?? null,
+      ...geoFromPost(r),
     }, account)
   })
 
@@ -3351,6 +3357,7 @@ mastodon.get('/trends/statuses', async (c) => {
       in_reply_to_type: r.in_reply_to_type as string | null,
       in_reply_to_account_id: r.in_reply_to_account_id as number | null,
       poll: r.poll_id ? pollMap.get(r.poll_id as number) ?? null : null,
+      ...geoFromPost(r),
     }, account, { favourited: likedSet.has(r.id as number), bookmarked: bookmarkSet.has(r.id as number) })
   })
 
