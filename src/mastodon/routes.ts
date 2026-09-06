@@ -1940,6 +1940,18 @@ async function fetchAbdlPosts(c: Context<{ Bindings: Env }>, limit: number, maxI
   const pollIds = posts.filter(r => r.poll_id).map(r => r.poll_id as number)
   const pollMap = await loadPolls(c.env.abdl_space_db, pollIds)
   const cardMap = await generateCardsForPosts(posts.map(r => ({ id: r.id as number, content: r.content as string, diaper_id: r.diaper_id as number | null })))
+  const abdlUser = await mastodonAuth(c)
+  const abdlPostIds = posts.map(r => r.id as number)
+  const abdlLiked = new Set<number>()
+  const abdlBookmarked = new Set<number>()
+  if (abdlUser && abdlPostIds.length > 0) {
+    const marks = await query<{ target_id: number; target_type: string }>(
+      c.env.abdl_space_db,
+      `SELECT target_id, target_type FROM likes WHERE user_id = ? AND target_type IN ('post','bookmark') AND target_id IN (${abdlPostIds.map(() => '?').join(',')})`,
+      [abdlUser.sub, ...abdlPostIds]
+    )
+    for (const m of marks) (m.target_type === 'post' ? abdlLiked : abdlBookmarked).add(m.target_id as number)
+  }
   const out = posts.map(r => {
     const account = toAccount({
       id: r.user_id as number, username: r.username as string, avatar: r.avatar as string | null,
@@ -1958,7 +1970,7 @@ async function fetchAbdlPosts(c: Context<{ Bindings: Env }>, limit: number, maxI
       poll: r.poll_id ? pollMap.get(r.poll_id as number) ?? null : null,
       linkCard: cardMap.get(r.id as number) ?? null,
       ...geoFromPost(r),
-    }, account)
+    }, account, { favourited: abdlLiked.has(r.id as number), bookmarked: abdlBookmarked.has(r.id as number) })
   })
   await attachDisplayedBadges(c.env.abdl_space_db, out)
   return out
@@ -2845,7 +2857,7 @@ mastodon.get('/statuses/:id/context', async (c) => {
   }
 
   await attachDisplayedBadges(c.env.abdl_space_db, ancestors)
-  await attachDisplayedBadges(c.env.abdl_space_db, descendants)
+  await attachDisplayedBadges(c.env.abdl_space_db, sorted)
   return c.json({ ancestors, descendants: sorted })
 })
 
@@ -3249,8 +3261,12 @@ mastodon.post('/statuses/:id/share', async (c) => {
     return c.json({ shares_count: row?.shares_count ?? 0, heat: await loadHeat() })
   }
 
-  await run(c.env.abdl_space_db, 'UPDATE posts SET shares_count = shares_count + 1 WHERE id = ?', [resolved.realId])
-  const row = await queryOne<{ shares_count: number }>(
+  // 单用户每帖仅计 1 次分享加热（post_shares 唯一约束去重）
+  const shareInsert = await run(c.env.abdl_space_db,
+    'INSERT OR IGNORE INTO post_shares (post_id, user_id) VALUES (?, ?)', [resolved.realId, user.sub])
+  if ((shareInsert.meta?.changes ?? 0) === 1) {
+    await run(c.env.abdl_space_db, 'UPDATE posts SET shares_count = shares_count + 1 WHERE id = ?', [resolved.realId])
+  }  const row = await queryOne<{ shares_count: number }>(
     c.env.abdl_space_db, 'SELECT shares_count FROM posts WHERE id = ?', [resolved.realId]
   )
   return c.json({ shares_count: row?.shares_count ?? 0, heat: await loadHeat() })
