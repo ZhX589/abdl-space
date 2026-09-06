@@ -31,6 +31,7 @@ export interface MastodonAccount {
   hide_collections: boolean
   noindex: boolean
   verified?: boolean
+  badge?: { name: string; color: string } | null
   source?: { note: string; fields: { name: string; value: string; verified_at: string | null }[]; privacy: string; sensitive: boolean; language: string }
 }
 

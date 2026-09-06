@@ -38,6 +38,7 @@ export function toAccount(user: {
   last_status_at?: string | null
   last_status_province?: string | null
   verified?: boolean
+  badge?: { name: string; color: string } | null
 }): MastodonAccount {
   const avatar = user.avatar || DEFAULT_AVATAR
   const header = user.header || DEFAULT_HEADER
@@ -63,6 +64,7 @@ export function toAccount(user: {
     statuses_count: opts?.statuses_count ?? 0,
     last_status_at: opts?.last_status_at ?? null,
     last_status_province: opts?.last_status_province ?? null,
+    badge: opts?.badge ?? null,
     emojis: [],
     fields: (() => { try { return JSON.parse(user.profile_fields || '[]') } catch { return [] } })(),
     roles: user.role === 'admin'
@@ -615,4 +617,52 @@ export async function getVerifiedUserIds(db: D1Database, userIds: number[]): Pro
     userIds,
   )
   return new Set(rows.map(r => r.user_id))
+}
+
+/** 批量查询用户展示中的徽章（每用户至多一枚），供帖子流 account.badge 使用 */
+export async function getDisplayedBadges(
+  db: D1Database,
+  userIds: number[],
+): Promise<Map<number, { name: string; color: string }>> {
+  const result = new Map<number, { name: string; color: string }>()
+  const ids = [...new Set(userIds)].filter(Boolean)
+  if (ids.length === 0) return result
+  const rows = await query<{ user_id: number; name: string; color: string }>(
+    db,
+    `SELECT ub.user_id, b.name, b.color
+     FROM user_badges ub JOIN badges b ON ub.badge_key = b.key
+     WHERE ub.displayed = 1 AND ub.user_id IN (${ids.map(() => '?').join(',')})
+     ORDER BY ub.unlocked_at DESC`,
+    ids,
+  )
+  for (const r of rows) {
+    if (!result.has(r.user_id)) result.set(r.user_id, { name: r.name, color: r.color })
+  }
+  return result
+}
+
+/** 给一批状态（含转帖）的 account 附加展示徽章 */
+export async function attachDisplayedBadges<T extends { account: MastodonAccount; reblog?: MastodonStatus | null }>(
+  db: D1Database,
+  statuses: T[],
+): Promise<void> {
+  const ids: number[] = []
+  for (const s of statuses) {
+    for (const a of [s.account, s.reblog?.account]) {
+      if (a?.id) {
+        const n = Number(a.id)
+        if (Number.isFinite(n)) ids.push(n)
+      }
+    }
+  }
+  if (ids.length === 0) return
+  const map = await getDisplayedBadges(db, ids)
+  for (const s of statuses) {
+    for (const a of [s.account, s.reblog?.account]) {
+      if (a?.id) {
+        const badge = map.get(Number(a.id))
+        if (badge) a.badge = badge
+      }
+    }
+  }
 }

@@ -24,6 +24,7 @@ import messages from './routes/messages.ts'
 import images from './routes/images.ts'
 import follows from './routes/follows.ts'
 import admin from './routes/admin.ts'
+import adminBadges from './routes/admin-badges.ts'
 import search from './routes/search.ts'
 import apiKeys from './routes/api_keys.ts'
 import reports from './routes/reports.ts'
@@ -245,6 +246,7 @@ app.route('/api/messages', messages)
 app.route('/api/images', images)
 app.route('/api/follows', follows)
 app.route('/api/admin', admin)
+app.route('/api/admin/badges', adminBadges)
 app.route('/api/search', search)
 app.route('/api/api_keys', apiKeys)
 app.route('/api/reports', reports)

@@ -21,7 +21,7 @@ import { syncPostToNBW } from '../lib/nbw-sync.ts'
 import { dispatchStatusNotifications } from '../lib/status-notify.ts'
 import { resolveGeoFromClient, resolveProvinceFromIP } from '../lib/post-geo.ts'
 import { resolveProvinceFromBaiduIpCached } from '../lib/baidu-ip.ts'
-import { geoFromPost } from './converter.ts'
+import { geoFromPost, attachDisplayedBadges } from './converter.ts'
 import { getLastStatusProvinces } from './last-province.ts'
 import { nbwS2SRequest } from '../lib/nbw.ts'
 import { handleNBWTimeline, buildNBWTimelineParams } from './nbw-timeline.ts'
@@ -884,6 +884,7 @@ mastodon.get('/accounts/:id/statuses', async (c) => {
 
   const link = buildLinkHeader(`/api/v1/accounts/${id}/statuses`, statuses, limit, { only_media: c.req.query('only_media') || '' })
   if (link) c.header('Link', link)
+  await attachDisplayedBadges(c.env.abdl_space_db, statuses)
   return c.json(statuses)
 })
 
@@ -1268,7 +1269,7 @@ mastodon.get('/statuses/:id', async (c) => {
   const { generateCardForContent } = await import('./linkpreview.ts')
   const linkCard = await generateCardForContent(post.content as string)
 
-  return c.json(toStatus({
+  const status = toStatus({
     id: post.id as number,
     user_id: post.user_id as number,
     content: post.content as string,
@@ -1293,7 +1294,9 @@ mastodon.get('/statuses/:id', async (c) => {
     poll,
     linkCard,
     ...geoFromPost(post),
-  }, account, { reblog }))
+  }, account, { reblog })
+  await attachDisplayedBadges(c.env.abdl_space_db, [status])
+  return c.json(status)
 })
 
 // ============================================================
@@ -1609,6 +1612,7 @@ mastodon.get('/timelines/home', async (c) => {
     })
   })()
 
+  await attachDisplayedBadges(c.env.abdl_space_db, homeStatuses)
   const link = buildLinkHeader('/api/v1/timelines/home', homeStatuses, limit)
   if (link) c.header('Link', link)
   return c.json(homeStatuses)
@@ -1690,6 +1694,7 @@ mastodon.get('/timelines/geo', async (c) => {
     })
   })()
 
+  await attachDisplayedBadges(c.env.abdl_space_db, geoStatuses)
   const link = buildLinkHeader('/api/v1/timelines/geo', geoStatuses, limit)
   if (link) c.header('Link', link)
   return c.json(geoStatuses)
@@ -1935,7 +1940,7 @@ async function fetchAbdlPosts(c: Context<{ Bindings: Env }>, limit: number, maxI
   const pollIds = posts.filter(r => r.poll_id).map(r => r.poll_id as number)
   const pollMap = await loadPolls(c.env.abdl_space_db, pollIds)
   const cardMap = await generateCardsForPosts(posts.map(r => ({ id: r.id as number, content: r.content as string, diaper_id: r.diaper_id as number | null })))
-  return posts.map(r => {
+  const out = posts.map(r => {
     const account = toAccount({
       id: r.user_id as number, username: r.username as string, avatar: r.avatar as string | null,
       role: r.role as string, bio: r.bio as string | null, created_at: r.user_created_at as string,
@@ -1955,6 +1960,8 @@ async function fetchAbdlPosts(c: Context<{ Bindings: Env }>, limit: number, maxI
       ...geoFromPost(r),
     }, account)
   })
+  await attachDisplayedBadges(c.env.abdl_space_db, out)
+  return out
 }
 
 async function fetchNBWPosts(c: Context<{ Bindings: Env }>, limit: number, cursor: string): Promise<{ statuses: MastodonStatus[]; nextCursor: string; hasMore: boolean }> {
@@ -2019,6 +2026,7 @@ mastodon.get('/timelines/all', async (c) => {
       c.header('Link', `</api/v1/timelines/all?${query}>; rel="next"`)
     }
 
+    await attachDisplayedBadges(c.env.abdl_space_db, page.statuses)
     return c.json(page.statuses)
   } catch (e) {
     console.error('GET /timelines/all failed:', e)
@@ -2077,6 +2085,7 @@ mastodon.get('/timelines/tag/:hashtag', async (c) => {
     })
   })()
 
+  await attachDisplayedBadges(c.env.abdl_space_db, tagStatuses)
   const link = buildLinkHeader(`/api/v1/timelines/tag/${hashtag}`, tagStatuses, limit)
   if (link) c.header('Link', link)
   return c.json(tagStatuses)
@@ -2452,6 +2461,7 @@ mastodon.get('/search', async (c) => {
   }
   const hashtags = [...hashtagSet].map(name => ({ name, url: `https://abdl-space.top/tags/${name}`, history: [] }))
 
+  await attachDisplayedBadges(c.env.abdl_space_db, statuses)
   return c.json({ accounts, statuses, hashtags })
 })
 
@@ -2533,6 +2543,7 @@ mastodon.get('/favourites', async (c) => {
     }, account, { favourited: likedSet.has(r.id as number), bookmarked: bookmarkSet.has(r.id as number) })
   })
 
+  await attachDisplayedBadges(c.env.abdl_space_db, statuses)
   return c.json(statuses)
 })
 
@@ -2833,6 +2844,8 @@ mastodon.get('/statuses/:id/context', async (c) => {
     visit(item)
   }
 
+  await attachDisplayedBadges(c.env.abdl_space_db, ancestors)
+  await attachDisplayedBadges(c.env.abdl_space_db, descendants)
   return c.json({ ancestors, descendants: sorted })
 })
 
@@ -3361,6 +3374,7 @@ mastodon.get('/trends/statuses', async (c) => {
     }, account, { favourited: likedSet.has(r.id as number), bookmarked: bookmarkSet.has(r.id as number) })
   })
 
+  await attachDisplayedBadges(c.env.abdl_space_db, statuses)
   const link = buildLinkHeader('/api/v1/trends/statuses', statuses, limit)
   if (link) c.header('Link', link)
   return c.json(statuses)
