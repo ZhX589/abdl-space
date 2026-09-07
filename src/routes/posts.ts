@@ -31,15 +31,17 @@ async function deleteImageFromImgbed(env: Env, imageUrl: string) {
 }
 
 
-// 安全查询帖子图片（post_images 表可能不存在）
-async function safeGetCommentImages(db: D1Database, commentId: number): Promise<{image_url: string; is_nsfw: number}[]> {
+// 批量安全查询评论图片（comment_images 表可能缺列/缺表，失败时降级为空）
+async function safeGetCommentImagesBatch(db: D1Database, commentIds: number[]): Promise<{ comment_id: number; image_url: string; is_nsfw: number }[]> {
+  if (commentIds.length === 0) return []
   try {
-    const result = await db.prepare(
-      'SELECT image_url, is_nsfw, alt_text FROM comment_images WHERE comment_id = ? ORDER BY sort_order'
-    ).bind(commentId).all();
-    return result.results as { image_url: string; is_nsfw: number }[];
+    return await query<{ comment_id: number; image_url: string; is_nsfw: number }>(
+      db,
+      `SELECT comment_id, image_url, is_nsfw FROM comment_images WHERE comment_id IN (${commentIds.map(() => '?').join(',')}) ORDER BY sort_order`,
+      commentIds
+    )
   } catch {
-    return [];
+    return []
   }
 }
 
@@ -341,13 +343,7 @@ posts.get('/:id', async (c) => {
     : []
   const cmtLikeMap = new Map(cmtLikeCounts.map(r => [r.target_id, r.cnt]))
 
-  const allCmtImages = commentIds.length > 0
-    ? await query<{ comment_id: number; image_url: string; is_nsfw: number }>(
-        c.env.abdl_space_db,
-        `SELECT comment_id, image_url, is_nsfw, alt_text FROM comment_images WHERE comment_id IN (${commentIds.map(() => '?').join(',')}) ORDER BY sort_order`,
-        commentIds
-      )
-    : []
+  const allCmtImages = await safeGetCommentImagesBatch(c.env.abdl_space_db, commentIds)
   const cmtImagesMap = new Map<number, { image_url: string; is_nsfw: number }[]>()
   for (const img of allCmtImages) {
     if (!cmtImagesMap.has(img.comment_id)) cmtImagesMap.set(img.comment_id, [])
