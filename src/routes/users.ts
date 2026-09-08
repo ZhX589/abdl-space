@@ -219,7 +219,7 @@ users.get('/:id/posts', async (c) => {
     c.env.abdl_space_db,
     `SELECT p.*, u.username, u.avatar, u.role,
             (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
-            (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count
+            (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) + (SELECT COUNT(*) FROM posts WHERE in_reply_to_id = p.id) as comment_count
      FROM posts p JOIN users u ON p.user_id = u.id
      WHERE p.user_id = ?
      ORDER BY p.created_at DESC

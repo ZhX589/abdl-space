@@ -45,6 +45,20 @@ async function safeGetCommentImagesBatch(db: D1Database, commentIds: number[]): 
   }
 }
 
+// 批量安全查询帖子回复的图片（APP 端回复并入网页评论列表时用）
+async function safeGetPostImagesBatch(db: D1Database, postIds: number[]): Promise<{ post_id: number; image_url: string; is_nsfw: number; preview_url: string | null }[]> {
+  if (postIds.length === 0) return []
+  try {
+    return await query<{ post_id: number; image_url: string; is_nsfw: number; preview_url: string | null }>(
+      db,
+      `SELECT post_id, image_url, is_nsfw, preview_url FROM post_images WHERE post_id IN (${postIds.map(() => '?').join(',')}) ORDER BY sort_order`,
+      postIds
+    )
+  } catch {
+    return []
+  }
+}
+
 async function safeGetImages(db: D1Database, postId: number): Promise<{image_url: string; is_nsfw: number; preview_url: string | null}[]> {
   try {
     const result = await db.prepare('SELECT image_url, is_nsfw, alt_text, preview_url FROM post_images WHERE post_id = ? ORDER BY sort_order').bind(postId).all();
@@ -138,7 +152,7 @@ posts.get('/', async (c) => {
     c.env.abdl_space_db,
     `SELECT p.id, p.user_id, p.content, p.diaper_id, p.pinned, p.is_announcement, p.repost_id, p.created_at,
             u.username, u.avatar, u.role, u.is_beta_user,
-            (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
+            (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) + (SELECT COUNT(*) FROM posts WHERE in_reply_to_id = p.id) as comment_count,
             (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count
      FROM posts p
      JOIN users u ON p.user_id = u.id
@@ -294,7 +308,7 @@ posts.get('/:id', async (c) => {
   const post = await queryOne<Record<string, unknown>>(
     c.env.abdl_space_db,
     `SELECT p.*, u.username, u.avatar, u.role, u.is_beta_user,
-            (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
+            (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) + (SELECT COUNT(*) FROM posts WHERE in_reply_to_id = p.id) as comment_count,
             (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count
      FROM posts p JOIN users u ON p.user_id = u.id
      WHERE p.id = ?`,
@@ -362,6 +376,56 @@ posts.get('/:id', async (c) => {
     created_at: cmt.created_at
   }))
 
+  // 网页端与 APP 端回复同步：APP 回复存于 posts 表（in_reply_to_id），必须与网页评论一并展示。
+  // 递归收集整棵回复子树（含回复到网页评论的回复），与 /api/v1/statuses/:id/context 的子树一致
+  const replyRows = await query<Record<string, unknown>>(
+    c.env.abdl_space_db,
+    `WITH RECURSIVE node_ids(id) AS (
+       SELECT id FROM posts WHERE id = ?
+       UNION
+       SELECT id FROM post_comments WHERE post_id = ?
+       UNION
+       SELECT p.id FROM posts p JOIN node_ids n ON p.in_reply_to_id = n.id
+     )
+     SELECT p.*, u.username, u.avatar, u.role, u.is_beta_user,
+            (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
+            (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id AND user_id = ?) as user_liked
+     FROM posts p JOIN users u ON p.user_id = u.id
+     WHERE p.id IN (SELECT id FROM node_ids)
+       AND p.id != ? AND p.in_reply_to_id IS NOT NULL
+     ORDER BY p.created_at ASC`,
+    [postId, postId, userId ?? -1, postId]
+  )
+
+  const replyIds = replyRows.map(r => r.id as number)
+  const allPostImages = await safeGetPostImagesBatch(c.env.abdl_space_db, replyIds)
+  const replyImagesMap = new Map<number, { image_url: string; is_nsfw: number; preview_url: string | null }[]>()
+  for (const img of allPostImages) {
+    if (!replyImagesMap.has(img.post_id)) replyImagesMap.set(img.post_id, [])
+    replyImagesMap.get(img.post_id)!.push(img)
+  }
+
+  const replyComments = replyRows.map(r => {
+    const replyId = r.id as number
+    const parentId = r.in_reply_to_id as number
+    const parentType = r.in_reply_to_type as string | null
+    return {
+      // p_ 前缀区分于网页评论的数字 id（与 Mastodon 兼容层的 id 方案一致）
+      id: `p_${replyId}`,
+      post_id: postId,
+      user: { id: r.user_id, username: r.username, avatar: r.avatar ?? DEFAULT_AVATAR, role: r.role, is_beta_user: !!r.is_beta_user },
+      parent_id: parentType === 'comment' ? `c_${parentId}` : (parentId === postId ? null : `p_${parentId}`),
+      content: r.content,
+      images: (replyImagesMap.get(replyId) || []).map(shapeImage),
+      like_count: (r.like_count as number) ?? 0,
+      has_liked: !!r.user_liked,
+      created_at: r.created_at
+    }
+  })
+
+  const allComments = [...commentsWithLikes, ...replyComments]
+    .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)))
+
   // 获取帖子图片
   const postImages = await safeGetImages(c.env.abdl_space_db, postId)
 
@@ -406,7 +470,7 @@ posts.get('/:id', async (c) => {
       images: postImages.map(shapeImage),
       created_at: post.created_at
     },
-    comments: commentsWithLikes
+    comments: allComments
   })
 })
 

@@ -2745,9 +2745,13 @@ mastodon.get('/statuses/:id/context', async (c) => {
     }, account)
   })
 
-  // Also get posts that reply to this post (recursively, all levels)
+  // Also get posts that reply to this post (recursively, all levels).
+  // 递归起点同时包含本帖的网页评论 id：APP 端回复到网页评论（in_reply_to_type='comment'）也属于本帖线程
+  const rootCommentIds = await query<{ id: number }>(
+    c.env.abdl_space_db, 'SELECT id FROM post_comments WHERE post_id = ?', [postId]
+  )
   const allReplyPosts: Record<string, unknown>[] = []
-  let currentReplyIds = [postId]
+  let currentReplyIds = [postId, ...rootCommentIds.map(r => r.id)]
   while (currentReplyIds.length > 0) {
     const children = await query<Record<string, unknown>>(
       c.env.abdl_space_db,

@@ -95,7 +95,7 @@ contentV1.get('/posts', async (c) => {
     c.env.abdl_space_db,
     `SELECT p.id, p.user_id, p.content, p.diaper_id, p.pinned, p.created_at,
             u.username, u.avatar, u.role,
-            (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
+            (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) + (SELECT COUNT(*) FROM posts WHERE in_reply_to_id = p.id) as comment_count,
             (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count
      FROM posts p
      JOIN users u ON p.user_id = u.id
@@ -140,7 +140,7 @@ contentV1.get('/posts/:id', async (c) => {
   const post = await queryOne<Record<string, unknown>>(
     c.env.abdl_space_db,
     `SELECT p.*, u.username, u.avatar, u.role,
-            (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count,
+            (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) + (SELECT COUNT(*) FROM posts WHERE in_reply_to_id = p.id) as comment_count,
             (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count
      FROM posts p JOIN users u ON p.user_id = u.id
      WHERE p.id = ?`,
@@ -159,6 +159,47 @@ contentV1.get('/posts/:id', async (c) => {
     [postId]
   )
 
+  // 与网页端 /api/posts/:id 一致：把 APP 端回复（posts 表）并入评论列表，保证两端同步
+  const replyRows = await query<Record<string, unknown>>(
+    c.env.abdl_space_db,
+    `WITH RECURSIVE node_ids(id) AS (
+       SELECT id FROM posts WHERE id = ?
+       UNION
+       SELECT id FROM post_comments WHERE post_id = ?
+       UNION
+       SELECT p.id FROM posts p JOIN node_ids n ON p.in_reply_to_id = n.id
+     )
+     SELECT p.id, p.user_id, p.in_reply_to_id, p.in_reply_to_type, p.content, p.created_at,
+            u.username, u.avatar, u.role,
+            (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count
+     FROM posts p JOIN users u ON p.user_id = u.id
+     WHERE p.id IN (SELECT id FROM node_ids)
+       AND p.id != ? AND p.in_reply_to_id IS NOT NULL
+     ORDER BY p.created_at ASC`,
+    [postId, postId, postId]
+  )
+
+  const allComments = [
+    ...comments.map(cmt => ({
+      id: cmt.id,
+      post_id: cmt.post_id,
+      user: { id: cmt.user_id, username: cmt.username, avatar: cmt.avatar ?? DEFAULT_AVATAR, role: cmt.role },
+      parent_id: cmt.parent_id ?? null,
+      content: cmt.content,
+      like_count: cmt.like_count,
+      created_at: cmt.created_at,
+    })),
+    ...replyRows.map(r => ({
+      id: `p_${r.id}`,
+      post_id: postId,
+      user: { id: r.user_id, username: r.username, avatar: r.avatar ?? DEFAULT_AVATAR, role: r.role },
+      parent_id: (r.in_reply_to_type as string) === 'comment' ? `c_${r.in_reply_to_id}` : ((r.in_reply_to_id as number) === postId ? null : `p_${r.in_reply_to_id}`),
+      content: r.content,
+      like_count: r.like_count,
+      created_at: r.created_at,
+    })),
+  ].sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)))
+
   return c.json({
     post: {
       id: post.id,
@@ -170,15 +211,7 @@ contentV1.get('/posts/:id', async (c) => {
       comment_count: post.comment_count,
       created_at: post.created_at,
     },
-    comments: comments.map(cmt => ({
-      id: cmt.id,
-      post_id: cmt.post_id,
-      user: { id: cmt.user_id, username: cmt.username, avatar: cmt.avatar ?? DEFAULT_AVATAR, role: cmt.role },
-      parent_id: cmt.parent_id ?? null,
-      content: cmt.content,
-      like_count: cmt.like_count,
-      created_at: cmt.created_at,
-    })),
+    comments: allComments,
   })
 })
 

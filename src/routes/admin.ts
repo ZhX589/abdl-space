@@ -244,7 +244,7 @@ admin.get('/posts', adminMiddleware, async (c) => {
     `SELECT p.id, p.content, p.pinned, p.created_at, p.has_nsfw,
             u.username, u.avatar, u.role,
             (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
-            (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) as comment_count
+            (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) + (SELECT COUNT(*) FROM posts WHERE in_reply_to_id = p.id) as comment_count
      FROM posts p JOIN users u ON p.user_id = u.id
      ORDER BY p.created_at DESC LIMIT 100`
   )
