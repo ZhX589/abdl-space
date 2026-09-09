@@ -1069,13 +1069,14 @@ admin.get('/stats/overview', adminMiddleware, async (c) => {
   const topBadges = (snapshot.topBadges ?? []) as { key: string; name: string; c: number }[]
 
   // 今日实时（每个表只扫今日窗口，走 created_at 索引）；昨日 / 周 / 前周读日快照
+  const [todayPairs, yesterdayRow, weekSum, prevSum] = await Promise.all([
+    Promise.all(DAILY_TABLES.map(async ([key, table]) => [key, await bucketCount(db, table, 0, 1)] as const)),
+    dailyStatsRow(db, bjDate(1)),
+    dailyStatsSum(db, bjDate(6), bjDate(1)),
+    dailyStatsSum(db, bjDate(13), bjDate(7)),
+  ])
   const today: Record<string, number> = {}
-  for (const [key, table] of DAILY_TABLES) {
-    today[key] = await bucketCount(db, table, 0, 1)
-  }
-  const yesterdayRow = await dailyStatsRow(db, bjDate(1))
-  const weekSum = await dailyStatsSum(db, bjDate(6), bjDate(1))
-  const prevSum = await dailyStatsSum(db, bjDate(13), bjDate(7))
+  for (const [key, v] of todayPairs) today[key] = v
   const yesterday: Record<string, number> = {}
   const week: Record<string, number> = {}
   const prevWeek: Record<string, number> = {}
@@ -1148,14 +1149,16 @@ admin.get('/stats/trends', adminMiddleware, async (c) => {
       const todayStr = bjDate()
       const todayIdx = series.users.findIndex(s => s.d === todayStr)
       if (todayIdx >= 0) {
-        for (const [key, table] of DAILY_TABLES) {
-          series[key][todayIdx].c = await bucketCount(db, table, 0, 1)
-        }
-        series.novels[todayIdx].c = (await queryOne<{ c: number }>(
-          db,
-          `SELECT COUNT(*) AS c FROM novels WHERE deleted_at IS NULL
-           AND created_at >= CAST(strftime('%s', 'now', '${CN_TZ}', 'start of day') AS INTEGER)`
-        ).catch(() => null))?.c ?? series.novels[todayIdx].c
+        const [todayPairs, novelToday] = await Promise.all([
+          Promise.all(DAILY_TABLES.map(async ([key, table]) => [key, await bucketCount(db, table, 0, 1)] as const)),
+          queryOne<{ c: number }>(
+            db,
+            `SELECT COUNT(*) AS c FROM novels WHERE deleted_at IS NULL
+             AND created_at >= CAST(strftime('%s', 'now', '${CN_TZ}', 'start of day') AS INTEGER)`
+          ).catch(() => null),
+        ])
+        for (const [key, v] of todayPairs) series[key][todayIdx].c = v
+        if (novelToday) series.novels[todayIdx].c = (novelToday.c ?? 0) || series.novels[todayIdx].c
       }
       return c.json({ days, series })
     }
