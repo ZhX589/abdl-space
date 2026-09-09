@@ -1,5 +1,6 @@
 import { Hono } from 'hono'
 const DEFAULT_AVATAR = 'https://img.abdl-space.top/file/system/1781439303787_play_store_512.png'
+import type { D1Database } from '@cloudflare/workers-types'
 import type { Env, JWTPayload } from '../types/index.ts'
 import { query, queryOne, run } from '../lib/db.ts'
 import { adminMiddleware } from '../middleware/auth.ts'
@@ -29,6 +30,50 @@ type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
 const admin = new Hono<AppType>()
 
+// ============================================================
+// 运维统计辅助 —— “按天”统一按北京时间 UTC+8 日历分桶
+// ============================================================
+const CN_TZ = '+8 hours'
+
+async function tableHasColumn(db: D1Database, table: string, column: string): Promise<boolean> {
+  const row = await queryOne<{ name: string }>(
+    db, `SELECT name FROM pragma_table_info(${table}) WHERE name = ?`, [column]
+  )
+  return !!row
+}
+
+/** 文本时间戳（DATETIME 文本，如 CURRENT_TIMESTAMP）按北京时间聚合为日序列 */
+async function dailySeries(db: D1Database, table: string, extra: string, params: unknown[] = []): Promise<{ d: string; c: number }[]> {
+  return query<{ d: string; c: number }>(
+    db,
+    `SELECT substr(datetime(created_at, '${CN_TZ}'), 1, 10) AS d, COUNT(*) AS c
+     FROM ${table} ${extra} GROUP BY d ORDER BY d`,
+    params
+  )
+}
+
+/** Unix 秒时间戳表按北京时间聚合为日序列（novels 等） */
+async function dailySeriesUnix(db: D1Database, table: string, extra: string, params: unknown[] = []): Promise<{ d: string; c: number }[]> {
+  return query<{ d: string; c: number }>(
+    db,
+    `SELECT substr(datetime(created_at, 'unixepoch', '${CN_TZ}'), 1, 10) AS d, COUNT(*) AS c
+     FROM ${table} ${extra} GROUP BY d ORDER BY d`,
+    params
+  )
+}
+
+/** 文本时间戳表：北京时区日窗口 [startDays 天前 0 点, start 后 endDays 天 0 点) 内的行数 */
+async function bucketCount(db: D1Database, table: string, startDays: number, endDays: number | null): Promise<number> {
+  const dayMod = (n: number, sign: '+' | '-') => (n === 0 ? '' : `, '${sign}${n} days'`)
+  const conditions = [`created_at >= datetime('now', '${CN_TZ}', 'start of day'${dayMod(startDays, '-')})`]
+  if (endDays !== null) {
+    conditions.push(`created_at < datetime('now', '${CN_TZ}', 'start of day'${dayMod(startDays, '-')}${dayMod(endDays, '+')})`)
+  }
+  const row = await queryOne<{ c: number }>(
+    db, `SELECT COUNT(*) AS c FROM ${table} WHERE ${conditions.join(' AND ')}`)
+  return row?.c ?? 0
+}
+
 /**
  * GET /api/admin/stats — 站点统计
  */
@@ -53,24 +98,118 @@ admin.get('/stats', adminMiddleware, async (c) => {
 })
 
 /**
- * GET /api/admin/users — 用户列表
+ * GET /api/admin/users — 用户列表（分页 + 搜索 + 角色筛选）
  */
 admin.get('/users', adminMiddleware, async (c) => {
-  const rows = await query<Record<string, unknown>>(
-    c.env.abdl_space_db,
-    'SELECT id, email, username, role, avatar, email_verified, created_at FROM users ORDER BY id'
-  )
+  const db = c.env.abdl_space_db
+  const page = Math.max(1, parseInt(c.req.query('page') || '1'))
+  const limit = Math.min(100, Math.max(1, parseInt(c.req.query('limit') || '20')))
+  const offset = (page - 1) * limit
+  const q = (c.req.query('q') || '').trim()
+  const role = (c.req.query('role') || '').trim()
 
+  const colRows = await query<{ name: string }>(db, "SELECT name FROM pragma_table_info('users')")
+  const colSet = new Set(colRows.map(r => r.name))
+  const bannedSel = colSet.has('banned') ? 'u.banned,' : ''
+  const hasAppSel = colSet.has('has_app') ? 'u.has_app,' : ''
+
+  const where: string[] = ['1=1']
+  const params: unknown[] = []
+  if (q) { where.push('(u.username LIKE ? OR u.email LIKE ?)'); params.push(`%${q}%`, `%${q}%`) }
+  if (role === 'admin' || role === 'user') { where.push('u.role = ?'); params.push(role) }
+  const whereSql = where.join(' AND ')
+
+  const [totalRow, rows] = await Promise.all([
+    queryOne<{ c: number }>(db, `SELECT COUNT(*) AS c FROM users u WHERE ${whereSql}`, params),
+    query<Record<string, unknown>>(
+      db,
+      `SELECT u.id, u.email, u.username, u.display_name, u.role, u.avatar, u.email_verified, u.created_at,
+              ${bannedSel} ${hasAppSel}
+              (SELECT COUNT(*) FROM posts p WHERE p.user_id = u.id) AS post_count,
+              (SELECT COUNT(*) FROM post_comments pc WHERE pc.user_id = u.id) AS comment_count,
+              (SELECT COUNT(*) FROM daily_checkins dc WHERE dc.user_id = u.id) AS checkin_count
+       FROM users u WHERE ${whereSql} ORDER BY u.id DESC LIMIT ? OFFSET ?`,
+      [...params, limit, offset]
+    ),
+  ])
+
+  const total = totalRow?.c ?? 0
   return c.json({
     users: rows.map(r => ({
-      id: r.id,
-      email: r.email,
-      username: r.username,
-      role: r.role,
-      avatar: r.avatar ?? DEFAULT_AVATAR,
-      email_verified: r.email_verified,
-      created_at: r.created_at
-    }))
+      id: r.id, email: r.email, username: r.username, display_name: r.display_name || '',
+      role: r.role, avatar: r.avatar ?? DEFAULT_AVATAR, email_verified: r.email_verified,
+      created_at: r.created_at, banned: !!r.banned, has_app: !!r.has_app,
+      post_count: r.post_count ?? 0, comment_count: r.comment_count ?? 0, checkin_count: r.checkin_count ?? 0,
+    })),
+    pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+  })
+})
+
+/**
+ * GET /api/admin/users/:id/detail — 用户详情（含画像与行为统计）
+ */
+admin.get('/users/:id/detail', adminMiddleware, async (c) => {
+  const id = parseInt(c.req.param('id') || '')
+  if (!Number.isInteger(id) || id <= 0) return c.json({ error: 'Invalid user id' }, 400)
+  const db = c.env.abdl_space_db
+
+  const colSet = new Set((await query<{ name: string }>(db, "SELECT name FROM pragma_table_info('users')")).map(r => r.name))
+  const safeCol = (n: string) => (colSet.has(n) ? `, ${n}` : '')
+
+  const user = await queryOne<Record<string, unknown>>(
+    db,
+    `SELECT id, email, username, display_name, role, avatar, email_verified, created_at
+     ${safeCol('banned')} ${safeCol('has_app')} ${safeCol('region')} ${safeCol('age')}
+     ${safeCol('weight')} ${safeCol('waist')} ${safeCol('hip')} ${safeCol('style_preference')}
+     ${safeCol('bio')} ${safeCol('header')}
+     FROM users WHERE id = ?`,
+    [id]
+  )
+  if (!user) return c.json({ error: 'User not found' }, 404)
+
+  const [posts, comments, postLikes, ratings, feelings, checkins, points, badgeRows, recentPosts] = await Promise.all([
+    queryOne<{ c: number }>(db, 'SELECT COUNT(*) AS c FROM posts WHERE user_id = ?', [id]),
+    queryOne<{ c: number }>(db, 'SELECT COUNT(*) AS c FROM post_comments WHERE user_id = ?', [id]),
+    queryOne<{ c: number }>(db, 'SELECT COUNT(*) AS c FROM likes WHERE user_id = ?', [id]),
+    queryOne<{ c: number }>(db, 'SELECT COUNT(*) AS c FROM ratings WHERE user_id = ?', [id]),
+    queryOne<{ c: number }>(db, 'SELECT COUNT(*) AS c FROM feelings WHERE user_id = ?', [id]),
+    queryOne<{ c: number }>(db, 'SELECT COUNT(*) AS c FROM daily_checkins WHERE user_id = ?', [id]),
+    queryOne<{ c: number; balance: number }>(db, 'SELECT balance FROM points WHERE user_id = ?', [id]).catch(() => null),
+    query<{ key: string; name: string; color: string; created_at: string | null }>(
+      db,
+      `SELECT ub.badge_key AS key, b.name, b.color, ub.created_at
+       FROM user_badges ub LEFT JOIN badges b ON b.key = ub.badge_key
+       WHERE ub.user_id = ? ORDER BY ub.created_at DESC LIMIT 50`,
+      [id]
+    ).catch(() => []),
+    query<{ id: number; content: string; created_at: string }>(
+      db, 'SELECT id, content, created_at FROM posts WHERE user_id = ? ORDER BY id DESC LIMIT 5', [id]
+    ),
+  ])
+  const [trackRule, trackEvents] = await Promise.all([
+    queryOne<{ enabled: number; created_at: number }>(
+      db, 'SELECT enabled, created_at FROM ip_tracking_rules WHERE user_id = ?', [id]
+    ).catch(() => null),
+    query<{ ip: string; path: string; created_at: number }>(
+      db, 'SELECT ip, path, created_at FROM ip_tracking_events WHERE user_id = ? ORDER BY created_at DESC LIMIT 20', [id]
+    ).catch(() => [] as { ip: string; path: string; created_at: number }[]),
+  ])
+
+  return c.json({
+    user: {
+      ...user,
+      banned: !!user.banned, has_app: !!user.has_app,
+      avatar: user.avatar ?? DEFAULT_AVATAR,
+    },
+    counts: {
+      posts: posts?.c ?? 0, comments: comments?.c ?? 0, likes: postLikes?.c ?? 0,
+      ratings: ratings?.c ?? 0, feelings: feelings?.c ?? 0, checkins: checkins?.c ?? 0,
+      points: points?.balance ?? 0,
+    },
+    badges: badgeRows,
+    tracking: { enabled: !!trackRule?.enabled, created_at: trackRule?.created_at || null },
+    trackEvents,
+    recentPosts,
   })
 })
 
@@ -236,24 +375,43 @@ admin.get('/security/users/:id/tracking', adminMiddleware, async (c) => {
 })
 
 /**
- * GET /api/admin/posts — 管理员帖子列表
+ * GET /api/admin/posts — 管理员帖子列表（分页 + 关键词搜索）
  */
 admin.get('/posts', adminMiddleware, async (c) => {
-  const rows = await query<Record<string, unknown>>(
-    c.env.abdl_space_db,
-    `SELECT p.id, p.content, p.pinned, p.created_at, p.has_nsfw,
-            u.username, u.avatar, u.role,
-            (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
-            (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) + (SELECT COUNT(*) FROM posts WHERE in_reply_to_id = p.id) as comment_count
-     FROM posts p JOIN users u ON p.user_id = u.id
-     ORDER BY p.created_at DESC LIMIT 100`
-  )
+  const db = c.env.abdl_space_db
+  const page = Math.max(1, parseInt(c.req.query('page') || '1'))
+  const limit = Math.min(100, Math.max(1, parseInt(c.req.query('limit') || '20')))
+  const offset = (page - 1) * limit
+  const q = (c.req.query('q') || '').trim()
+
+  const where: string[] = ['1=1']
+  const params: unknown[] = []
+  if (q) { where.push('(p.content LIKE ? OR u.username LIKE ?)'); params.push(`%${q}%`, `%${q}%`) }
+  const whereSql = where.join(' AND ')
+
+  const [totalRow, rows] = await Promise.all([
+    queryOne<{ c: number }>(db, `SELECT COUNT(*) AS c FROM posts p JOIN users u ON p.user_id = u.id WHERE ${whereSql}`, params),
+    query<Record<string, unknown>>(
+      db,
+      `SELECT p.id, p.content, p.pinned, p.created_at, p.has_nsfw, p.is_announcement,
+              u.username, u.avatar, u.role,
+              (SELECT COUNT(*) FROM likes WHERE target_type = 'post' AND target_id = p.id) as like_count,
+              (SELECT COUNT(*) FROM post_comments WHERE post_id = p.id) + (SELECT COUNT(*) FROM posts WHERE in_reply_to_id = p.id) as comment_count
+       FROM posts p JOIN users u ON p.user_id = u.id
+       WHERE ${whereSql}
+       ORDER BY p.created_at DESC LIMIT ? OFFSET ?`,
+      [...params, limit, offset]
+    ),
+  ])
+
+  const total = totalRow?.c ?? 0
   return c.json({
     posts: rows.map(r => ({
-      id: r.id, content: r.content, pinned: !!r.pinned, has_nsfw: !!r.has_nsfw,
+      id: r.id, content: r.content, pinned: !!r.pinned, has_nsfw: !!r.has_nsfw, is_announcement: !!r.is_announcement,
       user: { username: r.username, avatar: r.avatar ?? DEFAULT_AVATAR, role: r.role },
       like_count: r.like_count, comment_count: r.comment_count, created_at: r.created_at
-    }))
+    })),
+    pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
   })
 })
 
@@ -660,6 +818,267 @@ admin.put('/beta-mode', adminMiddleware, async (c) => {
     console.error('PUT /api/admin/beta-mode error:', e)
     return c.json({ error: '更新失败' }, 500)
   }
+})
+
+// ============================================================
+// GET /api/admin/stats/overview — 经营总览（总量 / 今日 / 环比 / 待办）
+// ============================================================
+admin.get('/stats/overview', adminMiddleware, async (c) => {
+  const db = c.env.abdl_space_db
+
+  const totals = await Promise.allSettled([
+    queryOne<{ c: number }>(db, 'SELECT COUNT(*) AS c FROM users'),
+    queryOne<{ c: number }>(db, 'SELECT COUNT(*) AS c FROM posts'),
+    queryOne<{ c: number }>(db, 'SELECT COUNT(*) AS c FROM post_comments'),
+    queryOne<{ c: number }>(db, 'SELECT COUNT(*) AS c FROM ratings'),
+    queryOne<{ c: number }>(db, 'SELECT COUNT(*) AS c FROM diapers'),
+    queryOne<{ c: number }>(db, 'SELECT COUNT(*) AS c FROM likes'),
+    queryOne<{ c: number }>(db, 'SELECT COUNT(*) AS c FROM daily_checkins'),
+    queryOne<{ c: number }>(db, 'SELECT COUNT(*) AS c FROM user_badges'),
+    queryOne<{ c: number }>(db, 'SELECT COUNT(*) AS c FROM novels WHERE deleted_at IS NULL'),
+  ])
+  const numOf = (s: PromiseSettledResult<{ c: number } | null>): number =>
+    s.status === 'fulfilled' && s.value ? s.value.c : 0
+  const hasApp = await tableHasColumn(db, 'users', 'has_app')
+  const hasBanned = await tableHasColumn(db, 'users', 'banned')
+  const appUsers = hasApp
+    ? (await queryOne<{ c: number }>(db, 'SELECT COUNT(*) AS c FROM users WHERE has_app = 1').catch(() => null))?.c ?? 0
+    : 0
+  const bannedUsers = hasBanned
+    ? (await queryOne<{ c: number }>(db, 'SELECT COUNT(*) AS c FROM users WHERE banned = 1').catch(() => null))?.c ?? 0
+    : 0
+
+  // 今日 / 昨日 / 近7天 / 前7天（用户、帖子、评论、评分、签到、点赞）
+  const textTables = ['users', 'posts', 'post_comments', 'ratings', 'daily_checkins', 'likes'] as const
+  const today: Record<string, number> = {}
+  const yesterday: Record<string, number> = {}
+  const week: Record<string, number> = {}
+  const prevWeek: Record<string, number> = {}
+  for (const t of textTables) {
+    today[t] = await bucketCount(db, t, 0, 1)
+    yesterday[t] = await bucketCount(db, t, 1, 1)
+    week[t] = await bucketCount(db, t, 7, null)
+    prevWeek[t] = await bucketCount(db, t, 14, 7)
+  }
+
+  // 小说状态分布
+  const novelStatus = await query<{ status: string; c: number }>(
+    db, 'SELECT status, COUNT(*) AS c FROM novels WHERE deleted_at IS NULL GROUP BY status'
+  ).catch(() => [])
+  const novels: Record<string, number> = { draft: 0, review_pending: 0, published: 0, rejected: 0, archived: 0 }
+  for (const s of novelStatus) novels[s.status] = s.c
+
+  // 待办工单
+  const [pendingReports, pendingFriend, pendingNovelReports, pendingAppeals, janitors] = await Promise.all([
+    queryOne<{ c: number }>(db, "SELECT COUNT(*) AS c FROM reports WHERE status = 'pending'").catch(() => null),
+    queryOne<{ c: number }>(db, "SELECT COUNT(*) AS c FROM friend_request_reports WHERE status = 'pending'").catch(() => null),
+    queryOne<{ c: number }>(db, "SELECT COUNT(*) AS c FROM novel_reports WHERE status IN ('pending','reviewing')").catch(() => null),
+    queryOne<{ c: number }>(db, "SELECT COUNT(*) AS c FROM novel_review_appeals WHERE status IN ('pending','reviewing')").catch(() => null),
+    queryOne<{ c: number }>(db, "SELECT COUNT(*) AS c FROM security_logs WHERE created_at > ?", [Math.floor(Date.now()/1000) - 86400]).catch(() => null),
+  ])
+
+  // 帖子地域分布（近30天）
+  const provinces = await query<{ name: string; c: number }>(
+    db,
+    `SELECT geo_province AS name, COUNT(*) AS c FROM posts
+     WHERE geo_province IS NOT NULL AND geo_province <> ''
+       AND created_at >= datetime('now', '${CN_TZ}', '-30 days')
+     GROUP BY geo_province ORDER BY c DESC LIMIT 10`
+  ).catch(() => [])
+
+  // 徽章持有排行
+  const topBadges = await query<{ key: string; name: string; c: number }>(
+    db,
+    `SELECT b.key, b.name, COUNT(ub.user_id) AS c FROM badges b
+     LEFT JOIN user_badges ub ON ub.badge_key = b.key
+     GROUP BY b.key ORDER BY c DESC LIMIT 6`
+  ).catch(() => [])
+
+  // 最新注册 / 最新帖子
+  const [recentUsers, recentPosts] = await Promise.all([
+    query<Record<string, unknown>>(db, 'SELECT id, username, avatar, created_at FROM users ORDER BY id DESC LIMIT 8'),
+    query<Record<string, unknown>>(
+      db,
+      `SELECT p.id, p.content, p.created_at, u.username
+       FROM posts p JOIN users u ON u.id = p.user_id
+       WHERE p.content <> '' ORDER BY p.id DESC LIMIT 8`
+    ),
+  ])
+
+  return c.json({
+    totals: {
+      users: numOf(totals[0]), posts: numOf(totals[1]), comments: numOf(totals[2]),
+      ratings: numOf(totals[3]), diapers: numOf(totals[4]), likes: numOf(totals[5]),
+      checkins: numOf(totals[6]), badges: numOf(totals[7]), novels: numOf(totals[8]),
+      appUsers, bannedUsers,
+    },
+    today, yesterday, week, prevWeek,
+    novels,
+    pending: {
+      reports: pendingReports?.c ?? 0, friend_reports: pendingFriend?.c ?? 0,
+      novel_reports: pendingNovelReports?.c ?? 0, novel_appeals: pendingAppeals?.c ?? 0,
+      security_24h: janitors?.c ?? 0,
+    },
+    provinces,
+    topBadges,
+    recentUsers: recentUsers.map(r => ({ id: r.id, username: r.username, avatar: r.avatar ?? DEFAULT_AVATAR, created_at: r.created_at })),
+    recentPosts: recentPosts.map(r => ({ id: r.id, content: r.content, username: r.username, created_at: r.created_at })),
+  })
+})
+
+// ============================================================
+// GET /api/admin/stats/trends?days=30 — 每日趋势序列（7~90 天）
+// ============================================================
+admin.get('/stats/trends', adminMiddleware, async (c) => {
+  const db = c.env.abdl_space_db
+  const days = Math.min(90, Math.max(7, parseInt(c.req.query('days') || '30')))
+  const shift = `-${days} days`
+  const sinceText = `datetime('now', '${CN_TZ}', ?)`
+  const sinceUnix = `CAST(strftime('%s', 'now', '${CN_TZ}', ?) AS INTEGER)`
+
+  const [users, posts, comments, ratings, checkins, likes, novels] = await Promise.all([
+    dailySeries(db, 'users', `WHERE created_at >= ${sinceText}`, [shift]),
+    dailySeries(db, 'posts', `WHERE created_at >= ${sinceText}`, [shift]),
+    dailySeries(db, 'post_comments', `WHERE created_at >= ${sinceText}`, [shift]),
+    dailySeries(db, 'ratings', `WHERE created_at >= ${sinceText}`, [shift]),
+    dailySeries(db, 'daily_checkins', `WHERE created_at >= ${sinceText}`, [shift]),
+    dailySeries(db, 'likes', `WHERE created_at >= ${sinceText}`, [shift]),
+    dailySeriesUnix(db, 'novels', `WHERE deleted_at IS NULL AND created_at >= ${sinceUnix}`, [shift]),
+  ])
+
+  return c.json({ days, series: { users: users, posts, comments, ratings, checkins, likes, novels } })
+})
+
+// ============================================================
+// GET /api/admin/comments — 评论管理（分页 + 搜索）
+// ============================================================
+admin.get('/comments', adminMiddleware, async (c) => {
+  const db = c.env.abdl_space_db
+  const page = Math.max(1, parseInt(c.req.query('page') || '1'))
+  const limit = Math.min(100, Math.max(1, parseInt(c.req.query('limit') || '20')))
+  const offset = (page - 1) * limit
+  const q = (c.req.query('q') || '').trim()
+  const postId = parseInt(c.req.query('post_id') || '0')
+
+  const where: string[] = ['1=1']
+  const params: unknown[] = []
+  if (q) { where.push('c.content LIKE ?'); params.push(`%${q}%`) }
+  if (Number.isInteger(postId) && postId > 0) { where.push('c.post_id = ?'); params.push(postId) }
+  const whereSql = where.join(' AND ')
+
+  const [totalRow, rows] = await Promise.all([
+    queryOne<{ c: number }>(db, `SELECT COUNT(*) AS c FROM post_comments c WHERE ${whereSql}`, params),
+    query<Record<string, unknown>>(
+      db,
+      `SELECT c.id, c.post_id, c.parent_id, c.content, c.created_at,
+              u.id AS user_id, u.username, u.avatar,
+              (SELECT COUNT(*) FROM likes WHERE target_type = 'comment' AND target_id = c.id) AS like_count
+       FROM post_comments c JOIN users u ON u.id = c.user_id
+       WHERE ${whereSql} ORDER BY c.id DESC LIMIT ? OFFSET ?`,
+      [...params, limit, offset]
+    ),
+  ])
+
+  const total = totalRow?.c ?? 0
+  return c.json({
+    comments: rows.map(r => ({
+      id: r.id, post_id: r.post_id, parent_id: r.parent_id, content: r.content, created_at: r.created_at,
+      user: { id: r.user_id, username: r.username, avatar: r.avatar ?? DEFAULT_AVATAR },
+      like_count: r.like_count ?? 0,
+    })),
+    pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+  })
+})
+
+// ============================================================
+// 小说管理（作品列表 / 状态机管理）
+// ============================================================
+const NOVEL_ADMIN_STATUSES = ['published', 'archived'] as const
+
+admin.get('/novels', adminMiddleware, async (c) => {
+  const db = c.env.abdl_space_db
+  const page = Math.max(1, parseInt(c.req.query('page') || '1'))
+  const limit = Math.min(100, Math.max(1, parseInt(c.req.query('limit') || '20')))
+  const offset = (page - 1) * limit
+  const q = (c.req.query('q') || '').trim()
+  const status = (c.req.query('status') || '').trim()
+
+  const where: string[] = ['n.deleted_at IS NULL']
+  const params: unknown[] = []
+  if (q) { where.push('n.title LIKE ?'); params.push(`%${q}%`) }
+  if (status && status !== 'all') { where.push('n.status = ?'); params.push(status) }
+  const whereSql = where.join(' AND ')
+
+  const [totalRow, rows, statusCounts] = await Promise.all([
+    queryOne<{ c: number }>(db, `SELECT COUNT(*) AS c FROM novels n WHERE ${whereSql}`, params),
+    query<Record<string, unknown>>(
+      db,
+      `SELECT n.id, n.title, n.description, n.category, n.status, n.created_at, n.updated_at,
+              u.id AS author_id, u.username AS author_username,
+              (SELECT COUNT(*) FROM novel_volumes v WHERE v.novel_id = n.id AND v.deleted_at IS NULL) AS volumes,
+              (SELECT COUNT(*) FROM novel_chapters ch WHERE ch.novel_id = n.id AND ch.deleted_at IS NULL) AS chapters
+       FROM novels n JOIN users u ON u.id = n.author_id
+       WHERE ${whereSql} ORDER BY n.updated_at DESC LIMIT ? OFFSET ?`,
+      [...params, limit, offset]
+    ),
+    query<{ status: string; c: number }>(
+      db, 'SELECT status, COUNT(*) AS c FROM novels WHERE deleted_at IS NULL GROUP BY status'
+    ).catch(() => []),
+  ])
+
+  const total = totalRow?.c ?? 0
+  const statusMap: Record<string, number> = {}
+  for (const s of statusCounts) statusMap[s.status] = s.c
+  return c.json({
+    novels: rows.map(r => ({
+      id: r.id, title: r.title, description: r.description || '', category: r.category || '',
+      status: r.status, author: { id: r.author_id, username: r.author_username },
+      volumes: r.volumes ?? 0, chapters: r.chapters ?? 0,
+      created_at: r.created_at, updated_at: r.updated_at,
+    })),
+    statusCounts: statusMap,
+    pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+  })
+})
+
+admin.post('/novels/:id/status', adminMiddleware, async (c) => {
+  const id = c.req.param('id')
+  const body = await c.req.json<{ status?: string }>()
+  const status = body?.status
+  if (!status || !(NOVEL_ADMIN_STATUSES as readonly string[]).includes(status)) {
+    return c.json({ error: '仅支持 published / archived' }, 400)
+  }
+  const db = c.env.abdl_space_db
+  const novel = await queryOne<{ id: string; status: string }>(
+    db, 'SELECT id, status FROM novels WHERE id = ? AND deleted_at IS NULL', [id])
+  if (!novel) return c.json({ error: '作品不存在' }, 404)
+  if (novel.status === status) return c.json({ ok: true, status })
+  await run(db, 'UPDATE novels SET status = ?, updated_at = unixepoch() WHERE id = ?', [status, id])
+  return c.json({ ok: true, status })
+})
+
+// ============================================================
+// 站点设置 — site_settings 查看 / 编辑
+// ============================================================
+const SETTINGS_KEY_RE = /^[a-z0-9_]{1,64}$/
+
+admin.get('/settings', adminMiddleware, async (c) => {
+  const rows = await query<Record<string, unknown>>(
+    c.env.abdl_space_db, 'SELECT key, value, updated_at FROM site_settings ORDER BY key')
+  return c.json({ settings: rows.map(r => ({ key: r.key, value: r.value, updated_at: r.updated_at })) })
+})
+
+admin.put('/settings', adminMiddleware, async (c) => {
+  const body = await c.req.json<{ key?: string; value?: string }>()
+  const key = body?.key || ''
+  const value = body?.value ?? ''
+  if (!SETTINGS_KEY_RE.test(key)) return c.json({ error: 'key 仅允许小写字母/数字/下划线，长度 ≤ 64' }, 422)
+  if (typeof value !== 'string' || value.length > 8000) return c.json({ error: 'value 必须为字符串且长度 ≤ 8000' }, 422)
+  await run(c.env.abdl_space_db,
+    `INSERT INTO site_settings (key, value, updated_at) VALUES (?, ?, datetime('now'))
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+    [key, value])
+  return c.json({ ok: true, key, updated_at: new Date().toISOString() })
 })
 
 export default admin

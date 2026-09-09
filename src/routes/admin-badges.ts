@@ -101,6 +101,38 @@ adminBadges.post('/grant', async (c) => {
 })
 
 /**
+ * GET /api/admin/badges/:key/holders — 持有该徽章的用户列表
+ */
+adminBadges.get('/:key/holders', async (c) => {
+  const key = c.req.param('key')
+  const rows = await query<Record<string, unknown>>(
+    c.env.abdl_space_db,
+    `SELECT u.id AS user_id, u.username, u.avatar, ub.unlocked_at, ub.acknowledged_at
+     FROM user_badges ub JOIN users u ON u.id = ub.user_id
+     WHERE ub.badge_key = ? ORDER BY ub.unlocked_at DESC LIMIT 200`,
+    [key]
+  )
+  const total = await queryOne<{ c: number }>(
+    c.env.abdl_space_db, 'SELECT COUNT(*) AS c FROM user_badges WHERE badge_key = ?', [key])
+  return c.json({ holders: rows.map(r => ({
+    user_id: r.user_id, username: r.username, avatar: r.avatar || null,
+    unlocked_at: r.unlocked_at, acknowledged_at: r.acknowledged_at || null,
+  })), total: total?.c ?? 0 })
+})
+
+/**
+ * DELETE /api/admin/badges/:key — 删除徽章定义（连带清空持有人记录）
+ */
+adminBadges.delete('/:key', async (c) => {
+  const key = c.req.param('key')
+  const row = await queryOne(c.env.abdl_space_db, 'SELECT key FROM badges WHERE key = ?', [key])
+  if (!row) return c.json({ error: '徽章不存在' }, 404)
+  await run(c.env.abdl_space_db, 'DELETE FROM user_badges WHERE badge_key = ?', [key])
+  await run(c.env.abdl_space_db, 'DELETE FROM badges WHERE key = ?', [key])
+  return c.json({ success: true, key })
+})
+
+/**
  * POST /api/admin/badges/revoke — 收回徽章
  * Body: { badge_key, username? | user_id? }
  */
