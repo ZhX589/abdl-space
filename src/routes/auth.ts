@@ -99,6 +99,13 @@ auth.post('/send-code', async (c) => {
   if (!emailAddress || !EMAIL_REGEX.test(emailAddress)) {
     return c.json({ error: '请输入有效的邮箱地址' }, 400)
   }
+  // 邮箱屏蔽名单：命中的邮箱一律拒绝发送验证码（网页 / App 同一接口）
+  const blocked = await queryOne<{ email: string }>(
+    db, 'SELECT email FROM email_blocklist WHERE email = ?', [emailAddress]
+  ).catch(() => null)
+  if (blocked) {
+    return c.json({ error: '该邮箱已被平台屏蔽，无法接收验证码' }, 403)
+  }
   if (!['register', 'bind', 'reset'].includes(type)) {
     return c.json({ error: '无效的验证码类型' }, 400)
   }

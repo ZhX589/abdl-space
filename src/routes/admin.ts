@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 const DEFAULT_AVATAR = 'https://img.abdl-space.top/file/system/1781439303787_play_store_512.png'
-import type { D1Database } from '@cloudflare/workers-types'
+import type { D1Database, D1PreparedStatement } from '@cloudflare/workers-types'
 import type { Env, JWTPayload } from '../types/index.ts'
 import { query, queryOne, run } from '../lib/db.ts'
 import { adminMiddleware } from '../middleware/auth.ts'
@@ -64,7 +64,7 @@ async function dailySeriesUnix(db: D1Database, table: string, extra: string, par
 
 /** 文本时间戳表：北京时区日窗口 [startDays 天前 0 点, start 后 endDays 天 0 点) 内的行数 */
 async function bucketCount(db: D1Database, table: string, startDays: number, endDays: number | null): Promise<number> {
-  const dayMod = (n: number, sign: '+' | '-') => (n === 0 ? '' : `, '${sign}${n} days'`)
+  const dayMod = (nDays: number, sign: '+' | '-') => (nDays === 0 ? '' : `, '${sign}${nDays} days'`)
   const conditions = [`created_at >= datetime('now', '${CN_TZ}', 'start of day'${dayMod(startDays, '-')})`]
   if (endDays !== null) {
     conditions.push(`created_at < datetime('now', '${CN_TZ}', 'start of day'${dayMod(startDays, '-')}${dayMod(endDays, '+')})`)
@@ -72,6 +72,237 @@ async function bucketCount(db: D1Database, table: string, startDays: number, end
   const row = await queryOne<{ c: number }>(
     db, `SELECT COUNT(*) AS c FROM ${table} WHERE ${conditions.join(' AND ')}`)
   return row?.c ?? 0
+}
+
+// ============================================================
+// 管理台读行优化 —— 每日快照（admin_daily_stats）+ 分钟级 KV 缓存
+// 策略：周/环比/趋势读日快照（几十行），总量与待办等 5 分钟缓存，仅"今日"实时按索引窗口计数
+// ============================================================
+const SNAP_TTL_MS = 5 * 60 * 1000
+const DAILY_LOOKBACK = 200
+
+/** [响应 key, 目标表] —— 文本时间戳表 */
+const DAILY_TABLES = [
+  ['users', 'users'],
+  ['posts', 'posts'],
+  ['comments', 'post_comments'],
+  ['ratings', 'ratings'],
+  ['checkins', 'daily_checkins'],
+  ['likes', 'likes'],
+] as const
+
+/** admin_daily_stats 中与 DAILY_TABLES 对应的求和列 */
+const DAILY_COLUMNS = ['users', 'posts', 'comments', 'ratings', 'checkins', 'likes'] as const
+
+/** 趋势序列的 key（= DAILY_COLUMNS + novels） */
+const TREND_KEYS = [...DAILY_COLUMNS, 'novels'] as const
+
+/** 北京时区日期字符串 YYYY-MM-DD（今天或 offsetDays 前） */
+function bjDate(offsetDays = 0): string {
+  const d = new Date(Date.now() + 8 * 3600 * 1000)
+  d.setUTCDate(d.getUTCDate() - offsetDays)
+  return d.toISOString().slice(0, 10)
+}
+
+/** 读管理员 KV 缓存（value 为 JSON 字符串） */
+async function metricsCacheGet(db: D1Database, key: string): Promise<{ value: unknown; ts: number } | null> {
+  const row = await queryOne<{ value: string; updated_at: string }>(
+    db, 'SELECT value, updated_at FROM admin_metrics_cache WHERE key = ?', [key]
+  ).catch(() => null)
+  if (!row) return null
+  const ts = Math.floor(new Date(row.updated_at.replace(' ', 'T') + 'Z').getTime())
+  try { return { value: JSON.parse(row.value), ts: Number.isFinite(ts) ? ts : 0 } } catch { return null }
+}
+
+async function metricsCacheSet(db: D1Database, key: string, value: unknown): Promise<void> {
+  await run(
+    db,
+    `INSERT INTO admin_metrics_cache (key, value, updated_at) VALUES (?, ?, datetime('now'))
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+    [key, JSON.stringify(value)]
+  ).catch(() => null)
+}
+
+/** 回填每日快照到昨天（北京时区），从上次标记次日增量补齐。失败静默，保持旧直连路径可回退 */
+async function ensureDailyStats(db: D1Database): Promise<void> {
+  const until = bjDate(1) // 昨天，今天的数据等明天再入快照
+  try {
+    const marker = await metricsCacheGet(db, 'daily_stats_filled_until')
+    if (marker && typeof marker.value === 'string' && marker.value >= until) return
+  } catch { /* 表还不存在时走回填失败路径 */ }
+  try {
+    let since = bjDate(DAILY_LOOKBACK)
+    try {
+      const marker = await metricsCacheGet(db, 'daily_stats_filled_until')
+      if (marker && typeof marker.value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(marker.value)) {
+        const d = marker.value + 'T00:00:00Z'
+        const next = new Date(d)
+        next.setUTCDate(next.getUTCDate() + 1)
+        const candidate = next.toISOString().slice(0, 10)
+        if (candidate > since) since = candidate
+      }
+    } catch { /* 保持初始全量回填 */ }
+    const writes: D1PreparedStatement[] = []
+    for (const [col, table] of DAILY_TABLES) {
+      const rows = await query<{ d: string; c: number }>(
+        db,
+        `SELECT substr(datetime(created_at, '+8 hours'), 1, 10) AS d, COUNT(*) AS c
+         FROM ${table}
+         WHERE created_at >= datetime(? || ' 00:00:00') AND created_at < datetime(? || ' 00:00:00')
+         GROUP BY d`,
+        [since, until]
+      )
+      for (const r of rows) {
+        if (!r.d || r.d < since) continue
+        writes.push(db.prepare(
+          `INSERT INTO admin_daily_stats (date, ${col}) VALUES (?, ?)
+           ON CONFLICT(date) DO UPDATE SET ${col} = excluded.${col}`
+        ).bind(r.d, r.c))
+      }
+    }
+    // novels：unix 秒时间戳
+    const colNovel = 'novels'
+    const novelRows = await query<{ d: string; c: number }>(
+      db,
+      `SELECT substr(datetime(created_at, 'unixepoch', '+8 hours'), 1, 10) AS d, COUNT(*) AS c
+       FROM novels
+       WHERE deleted_at IS NULL
+         AND created_at >= CAST(strftime('%s', ? || ' 00:00:00') AS INTEGER)
+         AND created_at < CAST(strftime('%s', ? || ' 00:00:00') AS INTEGER)
+       GROUP BY d`,
+      [since, until]
+    )
+    for (const r of novelRows) {
+      if (!r.d || r.d < since) continue
+      writes.push(db.prepare(
+        `INSERT INTO admin_daily_stats (date, ${colNovel}) VALUES (?, ?)
+         ON CONFLICT(date) DO UPDATE SET ${colNovel} = excluded.${colNovel}`
+      ).bind(r.d, r.c))
+    }
+    if (writes.length) {
+      for (let i = 0; i < writes.length; i += 100) {
+        await db.batch(writes.slice(i, i + 100)).catch(() => null)
+      }
+    }
+    await metricsCacheSet(db, 'daily_stats_filled_until', until)
+  } catch {
+    // 表不存在或查询失败 → 保持旧路径
+  }
+}
+
+/** 读单日快照；无该日数据（或表缺失）返回 null */
+async function dailyStatsRow(db: D1Database, dateStr: string): Promise<Record<string, number> | null> {
+  const row = await queryOne<Record<string, number>>(
+    db, `SELECT users, posts, comments, ratings, checkins, likes FROM admin_daily_stats WHERE date = ?`, [dateStr]
+  ).catch(() => null)
+  if (!row) return null
+  const out: Record<string, number> = {}
+  for (const key of DAILY_COLUMNS) out[key] = Number(row[key]) || 0
+  return out
+}
+
+/** 日快照区间逐列求和（含边界）；区间内无任何快照行返回 null（上层回退旧路径） */
+async function dailyStatsSum(db: D1Database, fromDate: string, toDate: string): Promise<Record<string, number> | null> {
+  const rows = await query<Record<string, number>>(
+    db, `SELECT date, users, posts, comments, ratings, checkins, likes FROM admin_daily_stats WHERE date >= ? AND date <= ?`, [fromDate, toDate]
+  ).catch(() => [])
+  if (rows.length === 0) return null
+  const out: Record<string, number> = {}
+  for (const key of DAILY_COLUMNS) {
+    let s = 0
+    for (const r of rows) s += Number(r[key]) || 0
+    out[key] = s
+  }
+  return out
+}
+
+/**
+ * 5 分钟快照：总量 / 小说状态 / 待办 / 地域 / 徽章（低频变化部分合并为一次计算，
+ * 概览每 5 分钟只做一遍，而不是每个请求都全表 COUNT）
+ */
+async function buildOverviewSnapshot(db: D1Database): Promise<Record<string, unknown>> {
+  const totals = await Promise.allSettled([
+    queryOne<{ c: number }>(db, 'SELECT COUNT(*) AS c FROM users'),
+    queryOne<{ c: number }>(db, 'SELECT COUNT(*) AS c FROM posts'),
+    queryOne<{ c: number }>(db, 'SELECT COUNT(*) AS c FROM post_comments'),
+    queryOne<{ c: number }>(db, 'SELECT COUNT(*) AS c FROM ratings'),
+    queryOne<{ c: number }>(db, 'SELECT COUNT(*) AS c FROM diapers'),
+    queryOne<{ c: number }>(db, 'SELECT COUNT(*) AS c FROM likes'),
+    queryOne<{ c: number }>(db, 'SELECT COUNT(*) AS c FROM daily_checkins'),
+    queryOne<{ c: number }>(db, 'SELECT COUNT(*) AS c FROM user_badges'),
+    queryOne<{ c: number }>(db, 'SELECT COUNT(*) AS c FROM novels WHERE deleted_at IS NULL'),
+  ])
+  const numOf = (s: PromiseSettledResult<{ c: number } | null>): number =>
+    s.status === 'fulfilled' && s.value ? s.value.c : 0
+  const hasApp = await tableHasColumn(db, 'users', 'has_app')
+  const hasBanned = await tableHasColumn(db, 'users', 'banned')
+  const appUsers = hasApp
+    ? (await queryOne<{ c: number }>(db, 'SELECT COUNT(*) AS c FROM users WHERE has_app = 1').catch(() => null))?.c ?? 0
+    : 0
+  const bannedUsers = hasBanned
+    ? (await queryOne<{ c: number }>(db, 'SELECT COUNT(*) AS c FROM users WHERE banned = 1').catch(() => null))?.c ?? 0
+    : 0
+
+  // 小说状态分布（量级很小且低频变化，快照就够）
+  const novelStatus = await query<{ status: string; c: number }>(
+    db, 'SELECT status, COUNT(*) AS c FROM novels WHERE deleted_at IS NULL GROUP BY status'
+  ).catch(() => [])
+  const novels: Record<string, number> = { draft: 0, review_pending: 0, published: 0, rejected: 0, archived: 0 }
+  for (const s of novelStatus) novels[s.status] = s.c
+
+  // 待办工单
+  const [pendingReports, pendingFriend, pendingNovelReports, pendingAppeals, pendingSecurity] = await Promise.all([
+    queryOne<{ c: number }>(db, "SELECT COUNT(*) AS c FROM reports WHERE status = 'pending'").catch(() => null),
+    queryOne<{ c: number }>(db, "SELECT COUNT(*) AS c FROM friend_request_reports WHERE status = 'pending'").catch(() => null),
+    queryOne<{ c: number }>(db, "SELECT COUNT(*) AS c FROM novel_reports WHERE status IN ('pending','reviewing')").catch(() => null),
+    queryOne<{ c: number }>(db, "SELECT COUNT(*) AS c FROM novel_review_appeals WHERE status IN ('pending','reviewing')").catch(() => null),
+    queryOne<{ c: number }>(db, 'SELECT COUNT(*) AS c FROM security_logs WHERE created_at > ?', [Math.floor(Date.now() / 1000) - 86400]).catch(() => null),
+  ])
+
+  // 帖子地域分布（近 30 天）
+  const provinces = await query<{ name: string; c: number }>(
+    db,
+    `SELECT geo_province AS name, COUNT(*) AS c FROM posts
+     WHERE geo_province IS NOT NULL AND geo_province <> ''
+       AND created_at >= datetime('now', '${CN_TZ}', '-30 days')
+     GROUP BY geo_province ORDER BY c DESC LIMIT 10`
+  ).catch(() => [])
+
+  // 徽章持有排行
+  const topBadges = await query<{ key: string; name: string; c: number }>(
+    db,
+    `SELECT b.key, b.name, COUNT(ub.user_id) AS c
+     FROM badges b LEFT JOIN user_badges ub ON ub.badge_key = b.key
+     GROUP BY b.key ORDER BY c DESC LIMIT 6`
+  ).catch(() => [])
+
+  return {
+    totals: {
+      users: numOf(totals[0]), posts: numOf(totals[1]), comments: numOf(totals[2]),
+      ratings: numOf(totals[3]), diapers: numOf(totals[4]), likes: numOf(totals[5]),
+      checkins: numOf(totals[6]), badges: numOf(totals[7]), novels: numOf(totals[8]),
+      appUsers, bannedUsers,
+    },
+    novels,
+    pending: {
+      reports: pendingReports?.c ?? 0, friend_reports: pendingFriend?.c ?? 0,
+      novel_reports: pendingNovelReports?.c ?? 0, novel_appeals: pendingAppeals?.c ?? 0,
+      security_24h: pendingSecurity?.c ?? 0,
+    },
+    provinces,
+    topBadges,
+  }
+}
+
+/** 读快照 value（5 分钟内命中缓存）；未命中时回填并返回 */
+async function withOverviewSnapshot<T>(db: D1Database, key: string, build: () => Promise<T>): Promise<T> {
+  const cached = await metricsCacheGet(db, key)
+  if (cached && typeof cached.value === 'object' && cached.value !== null && Date.now() - cached.ts < SNAP_TTL_MS) {
+    return cached.value as T
+  }
+  const fresh = await build()
+  await metricsCacheSet(db, key, fresh)
+  return fresh
 }
 
 /**
@@ -822,79 +1053,50 @@ admin.put('/beta-mode', adminMiddleware, async (c) => {
 
 // ============================================================
 // GET /api/admin/stats/overview — 经营总览（总量 / 今日 / 环比 / 待办）
+// 读行优化：总量/待办/地域/徽章走 5 分钟缓存；周/环比读日快照；仅今日实时按索引窗口计数
 // ============================================================
 admin.get('/stats/overview', adminMiddleware, async (c) => {
   const db = c.env.abdl_space_db
+  await ensureDailyStats(db)
 
-  const totals = await Promise.allSettled([
-    queryOne<{ c: number }>(db, 'SELECT COUNT(*) AS c FROM users'),
-    queryOne<{ c: number }>(db, 'SELECT COUNT(*) AS c FROM posts'),
-    queryOne<{ c: number }>(db, 'SELECT COUNT(*) AS c FROM post_comments'),
-    queryOne<{ c: number }>(db, 'SELECT COUNT(*) AS c FROM ratings'),
-    queryOne<{ c: number }>(db, 'SELECT COUNT(*) AS c FROM diapers'),
-    queryOne<{ c: number }>(db, 'SELECT COUNT(*) AS c FROM likes'),
-    queryOne<{ c: number }>(db, 'SELECT COUNT(*) AS c FROM daily_checkins'),
-    queryOne<{ c: number }>(db, 'SELECT COUNT(*) AS c FROM user_badges'),
-    queryOne<{ c: number }>(db, 'SELECT COUNT(*) AS c FROM novels WHERE deleted_at IS NULL'),
-  ])
-  const numOf = (s: PromiseSettledResult<{ c: number } | null>): number =>
-    s.status === 'fulfilled' && s.value ? s.value.c : 0
-  const hasApp = await tableHasColumn(db, 'users', 'has_app')
-  const hasBanned = await tableHasColumn(db, 'users', 'banned')
-  const appUsers = hasApp
-    ? (await queryOne<{ c: number }>(db, 'SELECT COUNT(*) AS c FROM users WHERE has_app = 1').catch(() => null))?.c ?? 0
-    : 0
-  const bannedUsers = hasBanned
-    ? (await queryOne<{ c: number }>(db, 'SELECT COUNT(*) AS c FROM users WHERE banned = 1').catch(() => null))?.c ?? 0
-    : 0
+  const snapshot = await withOverviewSnapshot<Record<string, unknown>>(
+    db, 'overview_snapshot_v2', async () => buildOverviewSnapshot(db)
+  )
+  const totals = snapshot.totals as Record<string, number>
+  const novels = snapshot.novels as Record<string, number>
+  const pending = snapshot.pending as Record<string, number>
+  const provinces = (snapshot.provinces ?? []) as { name: string; c: number }[]
+  const topBadges = (snapshot.topBadges ?? []) as { key: string; name: string; c: number }[]
 
-  // 今日 / 昨日 / 近7天 / 前7天（用户、帖子、评论、评分、签到、点赞）
-  const textTables = ['users', 'posts', 'post_comments', 'ratings', 'daily_checkins', 'likes'] as const
+  // 今日实时（每个表只扫今日窗口，走 created_at 索引）；昨日 / 周 / 前周读日快照
   const today: Record<string, number> = {}
+  for (const [key, table] of DAILY_TABLES) {
+    today[key] = await bucketCount(db, table, 0, 1)
+  }
+  const yesterdayRow = await dailyStatsRow(db, bjDate(1))
+  const weekSum = await dailyStatsSum(db, bjDate(6), bjDate(1))
+  const prevSum = await dailyStatsSum(db, bjDate(13), bjDate(7))
   const yesterday: Record<string, number> = {}
   const week: Record<string, number> = {}
   const prevWeek: Record<string, number> = {}
-  for (const t of textTables) {
-    today[t] = await bucketCount(db, t, 0, 1)
-    yesterday[t] = await bucketCount(db, t, 1, 1)
-    week[t] = await bucketCount(db, t, 7, null)
-    prevWeek[t] = await bucketCount(db, t, 14, 7)
+  if (yesterdayRow && weekSum && prevSum) {
+    for (const key of DAILY_COLUMNS) {
+      yesterday[key] = yesterdayRow[key] || 0
+      week[key] = (weekSum[key] || 0) + (today[key] || 0)
+      prevWeek[key] = prevSum[key] || 0
+    }
+  } else {
+    // 快照表缺失或未回填 → 旧直连
+    for (let i = 0; i < DAILY_TABLES.length; i++) {
+      const key = DAILY_TABLES[i][0]
+      const table = DAILY_TABLES[i][1]
+      yesterday[key] = await bucketCount(db, table, 1, 1)
+      week[key] = await bucketCount(db, table, 7, null)
+      prevWeek[key] = await bucketCount(db, table, 14, 7)
+    }
   }
 
-  // 小说状态分布
-  const novelStatus = await query<{ status: string; c: number }>(
-    db, 'SELECT status, COUNT(*) AS c FROM novels WHERE deleted_at IS NULL GROUP BY status'
-  ).catch(() => [])
-  const novels: Record<string, number> = { draft: 0, review_pending: 0, published: 0, rejected: 0, archived: 0 }
-  for (const s of novelStatus) novels[s.status] = s.c
-
-  // 待办工单
-  const [pendingReports, pendingFriend, pendingNovelReports, pendingAppeals, janitors] = await Promise.all([
-    queryOne<{ c: number }>(db, "SELECT COUNT(*) AS c FROM reports WHERE status = 'pending'").catch(() => null),
-    queryOne<{ c: number }>(db, "SELECT COUNT(*) AS c FROM friend_request_reports WHERE status = 'pending'").catch(() => null),
-    queryOne<{ c: number }>(db, "SELECT COUNT(*) AS c FROM novel_reports WHERE status IN ('pending','reviewing')").catch(() => null),
-    queryOne<{ c: number }>(db, "SELECT COUNT(*) AS c FROM novel_review_appeals WHERE status IN ('pending','reviewing')").catch(() => null),
-    queryOne<{ c: number }>(db, "SELECT COUNT(*) AS c FROM security_logs WHERE created_at > ?", [Math.floor(Date.now()/1000) - 86400]).catch(() => null),
-  ])
-
-  // 帖子地域分布（近30天）
-  const provinces = await query<{ name: string; c: number }>(
-    db,
-    `SELECT geo_province AS name, COUNT(*) AS c FROM posts
-     WHERE geo_province IS NOT NULL AND geo_province <> ''
-       AND created_at >= datetime('now', '${CN_TZ}', '-30 days')
-     GROUP BY geo_province ORDER BY c DESC LIMIT 10`
-  ).catch(() => [])
-
-  // 徽章持有排行
-  const topBadges = await query<{ key: string; name: string; c: number }>(
-    db,
-    `SELECT b.key, b.name, COUNT(ub.user_id) AS c FROM badges b
-     LEFT JOIN user_badges ub ON ub.badge_key = b.key
-     GROUP BY b.key ORDER BY c DESC LIMIT 6`
-  ).catch(() => [])
-
-  // 最新注册 / 最新帖子
+  // 最新注册 / 最新帖子（少量，保持实时）
   const [recentUsers, recentPosts] = await Promise.all([
     query<Record<string, unknown>>(db, 'SELECT id, username, avatar, created_at FROM users ORDER BY id DESC LIMIT 8'),
     query<Record<string, unknown>>(
@@ -906,19 +1108,10 @@ admin.get('/stats/overview', adminMiddleware, async (c) => {
   ])
 
   return c.json({
-    totals: {
-      users: numOf(totals[0]), posts: numOf(totals[1]), comments: numOf(totals[2]),
-      ratings: numOf(totals[3]), diapers: numOf(totals[4]), likes: numOf(totals[5]),
-      checkins: numOf(totals[6]), badges: numOf(totals[7]), novels: numOf(totals[8]),
-      appUsers, bannedUsers,
-    },
+    totals,
     today, yesterday, week, prevWeek,
     novels,
-    pending: {
-      reports: pendingReports?.c ?? 0, friend_reports: pendingFriend?.c ?? 0,
-      novel_reports: pendingNovelReports?.c ?? 0, novel_appeals: pendingAppeals?.c ?? 0,
-      security_24h: janitors?.c ?? 0,
-    },
+    pending,
     provinces,
     topBadges,
     recentUsers: recentUsers.map(r => ({ id: r.id, username: r.username, avatar: r.avatar ?? DEFAULT_AVATAR, created_at: r.created_at })),
@@ -928,10 +1121,47 @@ admin.get('/stats/overview', adminMiddleware, async (c) => {
 
 // ============================================================
 // GET /api/admin/stats/trends?days=30 — 每日趋势序列（7~90 天）
+// 读行优化：优先读 admin_daily_stats 快照（几十行）；快照缺失时回退旧直连
 // ============================================================
 admin.get('/stats/trends', adminMiddleware, async (c) => {
   const db = c.env.abdl_space_db
   const days = Math.min(90, Math.max(7, parseInt(c.req.query('days') || '30')))
+  await ensureDailyStats(db)
+  try {
+    const rows = await query<Record<string, number>>(
+      db,
+      `SELECT date, users, posts, comments, ratings, checkins, likes, novels
+       FROM admin_daily_stats WHERE date >= ? ORDER BY date ASC`,
+      [bjDate(days - 1)]
+    )
+    if (rows.length > 0) {
+      const byDate = new Map<string, Record<string, number>>()
+      for (const r of rows) byDate.set(String(r.date), r)
+      const series: Record<string, { d: string; c: number }[]> = {}
+      for (const key of TREND_KEYS) {
+        series[key] = Array.from({ length: days }, (_, i) => {
+          const d = bjDate(days - 1 - i)
+          return { d, c: Number(byDate.get(d)?.[key]) || 0 }
+        })
+      }
+      // 今天的数据次日才入快照，最后一格实时补齐
+      const todayStr = bjDate()
+      const todayIdx = series.users.findIndex(s => s.d === todayStr)
+      if (todayIdx >= 0) {
+        for (const [key, table] of DAILY_TABLES) {
+          series[key][todayIdx].c = await bucketCount(db, table, 0, 1)
+        }
+        series.novels[todayIdx].c = (await queryOne<{ c: number }>(
+          db,
+          `SELECT COUNT(*) AS c FROM novels WHERE deleted_at IS NULL
+           AND created_at >= CAST(strftime('%s', 'now', '${CN_TZ}', 'start of day') AS INTEGER)`
+        ).catch(() => null))?.c ?? series.novels[todayIdx].c
+      }
+      return c.json({ days, series })
+    }
+  } catch { /* 快照表不存在 → 回退旧路径 */ }
+
+  // 旧直连路径（兼容）
   const shift = `-${days} days`
   const sinceText = `datetime('now', '${CN_TZ}', ?)`
   const sinceUnix = `CAST(strftime('%s', 'now', '${CN_TZ}', ?) AS INTEGER)`
@@ -946,7 +1176,7 @@ admin.get('/stats/trends', adminMiddleware, async (c) => {
     dailySeriesUnix(db, 'novels', `WHERE deleted_at IS NULL AND created_at >= ${sinceUnix}`, [shift]),
   ])
 
-  return c.json({ days, series: { users: users, posts, comments, ratings, checkins, likes, novels } })
+  return c.json({ days, series: { users, posts, comments, ratings, checkins, likes, novels } })
 })
 
 // ============================================================
@@ -1079,6 +1309,47 @@ admin.put('/settings', adminMiddleware, async (c) => {
      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
     [key, value])
   return c.json({ ok: true, key, updated_at: new Date().toISOString() })
+})
+
+// ============================================================
+// 邮箱屏蔽名单 — 命中的邮箱在注册/绑定/找回申请验证码时被 send-code 直接拒绝
+// ============================================================
+const BLOCKED_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+
+admin.get('/blocked-emails', adminMiddleware, async (c) => {
+  const rows = await query<{ email: string; reason: string; created_by: number | null; created_at: string }>(
+    c.env.abdl_space_db,
+    `SELECT b.email, b.reason, b.created_by, b.created_at, u.username AS created_by_username
+     FROM email_blocklist b LEFT JOIN users u ON u.id = b.created_by
+     ORDER BY b.created_at DESC`)
+  return c.json({ emails: rows })
+})
+
+admin.post('/blocked-emails', adminMiddleware, async (c) => {
+  const db = c.env.abdl_space_db
+  const body = await c.req.json<{ email?: string; reason?: string }>().catch(() => null)
+  const email = (body?.email || '').trim().toLowerCase()
+  const reason = (body?.reason || '').trim()
+  if (!BLOCKED_EMAIL_RE.test(email)) return c.json({ error: '请输入有效的邮箱地址' }, 400)
+  if (reason.length > 200) return c.json({ error: '屏蔽原因长度不能超过 200 字符' }, 422)
+  const adminId = c.get('user')?.sub ?? null
+  const exists = await queryOne<{ email: string }>(
+    db, 'SELECT email FROM email_blocklist WHERE email = ?', [email]).catch(() => null)
+  if (exists) return c.json({ error: '该邮箱已在屏蔽名单中' }, 409)
+  await run(db,
+    'INSERT INTO email_blocklist (email, reason, created_by, created_at) VALUES (?, ?, ?, datetime(\'now\'))',
+    [email, reason, adminId])
+  return c.json({ ok: true, email })
+})
+
+admin.delete('/blocked-emails/:email', adminMiddleware, async (c) => {
+  const email = decodeURIComponent(c.req.param('email') || '').trim().toLowerCase()
+  if (!BLOCKED_EMAIL_RE.test(email)) return c.json({ error: '邮箱格式无效' }, 400)
+  const res = await run(c.env.abdl_space_db, 'DELETE FROM email_blocklist WHERE email = ?', [email])
+  if (!res || (res as { meta?: { changes?: number } }).meta?.changes === 0) {
+    return c.json({ error: '该邮箱不在屏蔽名单中' }, 404)
+  }
+  return c.json({ ok: true, email })
 })
 
 export default admin
