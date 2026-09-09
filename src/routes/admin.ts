@@ -37,7 +37,7 @@ const CN_TZ = '+8 hours'
 
 async function tableHasColumn(db: D1Database, table: string, column: string): Promise<boolean> {
   const row = await queryOne<{ name: string }>(
-    db, `SELECT name FROM pragma_table_info(${table}) WHERE name = ?`, [column]
+    db, `SELECT name FROM pragma_table_info('${table.replace(/'/g, "''")}') WHERE name = ?`, [column]
   )
   return !!row
 }
