@@ -3,7 +3,7 @@
  * All conversion functions are pure — no DB calls.
  */
 
-import type { MastodonAccount, MastodonStatus, MastodonMediaAttachment, MastodonNotification, MastodonPoll } from './types.ts'
+import type { MastodonAccount, MastodonStatus, MastodonMediaAttachment, MastodonNotification, MastodonPoll, MastodonStatusQuote } from './types.ts'
 import { toMastoId } from './shared.ts'
 import { query } from '../lib/db.ts'
 import { buildMediaPreviewUrl } from '../lib/media-preview.ts'
@@ -453,6 +453,213 @@ export function toStatusFromNBW(thread: {
     poll: null,
     edited_at: null,
   }
+}
+
+export type NBWReplyItem = {
+  pid?: number
+  author?: string
+  authorid?: number
+  avatar?: string
+  dateline?: string
+  position?: number
+  support?: number
+  ratetimes?: number
+  content?: string
+  quote_info?: {
+    pid?: number
+    author?: string
+    dateline?: string
+    message?: string
+  } | null
+  attachment_list?: Array<{
+    aid?: number
+    is_image?: number
+    filename?: string
+    filesize?: string
+    width?: number
+    price?: number
+    readperm?: number
+    extension?: string
+    url?: string
+  }> | null
+}
+
+/**
+ * NBW 楼层回复 → Mastodon Status（远程回复，不入库）
+ * - content 已由合作方剥离 [quote]，这里再兜底剥离 [attach] 等 bbcode
+ * - 图片附件映射成 media_attachments，由 App 原生渲染
+ * - quote_info 映射成 Mastodon quote 卡片，由 App 原生渲染引用 UI
+ */
+export function toStatusFromNBWReply(tid: number, reply: NBWReplyItem): MastodonStatus {
+  const threadTid = Number(tid)
+  const pid = Number(reply.pid ?? 0)
+  const authorId = Number(reply.authorid ?? 0)
+  const username = reply.author || `nbw_${authorId}`
+  const threadUrl = `https://www.newbabyworld.top/forum.php?mod=viewthread&tid=${threadTid}`
+  const createdAt = nbwThreadDateToISO(reply.dateline)
+
+  const account: MastodonAccount = {
+    id: `nbw_${authorId}`,
+    username,
+    acct: `${username}@newbabyworld.top`,
+    display_name: username,
+    locked: false,
+    bot: false,
+    discoverable: true,
+    group: false,
+    created_at: createdAt,
+    note: '',
+    url: authorId > 0 ? `https://www.newbabyworld.top/?${authorId}` : threadUrl,
+    uri: authorId > 0 ? `https://www.newbabyworld.top/?${authorId}` : threadUrl,
+    avatar: (typeof reply.avatar === 'string' && reply.avatar.trim())
+      ? reply.avatar.trim()
+      : (authorId > 0
+        ? `https://www.newbabyworld.top/uc_server/avatar.php?uid=${authorId}&size=middle`
+        : DEFAULT_AVATAR),
+    avatar_static: (typeof reply.avatar === 'string' && reply.avatar.trim())
+      ? reply.avatar.trim()
+      : (authorId > 0
+        ? `https://www.newbabyworld.top/uc_server/avatar.php?uid=${authorId}&size=middle`
+        : DEFAULT_AVATAR),
+    header: DEFAULT_HEADER,
+    header_static: DEFAULT_HEADER,
+    followers_count: 0,
+    following_count: 0,
+    statuses_count: 0,
+    last_status_at: createdAt,
+    last_status_province: null,
+    emojis: [],
+    fields: [],
+    roles: [],
+    hide_collections: false,
+    noindex: false,
+  }
+
+  const quoteInfo = reply.quote_info && Number(reply.quote_info.pid) > 0 && reply.quote_info.message
+    ? reply.quote_info
+    : null
+  const quotedPid = quoteInfo ? Number(quoteInfo.pid) : 0
+
+  const attachments = (reply.attachment_list || [])
+    .filter(a => a && Number(a.is_image) === 1 && typeof a.url === 'string' && a.url.trim())
+    .map((a, i) => toMediaAttachment(i, a.url as string, a.filename || null, Number(a.width) || undefined))
+
+  let quote: MastodonStatusQuote | null = null
+  if (quoteInfo) {
+    const quotedStatus: MastodonStatus = {
+      id: `nbw_${threadTid}_${quotedPid}`,
+      created_at: nbwThreadDateToISO(quoteInfo.dateline),
+      in_reply_to_id: null,
+      in_reply_to_account_id: null,
+      sensitive: false,
+      mental_crisis: false,
+      spoiler_text: '',
+      visibility: 'public',
+      language: 'zh',
+      uri: threadUrl,
+      url: threadUrl,
+      replies_count: 0,
+      reblogs_count: 0,
+      favourites_count: 0,
+      bookmarks_count: 0,
+      shares_count: 0,
+      views_count: 0,
+      heat: 0,
+      favourited: false,
+      reblogged: false,
+      muted: false,
+      bookmarked: false,
+      content: formatContent(quoteInfo.message ?? ''),
+      reblog: null,
+      application: { name: '宝宝新天地', website: 'https://www.newbabyworld.top' },
+      account: {
+        id: `nbw_quote_${quotedPid}`,
+        username: quoteInfo.author || '引用',
+        acct: quoteInfo.author ? `${quoteInfo.author}@newbabyworld.top` : '引用',
+        display_name: quoteInfo.author || '引用',
+        locked: false,
+        bot: false,
+        discoverable: true,
+        group: false,
+        created_at: nbwThreadDateToISO(quoteInfo.dateline),
+        note: '',
+        url: threadUrl,
+        uri: threadUrl,
+        avatar: DEFAULT_AVATAR,
+        avatar_static: DEFAULT_AVATAR,
+        header: DEFAULT_HEADER,
+        header_static: DEFAULT_HEADER,
+        followers_count: 0,
+        following_count: 0,
+        statuses_count: 0,
+        last_status_at: null,
+        last_status_province: null,
+        emojis: [],
+        fields: [],
+        roles: [],
+        hide_collections: false,
+        noindex: false,
+      },
+      media_attachments: [],
+      mentions: [],
+      tags: [],
+      emojis: [],
+      card: null,
+      poll: null,
+    }
+    quote = {
+      state: 'accepted',
+      quoted_status: quotedStatus,
+      quoted_status_id: `nbw_${threadTid}_${quotedPid}`,
+    }
+  }
+
+  return {
+    id: `nbw_${threadTid}_${pid}`,
+    created_at: createdAt,
+    in_reply_to_id: quotedPid > 0 ? `nbw_${threadTid}_${quotedPid}` : `nbw_${threadTid}`,
+    in_reply_to_account_id: null,
+    sensitive: false,
+    mental_crisis: false,
+    spoiler_text: '',
+    visibility: 'public',
+    language: 'zh',
+    uri: threadUrl,
+    url: quotedPid > 0 ? `${threadUrl}&pid=${quotedPid}` : threadUrl,
+    replies_count: 0,
+    reblogs_count: 0,
+    favourites_count: Number(reply.support ?? 0),
+    bookmarks_count: 0,
+    shares_count: 0,
+    views_count: 0,
+    heat: 0,
+    favourited: false,
+    reblogged: false,
+    muted: false,
+    bookmarked: false,
+    content: nbwReplyContentToHTML(reply.content),
+    reblog: null,
+    application: { name: '宝宝新天地', website: 'https://www.newbabyworld.top' },
+    account,
+    media_attachments: attachments,
+    mentions: [],
+    tags: [],
+    emojis: [],
+    card: null,
+    poll: null,
+    quote,
+  }
+}
+
+/** NBW 回复正文 → HTML：剥离附加与遗留 bbcode，只保留纯文本并自动链接化 */
+function nbwReplyContentToHTML(text?: string): string {
+  let t = String(text ?? '').replace(/\r\n?/g, '\n')
+  // [attach] 标签内容由 attachment_list 单独渲染，正文里移除
+  t = t.replace(/\[attach(?:img)?\][\s\S]*?\[\/attach(?:img)?\]/gi, '')
+  // 其余 bbcode（[quote] 已被合作方剥离，这里兜底）统一剥掉标签
+  t = t.replace(/\[[/a-zA-Z0-9=#"' .\-_]+\]/g, '')
+  t = t.replace(/^[ \t\n]+/, '').replace(/[ \t\n]+$/, '')
+  return formatContent(t)
 }
 
 function unixToISO(value?: number | string): string {

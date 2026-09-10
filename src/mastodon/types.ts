@@ -72,6 +72,13 @@ export interface MastodonStatus {
   poll: MastodonPoll | null
   text?: string | null
   edited_at?: string | null
+  quote?: MastodonStatusQuote | null
+}
+
+export interface MastodonStatusQuote {
+  state: 'pending' | 'accepted' | 'rejected' | 'revoked' | 'deleted' | 'unauthorized'
+  quoted_status?: MastodonStatus | null
+  quoted_status_id?: string | null
 }
 
 export interface MastodonMediaAttachment {

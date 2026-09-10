@@ -13,7 +13,7 @@ import { query, queryOne, run } from '../lib/db.ts'
 import { rateLimit } from '../lib/rate-limit.ts'
 import { cacheGet, cacheSet } from '../lib/ttl-cache.ts'
 import { kvCacheGet, kvCacheSet } from '../lib/kv-cache.ts'
-import { toAccount, toAccountFromNBW, toStatus, toStatusFromNBW, toStatusFromComment, toNotification, toISOString, getVerifiedUserIds } from './converter.ts'
+import { toAccount, toAccountFromNBW, toStatus, toStatusFromNBW, toStatusFromNBWReply, toStatusFromComment, toNotification, toISOString, getVerifiedUserIds } from './converter.ts'
 import { generateCardsForPosts } from './linkpreview.ts'
 import type { MastodonNotification, MastodonAccount, MastodonPoll, MastodonStatus } from './types.ts'
 import { mastodonAuth, buildInstance, resolveStatus, parseMastoIdForCursor, TRENDS_KV_TTL_SEC } from './shared.ts'
@@ -1990,6 +1990,36 @@ async function fetchNBWPosts(c: Context<{ Bindings: Env }>, limit: number, curso
 }
 
 // ============================================================
+// NBW 帖子回复：代理合作方 get_replies，按 next_cursor 分页聚合
+// 生态隔离由合作方校验 abdl_space_status，App 无需感知
+// ============================================================
+const NBW_REPLIES_MAX_PAGES = 10
+const NBW_REPLIES_PERPAGE = 100
+
+async function fetchNBWReplies(c: Context<{ Bindings: Env }>, tid: number): Promise<MastodonStatus[]> {
+  if (!c.env.NBW_API_KEY || !Number.isFinite(tid) || tid <= 0) return []
+  const all: MastodonStatus[] = []
+  let cursor: string | undefined
+  for (let page = 0; page < NBW_REPLIES_MAX_PAGES; page++) {
+    const params: Record<string, string> = { tid: String(tid), perpage: String(NBW_REPLIES_PERPAGE) }
+    if (cursor) params.cursor = cursor
+    let result: { code: number; msg: string; data: unknown }
+    try {
+      result = await nbwS2SRequest(c.env, 'get_replies', params)
+    } catch {
+      break
+    }
+    if (result.code !== 200) break
+    const data = (result.data || {}) as { has_more?: boolean; next_cursor?: string; list?: Array<Parameters<typeof toStatusFromNBWReply>[1]> }
+    if (!data.list) break
+    all.push(...data.list.map(r => toStatusFromNBWReply(tid, r)))
+    if (!data.has_more || !data.next_cursor || data.next_cursor === cursor) break
+    cursor = data.next_cursor
+  }
+  return all
+}
+
+// ============================================================
 // GET /api/v1/timelines/all
 // 合并时间线：ABDL Space 本站帖子 + NBW 同步帖子 + 交友宇宙请求，按时间排序
 // ============================================================
@@ -2709,6 +2739,18 @@ mastodon.post('/statuses/:id/unbookmark', async (c) => {
 // ============================================================
 mastodon.get('/statuses/:id/context', async (c) => {
   const rawId = c.req.param('id')
+  // NBW 同步帖（nbw_<tid>）与楼层回复（nbw_<tid>_<pid>）：代理合作方 get_replies
+  // 楼层回复的上下文与主帖一致（Discuz 楼层是扁平列表，无回复树）
+  const nbwMatch = rawId.match(/^nbw_(\d+)(?:_(\d+))?$/)
+  if (nbwMatch && Number(nbwMatch[1]) > 0) {
+    try {
+      const descendants = await fetchNBWReplies(c, Number(nbwMatch[1]))
+      return c.json({ ancestors: [], descendants })
+    } catch (e) {
+      console.error('NBW get_replies failed:', e)
+      return c.json({ ancestors: [], descendants: [] })
+    }
+  }
   const resolved = await resolveStatus(c.env.abdl_space_db, rawId)
   if (!resolved) return c.json({ error: 'Record not found' }, 404)
 
