@@ -2741,12 +2741,13 @@ mastodon.get('/statuses/:id/context', async (c) => {
   const rawId = c.req.param('id')
   // NBW 同步帖（nbw_<tid>）与楼层回复（nbw_<tid>_<pid>）：代理合作方 get_replies
   // 楼层回复的上下文与主帖一致（Discuz 楼层是扁平列表，无回复树）
-  const nbwMatch = rawId.match(/^nbw_(\d+)(?:_(\d+))?$/)
+const nbwMatch = rawId.match(/^nbw_(\d+)(?:_(\d+))?$/)
   if (nbwMatch && Number(nbwMatch[1]) > 0) {
     try {
       const descendants = await fetchNBWReplies(c, Number(nbwMatch[1]))
       return c.json({ ancestors: [], descendants })
     } catch (e) {
+      // 合作方上游偶发不可用（如 Discuz DB 错误）：降级为空线程，不阻塞帖子阅读
       console.error('NBW get_replies failed:', e)
       return c.json({ ancestors: [], descendants: [] })
     }
