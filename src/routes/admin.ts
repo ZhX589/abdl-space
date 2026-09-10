@@ -7,6 +7,23 @@ import { adminMiddleware } from '../middleware/auth.ts'
 
 const IMGBED_URL = 'https://img.abdl-space.top'
 
+/**
+ * 删除一组评论及其完整回复树（含跨帖引用）。
+ * post_comments.parent_id 是自引用且 NO ACTION，直接删父评论会触发 FK 违约，
+ * 因此先断开树内父子引用，再清理评论点赞/评论图片，最后删除评论本体。
+ */
+async function deleteCommentTree(db: D1Database, commentIds: number[]): Promise<void> {
+  if (!commentIds.length) return
+  const ph = commentIds.map(() => '?').join(',')
+  // 断开树内父子引用（含指向被删评论的跨帖回复），彻底避免自引用 FK 违约
+  await run(db, `UPDATE post_comments SET parent_id = NULL WHERE parent_id IN (${ph})`, commentIds)
+  // 评论点赞与评论图片
+  await run(db, `DELETE FROM likes WHERE target_type = 'comment' AND target_id IN (${ph})`, commentIds)
+  await run(db, `DELETE FROM comment_images WHERE comment_id IN (${ph})`, commentIds)
+  // 删除评论本体
+  await run(db, `DELETE FROM post_comments WHERE id IN (${ph})`, commentIds)
+}
+
 async function deleteImageFromImgbed(env: Env, imageUrl: string) {
   const deleteKey = env.IMGBED_DELETE_KEY
   if (!deleteKey) return
@@ -231,14 +248,38 @@ admin.delete('/users/:id', adminMiddleware, async (c) => {
   const db = c.env.abdl_space_db
 
   // 级联删除所有关联数据（按依赖顺序）
-  // 评论图片（依赖 post_comments）
-  await run(db, 'DELETE FROM comment_images WHERE comment_id IN (SELECT id FROM post_comments WHERE user_id = ?)', [id])
-  await run(db, 'DELETE FROM post_comments WHERE user_id = ?', [id])
-  // 帖子图片（依赖 posts）
+  // ---- 评论（含被删用户的评论，以及别人回复它的整棵嵌套树；parent_id 自引用 NO ACTION，须先断链）----
+  const userCommentTree = await query<{ id: number }>(db, `WITH RECURSIVE subtree(id) AS (
+    SELECT id FROM post_comments WHERE user_id = ?
+    UNION
+    SELECT c.id FROM post_comments c JOIN subtree s ON c.parent_id = s.id
+  )
+  SELECT id FROM subtree`, [id])
+  const userCommentIds = userCommentTree.map(r => r.id)
+  await deleteCommentTree(db, userCommentIds)
+
+  // ---- 帖子及其关联（posts、post_images、post_shares、polls 均 CASCADE，post_views 需手工清理）----
   const userPosts = await query<{ id: number }>(db, 'SELECT id FROM posts WHERE user_id = ?', [id])
-  for (const post of userPosts) {
-    await run(db, 'DELETE FROM post_images WHERE post_id = ?', [post.id])
+  const postIds = userPosts.map(p => p.id)
+  if (postIds.length > 0) {
+    // 帖子评论（含被删用户帖子的评论、及回复树）先断链删除，防止 CASCADE 自引用违约
+    const postCommentTree = await query<{ id: number }>(db, `WITH RECURSIVE subtree(id) AS (
+      SELECT id FROM post_comments WHERE post_id IN (${postIds.map(() => '?').join(',')})
+      UNION
+      SELECT c.id FROM post_comments c JOIN subtree s ON c.parent_id = s.id
+    )
+    SELECT id FROM subtree`, postIds)
+    await deleteCommentTree(db, postCommentTree.map(r => r.id))
+    // 帖子图片（post_images CASCADE，但保留显式清理以同步删除图床资源）
+    for (const post of userPosts) {
+      await run(db, 'DELETE FROM post_images WHERE post_id = ?', [post.id])
+    }
+    // 浏览记录：post_views.post_id -> posts 无 CASCADE，必须在删帖前清掉
+    await run(db, `DELETE FROM post_views WHERE post_id IN (${postIds.map(() => '?').join(',')})`, postIds)
   }
+  // 该用户自身的浏览记录（post_views.user_id -> users 无 CASCADE）
+  await run(db, 'DELETE FROM post_views WHERE user_id = ?', [id])
+  // 投票
   await run(db, 'DELETE FROM polls WHERE status_id IN (SELECT id FROM posts WHERE user_id = ?)', [id])
   await run(db, 'DELETE FROM posts WHERE user_id = ?', [id])
   // 点赞/收藏/评分/感受
@@ -251,6 +292,23 @@ admin.delete('/users/:id', adminMiddleware, async (c) => {
   await run(db, 'DELETE FROM notifications WHERE user_id = ? OR actor_id = ?', [id, id])
   await run(db, 'DELETE FROM messages WHERE sender_id = ? OR receiver_id = ?', [id, id])
   await run(db, 'DELETE FROM follows WHERE follower_id = ? OR following_id = ?', [id, id])
+  // 好友申请评论（friend_request_comments.parent_id 自引用 NO ACTION，先断链）与举报
+  const friendComments = await query<{ id: number }>(db, `WITH RECURSIVE subtree(id) AS (
+    SELECT id FROM friend_request_comments WHERE user_id = ?
+    UNION
+    SELECT c.id FROM friend_request_comments c JOIN subtree s ON c.parent_id = s.id
+  )
+  SELECT id FROM subtree`, [id])
+  const friendCommentIds = friendComments.map(r => r.id)
+  if (friendCommentIds.length > 0) {
+    const fph = friendCommentIds.map(() => '?').join(',')
+    await run(db, `UPDATE friend_request_comments SET parent_id = NULL WHERE parent_id IN (${fph})`, friendCommentIds)
+    await run(db, `DELETE FROM friend_request_comments WHERE id IN (${fph})`, friendCommentIds)
+  }
+  // 好友申请报告（reporter/resolved NO ACTION；request_id 外键指向 friend_requests，需在删申请前先清）
+  await run(db, 'DELETE FROM friend_request_reports WHERE reporter_id = ? OR resolved_by = ?', [id, id])
+  // 好友申请本体（friend_requests.user_id -> users CASCADE，剩下由 CASCADE 兜底）
+  await run(db, 'DELETE FROM friend_requests WHERE user_id = ?', [id])
   // 积分/经验
   await run(db, 'DELETE FROM points WHERE user_id = ?', [id])
   await run(db, 'DELETE FROM exp_logs WHERE user_id = ?', [id])
@@ -269,8 +327,8 @@ admin.delete('/users/:id', adminMiddleware, async (c) => {
   await run(db, 'DELETE FROM captcha_api_keys WHERE owner_id = ?', [id])
   await run(db, 'DELETE FROM ks_channels WHERE owner_id = ?', [id])
   await run(db, 'DELETE FROM ks_sub_keys WHERE owner_id = ?', [id])
-  // 举报（含举报者）
-  await run(db, 'DELETE FROM reports WHERE user_id = ? OR reporter_id = ?', [id, id])
+  // 举报（该用户作为举报者；resolved_by 在下方统一处理）
+  await run(db, 'DELETE FROM reports WHERE reporter_id = ?', [id])
   // 邀请码/JPush/QR登录/公告互动/心跳/里程碑/Wiki评论
   await run(db, 'DELETE FROM invite_codes WHERE creator_id = ? OR used_by = ?', [id, id])
   await run(db, 'DELETE FROM jpush_registrations WHERE user_id = ?', [id])
@@ -280,6 +338,17 @@ admin.delete('/users/:id', adminMiddleware, async (c) => {
   await run(db, 'DELETE FROM lan_heartbeats WHERE user_id = ?', [id])
   await run(db, 'DELETE FROM markers WHERE user_id = ?', [id])
   await run(db, 'DELETE FROM wiki_inline_comments WHERE author_id = ?', [id])
+  // IP 追踪记录（ip_tracking_rules.user_id、ip_tracking_events.user_id、ip_bans.source_user_id
+  // 均指向 users 无 CASCADE，须在删用户前清理；封禁表还引用了创建者）
+  await run(db, 'DELETE FROM ip_tracking_rules WHERE user_id = ? OR created_by = ?', [id, id])
+  await run(db, 'DELETE FROM ip_tracking_events WHERE user_id = ?', [id])
+  await run(db, 'DELETE FROM ip_bans WHERE source_user_id = ? OR created_by = ?', [id, id])
+  // Wiki 内容与条款（author_id / created_by 指向 users 且 no CASCADE，保留内容、置空归属）
+  await run(db, 'UPDATE wiki_pages SET author_id = NULL WHERE author_id = ?', [id])
+  await run(db, 'UPDATE page_versions SET author_id = NULL WHERE author_id = ?', [id])
+  await run(db, 'UPDATE terms SET created_by = NULL WHERE created_by = ?', [id])
+  // 其他用户的举报记录中该用户作为处理人（resolved_by）的引用
+  await run(db, 'UPDATE reports SET resolved_by = NULL WHERE resolved_by = ?', [id])
   // 验证码记录
   await run(db, 'DELETE FROM email_verifications WHERE user_id = ?', [id])
   // 最后删除用户
@@ -438,19 +507,25 @@ admin.post('/posts/:id/pin', adminMiddleware, async (c) => {
 admin.delete('/posts/:id', adminMiddleware, async (c) => {
   const id = parseInt(c.req.param('id') || '')
 
-  const post = await queryOne<{ id: number }>(c.env.abdl_space_db, 'SELECT id FROM posts WHERE id = ?', [id])
+  const db = c.env.abdl_space_db
+  const post = await queryOne<{ id: number }>(db, 'SELECT id FROM posts WHERE id = ?', [id])
   if (!post) return c.json({ error: 'Post not found' }, 404)
 
-  // Clean up related data first
-  await run(c.env.abdl_space_db, "DELETE FROM likes WHERE target_type = 'post' AND target_id = ?", [id])
-  await run(c.env.abdl_space_db, 'DELETE FROM post_images WHERE post_id = ?', [id])
-  // Clean up comment likes
-  const comments = await query<{ id: number }>(c.env.abdl_space_db, 'SELECT id FROM post_comments WHERE post_id = ?', [id])
-  for (const cmt of comments) {
-    await run(c.env.abdl_space_db, "DELETE FROM likes WHERE target_type = 'comment' AND target_id = ?", [cmt.id])
-  }
-  await run(c.env.abdl_space_db, 'DELETE FROM post_comments WHERE post_id = ?', [id])
-  await run(c.env.abdl_space_db, 'DELETE FROM posts WHERE id = ?', [id])
+  // 浏览记录：post_views.post_id -> posts 无 ON DELETE CASCADE，删帖前必须清
+  await run(db, 'DELETE FROM post_views WHERE post_id = ?', [id])
+  // 帖子点赞/图片
+  await run(db, "DELETE FROM likes WHERE target_type = 'post' AND target_id = ?", [id])
+  await run(db, 'DELETE FROM post_images WHERE post_id = ?', [id])
+  // 评论树：此帖的评论 + 所有引用它们的回复（含跨帖嵌套），先断链再删
+  const comments = await query<{ id: number }>(db, `WITH RECURSIVE subtree(id) AS (
+    SELECT id FROM post_comments WHERE post_id = ?
+    UNION
+    SELECT c.id FROM post_comments c JOIN subtree s ON c.parent_id = s.id
+  )
+  SELECT id FROM subtree`, [id])
+  await deleteCommentTree(db, comments.map(r => r.id))
+  // 转发/投票：post_shares、polls 对 posts 均为 ON DELETE CASCADE，随 posts 删除自动清理
+  await run(db, 'DELETE FROM posts WHERE id = ?', [id])
   return c.json({ message: '已删除' })
 })
 
