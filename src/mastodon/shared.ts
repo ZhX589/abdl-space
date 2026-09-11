@@ -116,6 +116,7 @@ function fallbackInstance(): MastodonInstance {
     rules: [],
     stats: { user_count: 0, status_count: 0, domain_count: 1 },
     api_versions: { mastodon: 1 },
+    capabilities: { sponsors: true },
   }
 }
 
@@ -173,6 +174,8 @@ export async function buildInstance(db: D1Database, kv?: KVNamespace): Promise<M
       domain_count: 1,
     },
     api_versions: { mastodon: 1 },
+    // 赞助者能力声明：客户端据此判断当前服务器支持赞助者接口。
+    capabilities: { sponsors: true },
   }
 
   cacheSet(cacheKey, instance, INSTANCE_CACHE_TTL_MS)

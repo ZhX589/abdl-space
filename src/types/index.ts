@@ -348,6 +348,13 @@ export interface UpdateUserRequest {
 export interface Env {
   abdl_space_db: D1Database
   JWT_SECRET: string
+  // 赞助者兑换码和爱发电凭据仅通过 Worker secrets 配置。
+  SPONSOR_CODE_KEY?: string
+  AFDIAN_USER_ID?: string
+  AFDIAN_API_TOKEN?: string
+  // 公开接口的库存完整性/追加语义经人工核实后才设置为精确的 "true"。
+  AFDIAN_STOCK_POOL_VERIFIED?: string
+  AFDIAN_STOCK_APPEND_VERIFIED?: string
   FRONTEND_ORIGIN?: string
   // Durable Objects
   USER_PRESENCE: DurableObjectNamespace
@@ -402,6 +409,45 @@ export interface Env {
   BAIDU_MAP_IP_AK?: string
   BAIDU_MAP_IP_SK?: string
 }
+
+/** Backend-configured sponsor catalog; prices use minor currency units. */
+export interface SponsorPlan {
+  id: string; version: number; name: string; description: string; price_minor: number; currency: 'CNY'
+  duration_unit: 'day' | 'month' | 'permanent'; duration_count: number; purchase_url: string
+  afdian_plan_id: string; afdian_sku_id: string; enabled: boolean; sort_order: number
+}
+/** Supported sponsor benefit, not a promise of future fulfillment. */
+export interface SponsorBenefit {
+  id: string; title: string; description: string; status: 'automatic' | 'available' | 'coming_soon'
+  action: 'none' | 'color' | 'original' | 'claim'; sort_order: number
+}
+/** Server-selected accessible username palette. */
+export interface SponsorColor { key: string; name: string; light: string; dark: string; permanent_only: boolean }
+/** Versioned singleton sponsor configuration. */
+export interface SponsorConfig {
+  enabled: boolean; version: number; center_title: string; free_daily_limit: number; sponsor_daily_limit: number
+  timezone: 'Asia/Shanghai'; notice_version: number; notice_title: string; notice_body: string
+  exhausted_title: string; exhausted_body: string; sponsor_exhausted_body: string; purchase_title: string
+  purchase_steps: string[]; minimum_read_seconds: number; default_color_key: string
+  colors: SponsorColor[]; benefits: SponsorBenefit[]
+}
+/** Private sponsor identity, completely independent from administrative role. */
+export interface SponsorIdentity {
+  active: boolean; permanent: boolean; expires_at: number | null; plan_name: string | null
+  color_key: string | null; color_light: string | null; color_dark: string | null
+}
+/** Public, minimal sponsor appearance projection. */
+export interface PublicSponsor {
+  active: boolean; permanent: boolean; valid_until: number | null; color_light: string | null; color_dark: string | null
+}
+/** Shanghai-day original image usage. */
+export interface SponsorQuota { limit: number; used: number; remaining: number; resets_at: number; day_key: string }
+/** Private sponsor center state. */
+export interface SponsorMe {
+  sponsor: SponsorIdentity; quota: SponsorQuota; notice_required: boolean; config_version: number; claimed_benefit_ids: string[]
+}
+/** Code listing never contains a redeemable code. */
+export type SponsorCodeState = 'active' | 'disabled' | 'expired' | 'redeemed'
 
 /** JWT payload 结构 */
 export interface JWTPayload {

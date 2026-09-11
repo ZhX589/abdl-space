@@ -166,4 +166,5 @@ export interface MastodonInstance {
   contact: { email: string | null; account: MastodonAccount | null }
   rules: { id: string; text: string; hint: string }[]
   api_versions?: { [key: string]: number }
+  capabilities?: { sponsors: boolean }
 }

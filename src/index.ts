@@ -57,6 +57,10 @@ import mastodon from './mastodon/routes.ts'
 import mastodonV2 from './mastodon/v2.ts'
 import mastodonPush from './mastodon/push.ts'
 import mastodonAbdl from './mastodon/abdl.ts'
+import sponsors from './routes/sponsors.ts'
+import adminSponsorStock from './routes/admin-sponsor-stock.ts'
+import adminSponsors from './routes/admin-sponsors.ts'
+import { sponsorAccountProjectionMiddleware } from './lib/sponsors.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
@@ -64,6 +68,10 @@ const app = new Hono<AppType>()
 
 // 必须早于所有路由执行，确保 Web、移动端和直连 API 共用同一封禁策略。
 app.use('*', ipSecurityMiddleware)
+
+// 赞助者公开外观（active/permanent/颜色）注入所有 account 形状的 JSON 响应；
+// 内部失败时静默回退普通外观，不影响既有接口可用性。
+app.use('*', sponsorAccountProjectionMiddleware)
 
 app.use('*', async (c, next) => {
   // Handle /@username routes before CORS
@@ -257,6 +265,11 @@ app.route('/api/v1/uploads', uploads)
 app.route('/api/v1/novels/private', novelPrivate)
 app.route('/api/v1/novels/authoring', novelAuthoring)
 app.route('/api/v1/novels/store', novelStore)
+// 赞助者用户接口与 v1 路由同级（/api/v1/sponsors/*）
+app.route('/api/v1/sponsors', sponsors)
+// 库存管理挂载在核心 /api/admin/sponsors 之前，避免核心路由的中间件先匹配。
+app.route('/api/admin/sponsors/stock', adminSponsorStock)
+app.route('/api/admin/sponsors', adminSponsors)
 app.route('/api/v1', mastodon)
 app.route('/api/v1/push', mastodonPush)
 app.route('/api/v1/abdl', mastodonAbdl)
