@@ -5,7 +5,9 @@ import test from 'node:test'
 import { Hono } from 'hono'
 import { signJWT } from '../lib/auth.ts'
 import novelAuthoring from './novel-authoring.ts'
+import novelAuthoringV2 from './novel-authoring-v2.ts'
 import novelStore from './novel-store.ts'
+import novelSquare from './novel-square.ts'
 
 const jwtSecret = 'novel-authoring-test-secret'
 
@@ -20,7 +22,8 @@ function createDatabase() {
 	database.exec(readFileSync(new URL('../../migrations/0054_novel_review_pipeline.sql', import.meta.url), 'utf8'))
 	database.exec(readFileSync(new URL('../../migrations/0055_novel_publish.sql', import.meta.url), 'utf8'))
 	database.exec(readFileSync(new URL('../../migrations/0056_novel_appeal_adjudication.sql', import.meta.url), 'utf8'))
-	database.exec(readFileSync(new URL('../../migrations/0057_novel_reports.sql', import.meta.url), 'utf8'))
+		database.exec(readFileSync(new URL('../../migrations/0057_novel_reports.sql', import.meta.url), 'utf8'))
+		database.exec(readFileSync(new URL('../../migrations/0064_novel_authoring_v2.sql', import.meta.url), 'utf8'))
 	const prepare = (sql: string) => ({
 		bind: (...params: unknown[]) => ({
 			_sql: sql,
@@ -56,8 +59,10 @@ function createDatabase() {
 
 function createApp() {
 	const app = new Hono()
-	app.route('/api/v1/novels/authoring', novelAuthoring)
-	app.route('/api/v1/novels/store', novelStore)
+		app.route('/api/v1/novels/authoring/v2', novelAuthoringV2)
+		app.route('/api/v1/novels/authoring', novelAuthoring)
+		app.route('/api/v1/novels/square', novelSquare)
+		app.route('/api/v1/novels/store', novelStore)
 	return app
 }
 
@@ -949,6 +954,96 @@ test('an administrator can reject an appeal but cannot decide an unclaimed appea
 	assert.equal(revisionRow.status, 'rejected')
 	const actions = db.database.prepare(`SELECT action FROM novel_review_audit WHERE revision_id = ? ORDER BY id`).all(revision.id) as { action: string }[]
 	assert.ok(actions.some(row => row.action === 'human_reject'))
+})
+
+async function v2Request(db: ReturnType<typeof createDatabase>, sub: number, method: string, path: string, body?: unknown, key?: string) {
+	return createApp().request(`/api/v1/novels/authoring/v2${path}`, {
+		method,
+		headers: { Authorization: await bearer(sub), ...(body === undefined ? {} : { 'Content-Type': 'application/json' }), ...(key ? { 'Idempotency-Key': key } : {}) },
+		body: body === undefined ? undefined : JSON.stringify(body),
+	}, { abdl_space_db: db, JWT_SECRET: jwtSecret } as never)
+}
+async function bodyHash(value: string) {
+	return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))), byte => byte.toString(16).padStart(2, '0')).join('')
+}
+async function syncV2(db: ReturnType<typeof createDatabase>, sub: number, body: string, title = '本地作品') {
+	const clientWorkId = 'work-local'
+	const start = await v2Request(db, sub, 'POST', '/sync/start', { client_work_id: clientWorkId, title, description: '本地简介', category: 'fiction', declared_rating: 'all_ages', content_warning: '' }, crypto.randomUUID())
+	assert.equal(start.status, 201, await start.clone().text())
+	const { sync_id } = await start.json() as { sync_id: string }
+	const part = await v2Request(db, sub, 'PUT', `/sync/${sync_id}/parts/0`, { client_work_id: clientWorkId, volumes: [{ client_volume_id: 'volume-a', title: '正文', sort_order: 1024 }], chapters: [{ client_chapter_id: 'chapter-a', client_volume_id: 'volume-a', title: '第一章', sort_order: 1024, generation: 1, body, body_sha256: await bodyHash(body) }] }, crypto.randomUUID())
+	assert.equal(part.status, 200, await part.clone().text())
+	const finish = await v2Request(db, sub, 'POST', `/sync/${sync_id}/finalize`, { client_work_id: clientWorkId }, crypto.randomUUID())
+	assert.equal(finish.status, 200, await finish.clone().text())
+	return { clientWorkId, ...(await finish.json() as { manifest_version: number }) }
+}
+
+test('authoring v2 syncs a large chapter and exposes only its manifest hash', async () => {
+	const db = createDatabase(); insertUser(db, 1, 72 * 60 * 60 + 60, true)
+	const body = '长篇正文。'.repeat(40_000)
+	const synced = await syncV2(db, 1, body)
+	const response = await v2Request(db, 1, 'GET', `/works/${synced.clientWorkId}/manifest`)
+	assert.equal(response.status, 200)
+	const manifest = await response.json() as { chapters: Array<{ body_length: number, body_sha256: string }> }
+	assert.equal(manifest.chapters[0].body_length, body.length)
+	assert.equal(manifest.chapters[0].body_sha256, await bodyHash(body))
+	assert.ok(!JSON.stringify(manifest).includes(body.slice(0, 100)))
+})
+
+test('authoring v2 idempotency rejects changed metadata and never creates a second work', async () => {
+	const db = createDatabase(); insertUser(db, 1, 72 * 60 * 60 + 60, true)
+	const key = crypto.randomUUID(), payload = { client_work_id: 'stable-work', title: '标题', description: '', category: 'fiction', declared_rating: 'all_ages', content_warning: '' }
+	const first = await v2Request(db, 1, 'POST', '/sync/start', payload, key)
+	const replay = await v2Request(db, 1, 'POST', '/sync/start', payload, key)
+	const conflict = await v2Request(db, 1, 'POST', '/sync/start', { ...payload, title: '另一标题' }, key)
+	assert.equal(first.status, 201); assert.equal(replay.status, 200); assert.deepEqual(await replay.json(), await first.json()); assert.equal(conflict.status, 409)
+	assert.equal((db.database.prepare('SELECT COUNT(*) c FROM novels').get() as { c: number }).c, 1)
+	assert.equal((db.database.prepare('SELECT COUNT(*) c FROM novel_v2_workspaces').get() as { c: number }).c, 1)
+})
+
+test('authoring v2 incomplete replacement never changes the active manifest', async () => {
+	const db = createDatabase(); insertUser(db, 1, 72 * 60 * 60 + 60, true)
+	const synced = await syncV2(db, 1, '首版正文')
+	const start = await v2Request(db, 1, 'POST', '/sync/start', { client_work_id: synced.clientWorkId, title: '修改中', description: '', category: 'fiction', declared_rating: 'all_ages', content_warning: '' }, crypto.randomUUID())
+	assert.equal(start.status, 201)
+	assert.equal((db.database.prepare('SELECT body FROM novel_v2_chapters').get() as { body: string }).body, '首版正文')
+})
+
+test('authoring v2 publishes an atomic immutable release to the square', async () => {
+	const db = createDatabase(); insertUser(db, 1, 72 * 60 * 60 + 60, true)
+	const synced = await syncV2(db, 1, '公开正文')
+	const release = await v2Request(db, 1, 'POST', `/works/${synced.clientWorkId}/releases`, { manifest_version: synced.manifest_version }, crypto.randomUUID())
+	assert.equal(release.status, 201, await release.clone().text())
+	const published = await release.json() as { work_id: string, release_id: string }
+	const detail = await createApp().request(`/api/v1/novels/square/works/${published.work_id}`, undefined, { abdl_space_db: db, JWT_SECRET: jwtSecret } as never)
+	assert.equal(detail.status, 200)
+	const publicWork = await detail.json() as { release_id: string, volumes: Array<{ chapters: Array<{ id: string }> }> }
+	assert.equal(publicWork.release_id, published.release_id)
+	const chapter = await createApp().request(`/api/v1/novels/square/works/${published.work_id}/chapters/chapter-a?release_id=${published.release_id}`, undefined, { abdl_space_db: db, JWT_SECRET: jwtSecret } as never)
+	assert.equal((await chapter.json() as { body: string }).body, '公开正文')
+})
+
+test('authoring v2 replaces current release but preserves the old release snapshot', async () => {
+	const db = createDatabase(); insertUser(db, 1, 72 * 60 * 60 + 60, true)
+	let synced = await syncV2(db, 1, '版本一')
+	let response = await v2Request(db, 1, 'POST', `/works/${synced.clientWorkId}/releases`, { manifest_version: synced.manifest_version }, crypto.randomUUID())
+	const first = await response.json() as { work_id: string, release_id: string }
+	synced = await syncV2(db, 1, '版本二')
+	response = await v2Request(db, 1, 'POST', `/works/${synced.clientWorkId}/releases`, { manifest_version: synced.manifest_version }, crypto.randomUUID())
+	const second = await response.json() as { release_id: string }
+	assert.notEqual(first.release_id, second.release_id)
+	assert.equal((db.database.prepare('SELECT body FROM novel_v2_release_chapters WHERE release_id=?').get(first.release_id) as { body: string }).body, '版本一')
+	const stale = await createApp().request(`/api/v1/novels/square/works/${first.work_id}/chapters/chapter-a?release_id=${first.release_id}`, undefined, { abdl_space_db: db, JWT_SECRET: jwtSecret } as never)
+	assert.equal(stale.status, 409)
+})
+
+test('authoring v2 rejects stale manifest and lost author eligibility without publishing', async () => {
+	const db = createDatabase(); insertUser(db, 1, 72 * 60 * 60 + 60, true)
+	const synced = await syncV2(db, 1, '草稿')
+	assert.equal((await v2Request(db, 1, 'POST', `/works/${synced.clientWorkId}/releases`, { manifest_version: 99 }, crypto.randomUUID())).status, 409)
+	db.database.prepare('DELETE FROM posts WHERE user_id=1').run()
+	assert.equal((await v2Request(db, 1, 'POST', `/works/${synced.clientWorkId}/releases`, { manifest_version: synced.manifest_version }, crypto.randomUUID())).status, 403)
+	assert.equal((db.database.prepare('SELECT COUNT(*) c FROM novel_v2_current_releases').get() as { c: number }).c, 0)
 })
 
 test('appeal claim and decision are owner-fenced and idempotent', async () => {
