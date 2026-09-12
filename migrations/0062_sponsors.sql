@@ -125,7 +125,7 @@ SELECT id,1,1,sort_order,json_object('id',id,'version',1,'name',name,'descriptio
 FROM (
   SELECT 'week' id,'周赞助者' name,'7 天赞助者身份' description,190 price,'day' unit,7 duration,10 sort_order,'6d5b2998adcf11f1982752540025c377' sku
   UNION ALL SELECT 'month','月赞助者','1 个自然月赞助者身份',590,'month',1,20,'6d62f682adcf11f1b25152540025c377'
-  UNION ALL SELECT 'quarter','季度赞助者','3 个自然月赞助者身份',1490,'month',3,30,'6d6ae388adcf11f18ab552540025c377'
+  UNION ALL SELECT 'quarter','季赞助者','3 个自然月赞助者身份',1490,'month',3,30,'6d6ae388adcf11f18ab552540025c377'
   UNION ALL SELECT 'year','年赞助者','12 个自然月赞助者身份',4900,'month',12,40,'6d72faf0adcf11f186ae52540025c377'
   UNION ALL SELECT 'permanent','永久赞助者','永久赞助者身份',9900,'permanent',0,50,'6d7a8dd8adcf11f18eea52540025c377'
 );
