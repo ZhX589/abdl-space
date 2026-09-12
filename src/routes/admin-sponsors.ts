@@ -4,7 +4,7 @@ import type { SponsorAppType } from '../lib/sponsors.ts'
 import {
   getSponsorConfig, getSponsorMe, updateSponsorConfig, saveSponsorPlan,
   mutateSponsorUser, createSponsorCodeBatch, exportSponsorCodeBatch, sponsorAdminMiddleware,
-  sponsorErrorResponse, SponsorError, sponsorObject, sponsorInteger, sponsorText,
+  sponsorErrorResponse, SponsorError, sponsorObject, sponsorInteger, sponsorText, sponsorOperationId,
 } from '../lib/sponsors.ts'
 import { requestBody, sponsorPagination } from './sponsors.ts'
 
@@ -25,7 +25,6 @@ adminSponsors.get('/config', sponsorAdminMiddleware, async c => c.json(await get
 adminSponsors.put('/config', sponsorAdminMiddleware, async c => {
   const body = await requestBody(c.req.raw)
   const config = await updateSponsorConfig(c.env, c.get('user').sub, body)
-  await c.env.abdl_space_db // config transaction already audited
   return c.json(config)
 })
 
@@ -46,12 +45,12 @@ adminSponsors.put('/plans/:id', sponsorAdminMiddleware, async c => {
 
 adminSponsors.get('/users', sponsorAdminMiddleware, async c => {
   const { limit, offset } = sponsorPagination(c.req.query())
-  const q = (c.req.query('q') ?? '').trim()
+  const q = sponsorText(c.req.query('q') ?? '', '搜索条件', 100, true)
   const params: (string | number)[] = []
   let where = ''
   if (q) {
-    where = 'WHERE u.username LIKE ? OR CAST(u.id AS TEXT) = ?'
-    params.push(`%${q.replace(/[%_]/g, v => `\\${v}`)}%`, q)
+    where = "WHERE u.username LIKE ? ESCAPE '\\' OR CAST(u.id AS TEXT) = ?"
+    params.push(`%${q.replace(/[\\%_]/g, v => `\\${v}`)}%`, q)
   }
   const rows = await c.env.abdl_space_db.prepare(
     `SELECT u.id, u.username, u.avatar,
@@ -101,7 +100,7 @@ adminSponsors.get('/codes', sponsorAdminMiddleware, async c => {
   const planId = c.req.query('plan_id') ? identifier(c.req.query('plan_id')) : null
   const state = c.req.query('state') ?? null
   if (state && !['active', 'disabled', 'expired', 'redeemed'].includes(state)) throw new SponsorError('invalid_request', '状态筛选不正确')
-  const q = (c.req.query('q') ?? '').trim()
+  const q = sponsorText(c.req.query('q') ?? '', '搜索条件', 100, true)
   const params: (string | number)[] = []
   const conditions = ['1=1']
   if (planId) { conditions.push('c.plan_id=?'); params.push(planId) }
@@ -122,10 +121,9 @@ adminSponsors.get('/codes', sponsorAdminMiddleware, async c => {
     params.push(await sponsorHash(q.replace(/\s/g, '').toUpperCase()))
   }
   const rows = await c.env.abdl_space_db.prepare(
-    `SELECT c.id, c.batch_id, c.plan_id, p.plan_json->>'$.name' AS plan_name, c.masked_code,
+    `SELECT c.id, c.batch_id, c.plan_id, c.snapshot_json->>'$.name' AS plan_name, c.masked_code,
        c.disabled, c.expires_at, c.redeemed_at, c.redeemed_by, u.username AS redeemed_by_username
      FROM sponsor_codes c
-     JOIN sponsor_plans p ON p.id=c.plan_id
      LEFT JOIN users u ON u.id=c.redeemed_by
      WHERE ${conditions.join(' AND ')}
      ORDER BY c.created_at DESC, c.id DESC LIMIT ? OFFSET ?`
@@ -151,7 +149,7 @@ adminSponsors.post('/code-batches', sponsorAdminMiddleware, async c => {
   const planId = identifier(b.plan_id)
   const count = sponsorInteger(b.count, 1, 200, '数量')
   const expiresAt = b.expires_at == null ? null : sponsorInteger(b.expires_at, 1, 253402300799, '过期时间')
-  const operationId = typeof b.operation_id === 'string' ? b.operation_id : crypto.randomUUID()
+  const operationId = sponsorOperationId(b.operation_id)
   const reason = sponsorText(b.reason, '操作原因', 500)
   const created = await createSponsorCodeBatch(c.env, { planId, count, expiresAt, operationId, reason, actorId: String(c.get('user').sub), source: 'admin' })
   return c.json(created, 201)
@@ -159,12 +157,13 @@ adminSponsors.post('/code-batches', sponsorAdminMiddleware, async c => {
 
 adminSponsors.post('/code-batches/:id/export', sponsorAdminMiddleware, async c => {
   const body = await requestBody(c.req.raw)
-  const reason = sponsorText(sponsorObject(body).reason, '操作原因', 500)
   const batchId = identifier(c.req.param('id'))
+  const suffix = `（批次 ${batchId}）`
+  const reason = sponsorText(sponsorObject(body).reason, '操作原因', 500 - suffix.length)
+  const codes = await exportSponsorCodeBatch(c.env, batchId)
   await c.env.abdl_space_db.prepare(
     "INSERT INTO sponsor_audit(id,actor_id,user_id,action,reason) VALUES(?,?,NULL,'code_batch_export',?)"
-  ).bind(crypto.randomUUID(), String(c.get('user').sub), `${reason}（批次 ${batchId}）`).run()
-  const codes = await exportSponsorCodeBatch(c.env, batchId)
+  ).bind(crypto.randomUUID(), String(c.get('user').sub), `${reason}${suffix}`).run()
   return c.json({ id: batchId, codes })
 })
 
@@ -173,14 +172,16 @@ adminSponsors.post('/codes/:id/state', sponsorAdminMiddleware, async c => {
   const disabled = b.disabled === true
   if (typeof b.disabled !== 'boolean') throw new SponsorError('invalid_request', 'disabled 必须为布尔值')
   const reason = sponsorText(b.reason, '操作原因', 500)
-  const result = await c.env.abdl_space_db.prepare(
-    'UPDATE sponsor_codes SET disabled=? WHERE id=? AND redeemed_at IS NULL'
-  ).bind(disabled ? 1 : 0, c.req.param('id')).run()
+  const id = identifier(c.req.param('id'))
+  const [result] = await c.env.abdl_space_db.batch([
+    c.env.abdl_space_db.prepare('UPDATE sponsor_codes SET disabled=? WHERE id=? AND redeemed_at IS NULL').bind(Number(disabled), id),
+    c.env.abdl_space_db.prepare("INSERT INTO sponsor_audit(id,actor_id,user_id,action,reason) SELECT ?,?,NULL,?,? WHERE changes()=1")
+      .bind(crypto.randomUUID(), String(c.get('user').sub), disabled ? 'code_disable' : 'code_enable', reason),
+  ])
   if (result.meta.changes !== 1) throw new SponsorError('code_unavailable', '兑换码不存在或已被使用', 409)
-  await c.env.abdl_space_db.prepare(
-    "INSERT INTO sponsor_audit(id,actor_id,user_id,action,reason) VALUES(?,?,NULL,?,?)"
-  ).bind(crypto.randomUUID(), String(c.get('user').sub), disabled ? 'code_disable' : 'code_enable', reason).run()
-  return c.json({ id: c.req.param('id'), state: disabled ? 'disabled' : 'active' })
+  const code = await c.env.abdl_space_db.prepare(`SELECT CASE WHEN redeemed_at IS NOT NULL THEN 'redeemed' WHEN disabled=1 THEN 'disabled'
+    WHEN expires_at IS NOT NULL AND expires_at<=unixepoch() THEN 'expired' ELSE 'active' END AS state FROM sponsor_codes WHERE id=?`).bind(id).first<{ state: string }>()
+  return c.json({ id, state: code!.state })
 })
 
 adminSponsors.get('/audit', sponsorAdminMiddleware, async c => {

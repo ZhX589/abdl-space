@@ -62,7 +62,7 @@ function poolLines(value: unknown): string[] {
 	if (typeof value !== 'string') throw new AfdianError('afdian_pool_shape')
 	// Afdian adds a newline when appending. Empty separator lines are not codes.
 	const lines = value.split(/\r?\n/).filter(line => line !== '')
-		// eslint-disable-next-line no-control-regex -- 码池行必须拒绝换行以外的控制字符
+	// eslint-disable-next-line no-control-regex -- 码池行必须拒绝换行以外的控制字符
 	if (lines.length > 10000 || lines.some(line => line.length > 512 || line.trim() !== line || /[\r\x00-\x1f]/.test(line))) throw new AfdianError('afdian_pool_shape')
 	if (new Set(lines).size !== lines.length) throw new AfdianError('afdian_pool_duplicates')
 	return lines
@@ -76,7 +76,7 @@ async function boundedJson(response: Response, maxBytes: number): Promise<unknow
 	}
 	if (!response.body) throw new AfdianError('afdian_empty_response')
 	const reader = response.body.getReader()
-	const decoder = new TextDecoder('utf-8', { fatal: true })
+	const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false })
 	let size = 0
 	let text = ''
 	try {
@@ -141,7 +141,7 @@ export class AfdianClient {
 			if (error instanceof AfdianError) throw error
 			throw new AfdianError('afdian_transport_unknown')
 		} finally {
-			clearTimeout(timer)
+			if (timer !== undefined) clearTimeout(timer)
 			controller.abort()
 		}
 	}

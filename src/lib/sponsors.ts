@@ -1,5 +1,6 @@
 import type { Context, Next } from 'hono'
-import { adminMiddleware, authMiddleware } from '../middleware/auth.ts'
+import { assertSessionNotStale } from '../middleware/auth.ts'
+import { mastodonAuthDetails } from '../mastodon/shared.ts'
 import type { Env, JWTPayload, PublicSponsor, SponsorConfig, SponsorMe, SponsorPlan } from '../types/index.ts'
 
 export type SponsorAppType = { Bindings: Env; Variables: { user: JWTPayload } }
@@ -102,6 +103,7 @@ export function validateSponsorConfig(input: unknown): SponsorConfig {
   unique(colors.map(v => v.key)); unique(benefits.map(v => v.id))
   const defaultColor = identifier(c.default_color_key)
   if (!colors.some(v => v.key === defaultColor && !v.permanent_only)) throw new SponsorError('invalid_request', '默认颜色必须允许普通赞助者使用')
+  if (!colors.some(v => v.permanent_only)) throw new SponsorError('invalid_request', '必须至少配置一种永久赞助者专属颜色')
   const free = sponsorInteger(c.free_daily_limit, 0, 100000)
   const paid = sponsorInteger(c.sponsor_daily_limit, free, 100000)
   return { enabled: boolean(c.enabled), version: sponsorInteger(c.version, 1, 2147483647), center_title: text('center_title', 100), free_daily_limit: free, sponsor_daily_limit: paid, timezone: 'Asia/Shanghai', notice_version: sponsorInteger(c.notice_version, 1, 2147483647), notice_title: text('notice_title', 100), notice_body: template('notice_body'), exhausted_title: text('exhausted_title', 100), exhausted_body: template('exhausted_body'), sponsor_exhausted_body: template('sponsor_exhausted_body'), purchase_title: text('purchase_title', 100), purchase_steps: c.purchase_steps.map(v => sponsorText(v, '购买步骤', 1000)), minimum_read_seconds: sponsorInteger(c.minimum_read_seconds, 5, 300), default_color_key: defaultColor, colors, benefits }
@@ -387,18 +389,31 @@ export async function enforceSponsorRateLimit(env: SponsorEnv, bucket: string, l
   if (!result || result.count > limit) throw new SponsorError('rate_limited', '操作过于频繁，请稍后重试', 429)
 }
 
+async function authenticateSponsor(c: Context<SponsorAppType>, admin: boolean): Promise<void> {
+  // Adapt the existing scope-aware Mastodon authentication for first-party cookie sessions.
+  // An explicit invalid bearer never falls back to a more privileged cookie.
+  const cookieToken = c.req.header('cookie')?.match(/(?:^|;\s*)token=([^;]+)/)?.[1]
+  const authorization = c.req.header('authorization') ?? (cookieToken ? `Bearer ${cookieToken}` : undefined)
+  const auth = await mastodonAuthDetails({ env: c.env, req: { header: name => name.toLowerCase() === 'authorization' ? authorization : c.req.header(name) } })
+  if (!auth || (auth.tokenType === 'jwt' && await assertSessionNotStale(auth.user, c.env.abdl_space_db))) throw new SponsorError('unauthenticated', '请先登录', 401)
+  const write = !['GET', 'HEAD', 'OPTIONS'].includes(c.req.method)
+  const requiredScope = write ? 'write' : 'read'
+  if (auth.tokenType === 'oauth' && !auth.scopes.includes(requiredScope)) throw new SponsorError('insufficient_scope', '授权范围不足', 403)
+  // Shared Mastodon auth caches profile rows; sponsor authorization always rechecks existence/role.
+  const current = await c.env.abdl_space_db.prepare('SELECT role FROM users WHERE id=?').bind(auth.user.sub).first<{ role: string }>()
+  if (!current) throw new SponsorError('unauthenticated', '请先登录', 401)
+  if (admin && current.role !== 'admin') throw new SponsorError('admin_required', '需要管理员权限', 403)
+  c.set('user', { ...auth.user, role: current.role })
+}
+
 /** Reusable admin guard for core and isolated stock routes. */
 export async function sponsorAdminMiddleware(c: Context<SponsorAppType>, next: Next): Promise<Response | void> {
   c.header('Cache-Control', 'private, no-store')
   try {
-    const response = await adminMiddleware(c, async () => {
-      assertSponsorWriteOrigin(c)
-      await enforceSponsorRateLimit(c.env, `admin:${c.get('user').sub}`, c.req.method === 'GET' ? 180 : 60)
-      await next()
-    })
-    if (response?.status === 401) return c.json({ error: '请先登录', code: 'unauthenticated' }, 401)
-    if (response?.status === 403) return c.json({ error: '需要管理员权限', code: 'admin_required' }, 403)
-    return response
+    await authenticateSponsor(c, true)
+    assertSponsorWriteOrigin(c)
+    await enforceSponsorRateLimit(c.env, `admin:${c.get('user').sub}`, c.req.method === 'GET' ? 180 : 60)
+    await next()
   } catch (error) { return sponsorErrorResponse(error, c) }
 }
 
@@ -406,15 +421,19 @@ export async function sponsorAdminMiddleware(c: Context<SponsorAppType>, next: N
 export async function sponsorAuthMiddleware(c: Context<SponsorAppType>, next: Next): Promise<Response | void> {
   c.header('Cache-Control', 'private, no-store')
   try {
-    const response = await authMiddleware(c, async () => {
-      assertSponsorWriteOrigin(c)
-      const sensitive = c.req.path.endsWith('/redeem')
-      await enforceSponsorRateLimit(c.env, `user:${c.get('user').sub}:${sensitive ? 'redeem' : 'core'}`, sensitive ? 10 : 180)
-      await next()
-    })
-    if (response?.status === 401) return c.json({ error: '请先登录', code: 'unauthenticated' }, 401)
-    return response
+    await authenticateSponsor(c, false)
+    assertSponsorWriteOrigin(c)
+    const sensitive = c.req.path.endsWith('/redeem')
+    await enforceSponsorRateLimit(c.env, `user:${c.get('user').sub}:${sensitive ? 'redeem' : 'core'}`, sensitive ? 10 : 180)
+    const ip = c.req.header('cf-connecting-ip')
+    if (sensitive && ip && ip.length <= 64) await enforceSponsorRateLimit(c.env, `redeem-ip:${await sponsorHash(ip)}`, 60)
+    await next()
   } catch (error) { return sponsorErrorResponse(error, c) }
+}
+
+/** Scheduled maintenance hook; current sponsor windows are at most 60 seconds. */
+export async function cleanupSponsorRateLimits(env: SponsorEnv): Promise<void> {
+  await env.abdl_space_db.prepare('DELETE FROM sponsor_rate_limits WHERE window_start < unixepoch()-86400').run()
 }
 
 /** Batch minimal public projections; missing migrations or unavailable appearance reads fail ordinary. */
@@ -434,17 +453,41 @@ export async function getPublicSponsors(env: SponsorEnv, userIds: number[]): Pro
   return result
 }
 
-/** Cover account/status/search/notification responses without changing roles or existing badges. */
+/** Cover bounded Mastodon account JSON only, without changing roles or existing badges. */
 export async function sponsorAccountProjectionMiddleware(c: Context<SponsorAppType>, next: Next): Promise<void> {
   await next()
-  if (!c.res.ok || !c.res.headers.get('content-type')?.includes('application/json')) return
-  const body: unknown = await c.res.clone().json()
+  if (!/^\/api\/v[12]\/(?:accounts|statuses|timelines|notifications|search|favourites|bookmarks|follow_requests|conversations|mutes|blocks|directory|suggestions|trends\/statuses)(?:\/|$)/.test(c.req.path)) return
+  const maximumBytes = 2 * 1024 * 1024
+  if (!c.res.ok || !c.res.headers.get('content-type')?.includes('application/json') || c.res.headers.has('content-encoding') || Number(c.res.headers.get('content-length')) > maximumBytes) return
+  const reader = c.res.clone().body?.getReader()
+  if (!reader) return
+  let body: unknown
+  try {
+    const decoder = new TextDecoder('utf-8', { fatal: true })
+    let bytes = 0
+    let text = ''
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) break
+      bytes += value.byteLength
+      if (bytes > maximumBytes) {
+        // A tee branch cancellation waits for the original stream; do not await it here.
+        void reader.cancel().catch(() => {})
+        return
+      }
+      text += decoder.decode(value, { stream: true })
+    }
+    body = JSON.parse(text + decoder.decode())
+  } catch {
+    void reader.cancel().catch(() => {})
+    return
+  }
   const accounts: Record<string, unknown>[] = []
   const collect = (value: unknown, depth: number): void => {
-    if (!value || typeof value !== 'object' || depth > 16) return
+    if (!value || typeof value !== 'object' || depth > 16 || accounts.length >= 2000) return
     if (Array.isArray(value)) { for (const item of value) collect(item, depth + 1); return }
     const object = value as Record<string, unknown>
-    if (typeof object.id === 'string' && typeof object.acct === 'string' && typeof object.username === 'string' && Array.isArray(object.roles)) accounts.push(object)
+    if (typeof object.id === 'string' && /^\d+$/.test(object.id) && typeof object.username === 'string' && object.acct === object.username && typeof object.url === 'string' && typeof object.avatar === 'string') accounts.push(object)
     for (const [key, child] of Object.entries(object)) if (key !== 'sponsor') collect(child, depth + 1)
   }
   collect(body, 0)
