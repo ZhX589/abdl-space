@@ -207,7 +207,10 @@ BEGIN
   UPDATE sponsor_memberships SET color_key=NEW.color_key,updated_at=NEW.created_at WHERE user_id=NEW.user_id AND NEW.kind='color';
   INSERT INTO sponsor_claims(user_id,benefit_id,operation_id) SELECT NEW.user_id,NEW.benefit_id,NEW.id WHERE NEW.kind='claim' ON CONFLICT(user_id,benefit_id) DO NOTHING;
   INSERT INTO sponsor_daily_usage(user_id,day_key,used,bonus)
-    SELECT NEW.user_id,NEW.day_key,CASE WHEN NEW.kind='original' THEN 1 ELSE 0 END,CASE WHEN NEW.kind='quota' THEN NEW.adjustment ELSE 0 END WHERE NEW.kind IN ('original','quota')
+    SELECT NEW.user_id,NEW.day_key,
+      CASE WHEN NEW.kind='original' THEN 1 ELSE 0 END,
+      CASE WHEN NEW.kind='quota' THEN COALESCE(NEW.adjustment,0) ELSE 0 END
+    WHERE NEW.kind IN ('original','quota')
     ON CONFLICT(user_id,day_key) DO UPDATE SET used=used+excluded.used,bonus=bonus+excluded.bonus;
   INSERT INTO sponsor_notice_acks(user_id,notice_version)
     SELECT NEW.user_id,json_extract(config_json,'$.notice_version') FROM sponsor_user_state WHERE user_id=NEW.user_id AND active=0 AND NEW.kind='original'
