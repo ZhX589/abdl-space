@@ -3,6 +3,8 @@ const DEFAULT_AVATAR = 'https://img.abdl-space.top/file/system/1781439303787_pla
 import type { D1Database, D1PreparedStatement } from '@cloudflare/workers-types'
 import type { Env, JWTPayload } from '../types/index.ts'
 import { query, queryOne, run } from '../lib/db.ts'
+import { cacheDelete, cacheDeletePrefix } from '../lib/ttl-cache.ts'
+import { kvCacheInvalidate } from '../lib/kv-cache.ts'
 import { adminMiddleware } from '../middleware/auth.ts'
 
 const IMGBED_URL = 'https://img.abdl-space.top'
@@ -730,6 +732,41 @@ admin.post('/posts/:id/pin', adminMiddleware, async (c) => {
   await run(c.env.abdl_space_db, 'UPDATE posts SET pinned = ? WHERE id = ?', [newPinned, id])
 
   return c.json({ pinned: !!newPinned })
+})
+
+/**
+ * PATCH /api/admin/posts/:id/nsfw — 显式设置帖子敏感状态
+ */
+admin.patch('/posts/:id/nsfw', adminMiddleware, async (c) => {
+  const id = Number(c.req.param('id'))
+  if (!Number.isInteger(id) || id <= 0) return c.json({ error: 'Invalid post id' }, 400)
+
+  const body = await c.req.json<{ has_nsfw?: unknown }>().catch(() => null)
+  if (!body || typeof body.has_nsfw !== 'boolean') {
+    return c.json({ error: 'has_nsfw must be a boolean' }, 400)
+  }
+
+  const db = c.env.abdl_space_db
+  const post = await queryOne<{ id: number }>(db, 'SELECT id FROM posts WHERE id = ?', [id])
+  if (!post) return c.json({ error: 'Post not found' }, 404)
+
+  const value = body.has_nsfw ? 1 : 0
+  const statements = [
+    db.prepare('UPDATE posts SET has_nsfw = ? WHERE id = ?').bind(value, id),
+    db.prepare('UPDATE post_images SET is_nsfw = ? WHERE post_id = ?').bind(value, id),
+  ]
+  const results = await db.batch(statements)
+  if (results.some(result => !result.success)) return c.json({ error: 'Database operation failed' }, 500)
+
+  cacheDeletePrefix('popular:')
+  const cacheKeys = ['trends:statuses:10', 'trends:statuses:20', 'trends:statuses:40']
+  for (const key of cacheKeys) cacheDelete(key)
+  await Promise.all([
+    ...cacheKeys.map(key => kvCacheInvalidate(c.env.NOTICE_KV, key)),
+    kvCacheInvalidate(c.env.NOTICE_KV, 'public-timeline:snapshot'),
+  ])
+
+  return c.json({ has_nsfw: body.has_nsfw })
 })
 
 /**

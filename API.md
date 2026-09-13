@@ -2056,6 +2056,15 @@ Cloudflare Turnstile 验证。
 
 - **响应 200**：`{ "pinned": true }`
 
+#### PATCH /api/admin/posts/:id/nsfw
+
+显式设置帖子敏感状态，并同步该帖全部图片的 `is_nsfw`。不修改 `edited_at`。
+
+- **请求 JSON**：`{ "has_nsfw": true }`（必须是 boolean）
+- **响应 200**：`{ "has_nsfw": true }`
+- **响应 400**：帖子 ID 非法或字段不是 boolean
+- **响应 404**：帖子不存在
+
 #### DELETE /api/admin/posts/:id
 
 删除帖子。

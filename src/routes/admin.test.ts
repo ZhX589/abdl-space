@@ -79,3 +79,68 @@ test('admin user deletion preserves a permanently monitored private object job',
 		database.close()
 	}
 })
+
+test('admin can explicitly set and clear post NSFW state with image synchronization', async () => {
+	const database = new DatabaseSync(':memory:')
+	database.exec('PRAGMA foreign_keys = ON;')
+	database.exec(readFileSync(new URL('../../schemas/schema.sql', import.meta.url), 'utf8'))
+	database.prepare(`INSERT INTO users (id, email, password_hash, username, role) VALUES
+		(1, 'admin@example.test', 'hash', 'admin', 'admin'), (2, 'user@example.test', 'hash', 'user', 'user')`).run()
+	database.prepare(`INSERT INTO posts (id, user_id, content, has_nsfw) VALUES
+		(10, 2, 'with image', 0), (11, 2, 'without image', 0)`).run()
+	database.prepare("INSERT INTO post_images (post_id, image_url, is_nsfw) VALUES (10, 'https://example.test/1.jpg', 0), (10, 'https://example.test/2.jpg', 0)").run()
+
+	function statement(sql: string, params: unknown[] = []) {
+		return {
+			bind(...bound: unknown[]) { return statement(sql, bound) },
+			async all() { return { success: true, results: database.prepare(sql).all(...params) } },
+			async first() { return database.prepare(sql).get(...params) ?? null },
+			async run() {
+				const result = database.prepare(sql).run(...params)
+				return { success: true, meta: { changes: Number(result.changes) } }
+			},
+		}
+	}
+	const db = {
+		prepare(sql: string) { return statement(sql) },
+		async batch(statements: { run: () => Promise<unknown> }[]) {
+			return Promise.all(statements.map(item => item.run()))
+		},
+	}
+	const jwtSecret = 'admin-nsfw-test-secret'
+	const token = await signJWT({ sub: 1, username: 'admin', email: 'admin@example.test', role: 'admin' }, jwtSecret)
+	const app = new Hono()
+	app.route('/api/admin', admin)
+	const bindings = { JWT_SECRET: jwtSecret, abdl_space_db: db } as never
+	const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
+
+	const invalidId = await app.request('/api/admin/posts/nope/nsfw', { method: 'PATCH', headers, body: JSON.stringify({ has_nsfw: true }) }, bindings)
+	assert.equal(invalidId.status, 400)
+	const invalidBody = await app.request('/api/admin/posts/10/nsfw', { method: 'PATCH', headers, body: JSON.stringify({ has_nsfw: 1 }) }, bindings)
+	assert.equal(invalidBody.status, 400)
+	const missing = await app.request('/api/admin/posts/999/nsfw', { method: 'PATCH', headers, body: JSON.stringify({ has_nsfw: true }) }, bindings)
+	assert.equal(missing.status, 404)
+
+	const marked = await app.request('/api/admin/posts/10/nsfw', { method: 'PATCH', headers, body: JSON.stringify({ has_nsfw: true }) }, bindings)
+	assert.equal(marked.status, 200, await marked.clone().text())
+	assert.deepEqual(await marked.json(), { has_nsfw: true })
+	assert.equal(database.prepare('SELECT has_nsfw FROM posts WHERE id = 10').get()?.has_nsfw, 1)
+	assert.deepEqual(
+		database.prepare('SELECT DISTINCT is_nsfw FROM post_images WHERE post_id = 10').all().map(row => ({ is_nsfw: Number(row.is_nsfw) })),
+		[{ is_nsfw: 1 }],
+	)
+
+	const cleared = await app.request('/api/admin/posts/10/nsfw', { method: 'PATCH', headers, body: JSON.stringify({ has_nsfw: false }) }, bindings)
+	assert.equal(cleared.status, 200, await cleared.clone().text())
+	assert.deepEqual(await cleared.json(), { has_nsfw: false })
+	assert.equal(database.prepare('SELECT has_nsfw FROM posts WHERE id = 10').get()?.has_nsfw, 0)
+	assert.deepEqual(
+		database.prepare('SELECT DISTINCT is_nsfw FROM post_images WHERE post_id = 10').all().map(row => ({ is_nsfw: Number(row.is_nsfw) })),
+		[{ is_nsfw: 0 }],
+	)
+
+	const noImage = await app.request('/api/admin/posts/11/nsfw', { method: 'PATCH', headers, body: JSON.stringify({ has_nsfw: true }) }, bindings)
+	assert.equal(noImage.status, 200, await noImage.clone().text())
+	assert.equal(database.prepare('SELECT has_nsfw FROM posts WHERE id = 11').get()?.has_nsfw, 1)
+	database.close()
+})

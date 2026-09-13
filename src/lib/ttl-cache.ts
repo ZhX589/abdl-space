@@ -53,6 +53,13 @@ export function cacheDelete(key: string): void {
   store.delete(key)
 }
 
+/** 按前缀删除缓存项（分页/多规格缓存统一失效） */
+export function cacheDeletePrefix(prefix: string): void {
+  for (const key of store.keys()) {
+    if (key.startsWith(prefix)) store.delete(key)
+  }
+}
+
 /** 清空缓存（测试用） */
 export function cacheClear(): void {
   store.clear()

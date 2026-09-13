@@ -82,6 +82,27 @@ curl -X POST https://api.abdl-space.top/api/admin/posts/1/pin \
 
 ---
 
+## PATCH /api/admin/posts/:id/nsfw
+
+显式设置帖子敏感状态，并同步该帖全部图片的敏感标记。该操作是幂等的，不会修改帖子的 `edited_at`。
+
+```bash
+curl -X PATCH https://api.abdl-space.top/api/admin/posts/1/nsfw \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"has_nsfw":true}'
+```
+
+**响应 200：**
+
+```json
+{ "has_nsfw": true }
+```
+
+`has_nsfw` 必须是 JSON boolean。帖子不存在返回 404。
+
+---
+
 ## DELETE /api/admin/posts/:id
 
 删除任意帖子。
