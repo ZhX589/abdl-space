@@ -112,7 +112,7 @@ app.use('*', async (c, next) => {
   await next()
   c.header('X-Content-Type-Options', 'nosniff')
   c.header('X-Frame-Options', 'DENY')
-  c.header('Referrer-Policy', 'strict-origin-when-cross-origin')
+  if (!c.res.headers.has('Referrer-Policy')) c.header('Referrer-Policy', 'strict-origin-when-cross-origin')
   c.header('X-XSS-Protection', '0')
 })
 
