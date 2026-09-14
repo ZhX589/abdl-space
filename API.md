@@ -2806,3 +2806,36 @@ src/mastodon/
 | 2026-07-15 | 对照源码校正帖子相关 API：`GET /api/posts` 补充 filter；`POST /api/posts` 补充 nbw_fid + NBW 异步双发；评论支持 images；Mastodon Statuses 补全 bookmark/unbookmark/pin/unpin/PUT/source/polls/favourites/bookmarks；NBW 补全 mobile 回调与 S2S 代理（get-register-url/check-register/bind-by-email/recommend-fid） |
 | 2026-07-15 | 新增 `GET /api/v1/abdl/nbw/sync-threads`：代理 NBW `get_sync_threads`，转为 Mastodon Status[]（`toStatusFromNBW`，同 timelines/home 格式，ID=`nbw_<tid>`） |
 | 2026-07-15 | `GET /api/v1/accounts/:id` 支持 `nbw_<uid>`：代理 `get_user_info` → `toAccountFromNBW`（公开字段白名单，不暴露 email/手机/QQ） |
+
+---
+
+## 宝宝认证 API（v0.6.0）
+
+所有用户与管理员写接口使用 JSON；敏感响应均 `Cache-Control: private, no-store`。产品术语统一为“认证拍摄会话”。后端不读取或判断 `users.age`。
+
+### 用户端 `/api/v1/baby-verification`
+
+- `GET /settings`：公开读取声明版本、开关、普通/赞助者月额度及上传限制。
+- `GET /me`：当前额度、有效赞助状态和最近申请。
+- `POST /capture-sessions`、`GET /capture-sessions/:id`、`POST /capture-sessions/:id/complete|cancel`。
+- `POST /applications`：`{ capture_session_id, qq, adult_declaration: true, declaration_version }`；QQ 加密存储。
+- `GET /applications/:id`、`POST /applications/:id/cancel`。
+- `POST /applications/:id/evidence/authorize`：`{ kind, mime_type, declared_size, content_sha256, content_md5 }`；服务端生成 object key，返回短期私有 PUT 与必须签名的完整性头。
+- `POST /evidence/:id/complete`：私有 HEAD+GET 校验 MIME、长度和实际 SHA-256。
+- `POST /applications/:id/submit`：仅成功草稿→submitted 转换计入自然月额度；普通 2 次，有效赞助者 3 次。
+- `POST /applications/:id/rejection-acknowledge`。
+- `GET /certificates/me`：返回当前证书、256-bit 验证 token 与验证路径。
+- `GET /verify/:token`：公开验证；active/superseded/revoked/unknown；全链路 no-store/no-referrer/noindex，D1 持久限流。
+
+同一用户最多一个 `submitted`/`reviewing` 申请。
+
+### 管理端 `/api/admin/baby-verification`
+
+- `GET|PUT /config`（乐观版本）。
+- `GET /applications`、`GET /applications/:id`。
+- `POST /applications/:id/claim|release|decision`；decision 需要 UUID `operation_id`，批准原子写申请、证书、credential、`verified` 徽章、通知和 audit。
+- `POST /applications/:applicationId/evidence/:evidenceId/view-authorize`：仅领取者可获取短期私有 GET。
+- `POST /certificates/:id/revoke|reissue`；补发后旧码返回 `superseded`。
+- `GET /audit`。
+
+证书 token 原文不入库；数据库仅存 domain-separated SHA-256。QQ/照片不进入公开 API、通知、审计 metadata 或日志。

@@ -544,11 +544,11 @@ novelAuthoring.delete('/works/:id/volumes/:volumeId', async c => {
 novelAuthoring.post('/chapters/:chapterId/revisions', async c => {
 	const auth = await authenticate(c, 'write')
 	if (auth instanceof Response) return auth
-	const key = idempotencyKey(c)
-	if (!key) return c.json({ error: 'A valid idempotency key is required', code: 'invalid_idempotency_key' }, 400)
-	const input = await readJsonObjectLimited(c)
-	if (input === 'too_large') return c.json({ error: 'Request is too large', code: 'request_too_large' }, 413)
-	const body = input && normalizedRevisionBody(input)
+		const key = idempotencyKey(c)
+		if (!key) return c.json({ error: 'A valid idempotency key is required', code: 'invalid_idempotency_key' }, 400)
+		const input = await readJsonObjectLimited(c, MAX_REVISION_JSON_BYTES)
+		if (input === 'too_large') return c.json({ error: 'Request is too large', code: 'request_too_large' }, 413)
+		const body = input && normalizedRevisionBody(input)
 	if (!input || body === null) return c.json({ error: 'Invalid revision body', code: 'invalid_revision' }, 400)
 	try {
 		const chapter = await getOwnedChapterById(c.env.abdl_space_db, auth.user.sub, c.req.param('chapterId'))

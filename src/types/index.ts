@@ -376,6 +376,9 @@ export interface Env {
   NOVEL_COS_SECRET_KEY?: string
   NOVEL_PRIVATE_COS_BUCKET: string
   NOVEL_PRIVATE_COS_REGION: string
+  // 宝宝认证复用 COS_*，以 baby-verification/private/ 独立前缀隔离；以下仅为私密数据与证书密钥。
+  BABY_VERIFICATION_DATA_KEY?: string
+  BABY_VERIFICATION_TOKEN_KEY?: string
   // NBW S2S
   NBW_API_KEY?: string
   // NBW OAuth
@@ -408,6 +411,24 @@ export interface Env {
   // 百度地图 IP 定位（SN 校验）
   BAIDU_MAP_IP_AK?: string
   BAIDU_MAP_IP_SK?: string
+}
+
+/** Versioned baby-verification settings returned to clients. */
+export interface BabyVerificationConfig {
+  version: number
+  enabled: boolean
+  declaration_version: string
+  free_monthly_limit: number
+  sponsor_monthly_limit: number
+  capture_ttl_seconds: number
+  upload_ttl_seconds: number
+  max_evidence_size: number
+}
+/** Current user's baby-verification state; private QQ/evidence are deliberately absent. */
+export interface BabyVerificationMe {
+  config: BabyVerificationConfig
+  quota: { limit: number; used: number; remaining: number; sponsor_active: boolean }
+  application: Record<string, unknown> | null
 }
 
 /** Backend-configured sponsor catalog; prices use minor currency units. */

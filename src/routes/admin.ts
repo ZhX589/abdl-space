@@ -425,11 +425,11 @@ admin.get('/users/:id/detail', adminMiddleware, async (c) => {
     queryOne<{ c: number }>(db, 'SELECT COUNT(*) AS c FROM feelings WHERE user_id = ?', [id]),
     queryOne<{ c: number }>(db, 'SELECT COUNT(*) AS c FROM daily_checkins WHERE user_id = ?', [id]),
     queryOne<{ c: number; balance: number }>(db, 'SELECT balance FROM points WHERE user_id = ?', [id]).catch(() => null),
-    query<{ key: string; name: string; color: string; created_at: string | null }>(
+    query<{ key: string; name: string; color: string; unlocked_at: string | null }>(
       db,
-      `SELECT ub.badge_key AS key, b.name, b.color, ub.created_at
+      `SELECT ub.badge_key AS key, b.name, b.color, ub.unlocked_at
        FROM user_badges ub LEFT JOIN badges b ON b.key = ub.badge_key
-       WHERE ub.user_id = ? ORDER BY ub.created_at DESC LIMIT 50`,
+       WHERE ub.user_id = ? ORDER BY ub.unlocked_at DESC LIMIT 50`,
       [id]
     ).catch(() => []),
     query<{ id: number; content: string; created_at: string }>(

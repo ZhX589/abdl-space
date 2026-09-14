@@ -25,13 +25,15 @@ npm run deploy
 
 ### 2.2 数据库 Schema 部署（手动）
 
-**触发**: `schemas/schema.sql` 有变更（新增表、新字段、新索引、FTS 虚拟表等）
+**触发**: 基础 schema 或任一功能迁移有变更。
 
-新数据库只执行完整 schema：
+`schemas/schema.sql` 只包含基础表。新数据库必须使用受测试的 bootstrap，按固定顺序应用基础 schema、账号徽章、赞助者、小说 v2 和宝宝认证迁移：
 
 ```bash
-npx wrangler d1 execute abdl-space-db --remote --file schemas/schema.sql
+npm run db:bootstrap -- --remote
 ```
+
+该命令必须显式传入 `--local` 或 `--remote`，不会猜测目标环境。
 
 现有数据库只执行当前增量 migration，例如：
 
@@ -196,3 +198,23 @@ npx wrangler d1 execute abdl-space-db --remote --command "<逆向SQL>"
 npx wrangler d1 execute abdl-space-db --remote --command "DELETE FROM diaper_sizes; DELETE FROM diapers;"
 npx wrangler d1 execute abdl-space-db --remote --file schemas/seeds/diapers.sql
 ```
+
+
+## 9. 宝宝认证部署前置（仅说明，不在本任务执行）
+
+现有 D1 先确认小说 `0064_novel_authoring_v2.sql` 已执行，再单独执行 `migrations/0065_baby_verification.sql`，最后部署依赖该 schema 的 Worker。禁止用完整 schema 覆盖现有库。
+
+宝宝认证复用发帖传图已有的 `COS_SECRET_ID`、`COS_SECRET_KEY`、`COS_BUCKET`、`COS_REGION`，对象固定写入 `baby-verification/private/<user>/<application>/` 独立前缀。无需创建新 Bucket 或新 COS 密钥。
+
+认证上传授权会把 `x-cos-acl: private` 与对象路径、大小、MD5、SHA-256、禁止覆盖头一起签名，因此该目录中的新对象即使位于公共读 Bucket 也必须签名访问。仍建议通过 Bucket Policy 对 `baby-verification/private/*` 显式拒绝匿名 `GetObject`，作为纵深防御。仍需配置：
+
+```bash
+# 32-byte 随机值的标准 Base64，用于 QQ AES-GCM 加密
+npx wrangler secret put BABY_VERIFICATION_DATA_KEY --name abdl-space-api
+# 高熵独立 HMAC 密钥，用于可重建的 256-bit 证书 token
+npx wrangler secret put BABY_VERIFICATION_TOKEN_KEY --name abdl-space-api
+```
+
+Android 默认按现有 `COS_BUCKET` / `COS_REGION` 对应的 `abdl-1339643562.cos.ap-shanghai.myqcloud.com` 校验上传地址；如后续更换现有发帖 Bucket，可在构建时用 `BABY_VERIFICATION_COS_HOST=<bucket>.cos.<region>.myqcloud.com` 覆盖。启用前必须以真实 COS 完成 PUT→HEAD→GET、跨用户/跨对象覆盖拒绝、签名头、`x-cos-forbid-overwrite=true`，并验证 `baby-verification/private/*` 无法匿名读取。
+
+正式站点还必须部署两端 `public/.well-known/assetlinks.json`，并确认其中 `top.abdl_space.app` 的 SHA-256 指纹与实际发布签名一致；debug/nightly 包不接管正式证书链接。功能默认 `enabled=0`，真实 COS、App Link 和真机相机验证完成后才通过管理配置开启。

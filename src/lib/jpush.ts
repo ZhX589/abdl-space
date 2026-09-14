@@ -111,11 +111,12 @@ async function sendJPushRaw(
     body: JSON.stringify(payload),
   })
 
-  const result: any = await response.json()
-  if (result.code !== 0) {
-    console.error('JPush send failed:', result.message)
+  const result: unknown = await response.json()
+  const body = result && typeof result === 'object' ? result as Record<string, unknown> : {}
+  if (body.code !== 0) {
+    console.error('JPush send failed:', typeof body.message === 'string' ? body.message : 'unknown')
   }
-  return result.code === 0
+  return body.code === 0
 }
 
 /**
@@ -167,9 +168,10 @@ export async function sendJPushBroadcast(
     body: JSON.stringify(payload),
   })
 
-  const result: any = await response.json()
-  if (result.code !== 0) {
-    console.error('JPush broadcast failed:', result.message)
+  const result: unknown = await response.json()
+  const body = result && typeof result === 'object' ? result as Record<string, unknown> : {}
+  if (body.code !== 0) {
+    console.error('JPush broadcast failed:', typeof body.message === 'string' ? body.message : 'unknown')
     return false
   }
   return true
