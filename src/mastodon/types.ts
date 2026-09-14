@@ -32,6 +32,7 @@ export interface MastodonAccount {
   noindex: boolean
   verified?: boolean
   badge?: { name: string; color: string } | null
+  baby_verification?: { verified: boolean; certificate_url: string | null } | null
   source?: { note: string; fields: { name: string; value: string; verified_at: string | null }[]; privacy: string; sensitive: boolean; language: string }
 }
 

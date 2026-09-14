@@ -15,10 +15,12 @@ notifications.get('/', authMiddleware, async (c) => {
 
   const rows = await query<Record<string, unknown>>(
     c.env.abdl_space_db,
-    `SELECT id, type, message, related_id, read, created_at
-     FROM notifications
-     WHERE user_id = ?
-     ORDER BY created_at DESC
+    `SELECT n.id, n.type, n.message, n.related_id, n.read,
+            d.target_path, d.metadata_json, n.created_at
+     FROM notifications n
+     LEFT JOIN baby_verification_notification_details d ON d.notification_id = n.id
+     WHERE n.user_id = ?
+     ORDER BY n.created_at DESC
      LIMIT 100`,
     [user.sub]
   )
@@ -36,6 +38,8 @@ notifications.get('/', authMiddleware, async (c) => {
       message: r.message,
       related_id: r.related_id ?? null,
       read: !!r.read,
+      target_path: r.target_path ?? null,
+      metadata: typeof r.metadata_json === 'string' ? JSON.parse(r.metadata_json) : null,
       created_at: r.created_at
     })),
     unread_count: unread[0].count

@@ -34,6 +34,7 @@ import { buildMediaObjectKey, validateMediaUpload } from '../lib/media-upload.ts
 import { buildCosObjectUrl, putObjectToCos } from '../lib/tencent-cos.ts'
 import { getCompletedUploadReference, uploadLegacyObject } from '../lib/upload-consumer.ts'
 import type { MediaUploadPurpose } from '../lib/media-upload.ts'
+import { getPublicBabyVerification } from '../lib/baby-verification.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
@@ -486,11 +487,12 @@ mastodon.get('/accounts/verify_credentials', async (c) => {
   )
   if (!dbUser) return c.json({ error: 'User not found' }, 404)
 
-  const [postCount, followerCount, followingCount, verifiedBadge] = await Promise.all([
+  const [postCount, followerCount, followingCount, verifiedBadge, babyVerification] = await Promise.all([
     queryOne<{ cnt: number }>(c.env.abdl_space_db, 'SELECT COUNT(*) as cnt FROM posts WHERE user_id = ?', [user.sub]),
     queryOne<{ cnt: number }>(c.env.abdl_space_db, 'SELECT COUNT(*) as cnt FROM follows WHERE following_id = ?', [user.sub]),
     queryOne<{ cnt: number }>(c.env.abdl_space_db, 'SELECT COUNT(*) as cnt FROM follows WHERE follower_id = ?', [user.sub]),
     queryOne<{ badge_key: string }>(c.env.abdl_space_db, 'SELECT badge_key FROM user_badges WHERE user_id = ? AND badge_key = ?', [user.sub, 'verified']),
+    getPublicBabyVerification(c.env, user.sub),
   ])
 
   const lastPost = await queryOne<{ created_at: string }>(
@@ -515,6 +517,7 @@ mastodon.get('/accounts/verify_credentials', async (c) => {
     last_status_at: lastPost?.created_at ?? null,
     last_status_province: lastProvinceMap.get(dbUser.id as number) ?? null,
     verified: !!verifiedBadge,
+    baby_verification: babyVerification,
   })
 
   // CredentialAccount has extra `source` field
@@ -758,11 +761,12 @@ mastodon.get('/accounts/:id', async (c) => {
   )
   if (!dbUser) return c.json({ error: 'Record not found' }, 404)
 
-  const [postCount, followerCount, followingCount, verifiedBadge] = await Promise.all([
+  const [postCount, followerCount, followingCount, verifiedBadge, babyVerification] = await Promise.all([
     queryOne<{ cnt: number }>(c.env.abdl_space_db, 'SELECT COUNT(*) as cnt FROM posts WHERE user_id = ?', [id]),
     queryOne<{ cnt: number }>(c.env.abdl_space_db, 'SELECT COUNT(*) as cnt FROM follows WHERE following_id = ?', [id]),
     queryOne<{ cnt: number }>(c.env.abdl_space_db, 'SELECT COUNT(*) as cnt FROM follows WHERE follower_id = ?', [id]),
     queryOne<{ badge_key: string }>(c.env.abdl_space_db, 'SELECT badge_key FROM user_badges WHERE user_id = ? AND badge_key = ?', [id, 'verified']),
+    getPublicBabyVerification(c.env, id),
   ])
 
   const lastPost = await queryOne<{ created_at: string }>(
@@ -785,6 +789,7 @@ mastodon.get('/accounts/:id', async (c) => {
     following_count: followingCount?.cnt ?? 0,
     last_status_at: lastPost?.created_at ?? null,
     verified: !!verifiedBadge,
+    baby_verification: babyVerification,
   }))
 })
 

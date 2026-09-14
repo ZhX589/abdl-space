@@ -18,6 +18,7 @@ interface CosAuthorizationOptions extends CosObjectOptions {
 	metadataSha256?: string
 	contentLength?: number
 	contentMd5?: string
+	expiresInSeconds?: number
 	now?: Date
 }
 
@@ -165,7 +166,9 @@ async function createCosAuthorization(method: 'put' | 'head' | 'get' | 'delete',
 	const encodedKey = encodeObjectKey(options.objectKey)
 	const host = getCosHost(options.bucket, options.region)
 	const start = Math.floor((options.now ?? new Date()).getTime() / 1000)
-	const expiresAt = start + AUTHORIZATION_TTL_SECONDS
+	const ttlSeconds = options.expiresInSeconds ?? AUTHORIZATION_TTL_SECONDS
+	if (!Number.isSafeInteger(ttlSeconds) || ttlSeconds < 1 || ttlSeconds > 3600) throw new Error('Invalid COS authorization TTL')
+	const expiresAt = start + ttlSeconds
 	const signTime = `${start};${expiresAt}`
 	const forbidOverwrite = method === 'put'
 	const bindsContentIntegrity = forbidOverwrite && (options.contentLength !== undefined || options.contentMd5 !== undefined)

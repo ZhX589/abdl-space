@@ -65,6 +65,7 @@ export function toAccount(user: {
     last_status_at: opts?.last_status_at ?? null,
     last_status_province: opts?.last_status_province ?? null,
     badge: opts?.badge ?? null,
+    baby_verification: opts?.baby_verification ?? null,
     emojis: [],
     fields: (() => { try { return JSON.parse(user.profile_fields || '[]') } catch { return [] } })(),
     roles: user.role === 'admin'
