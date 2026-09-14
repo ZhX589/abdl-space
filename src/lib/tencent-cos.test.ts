@@ -46,6 +46,21 @@ test('creates a stable five-minute PUT authorization that forbids overwrites', a
 	})
 })
 
+test('can bind a private object ACL into a no-overwrite PUT authorization', async () => {
+	const result = await createCosPutAuthorization({
+		...credentials,
+		objectKey: 'baby-verification/private/1/a/e.jpg',
+		contentType: 'image/jpeg',
+		metadataSha256: 'b'.repeat(64),
+		contentLength: 3,
+		contentMd5: 'kAFQmDzST7DWlj99KOF/cg==',
+		objectAcl: 'private',
+		now,
+	})
+	assert.equal(result.headers['x-cos-acl'], 'private')
+	assert.match(result.headers.Authorization, /q-header-list=content-length;content-md5;content-type;host;x-cos-acl;x-cos-forbid-overwrite;x-cos-meta-sha256/)
+})
+
 test('allows zero-byte PUT authorization with the canonical empty MD5', async () => {
 	const result = await createCosPutAuthorization({
 		...credentials,

@@ -18,6 +18,7 @@ interface CosAuthorizationOptions extends CosObjectOptions {
 	metadataSha256?: string
 	contentLength?: number
 	contentMd5?: string
+	objectAcl?: 'private'
 	expiresInSeconds?: number
 	now?: Date
 }
@@ -32,6 +33,7 @@ export interface CosAuthorization {
 		'Content-MD5'?: string
 		'Content-Type'?: string
 		'x-cos-forbid-overwrite'?: 'true'
+		'x-cos-acl'?: 'private'
 		'x-cos-meta-sha256'?: string
 	}
 }
@@ -177,11 +179,12 @@ async function createCosAuthorization(method: 'put' | 'head' | 'get' | 'delete',
 		throw new Error('Invalid PUT content integrity headers')
 	}
 	const metadataSha256 = forbidOverwrite ? options.metadataSha256 : undefined
+	const objectAcl = forbidOverwrite ? options.objectAcl : undefined
 	const headerList = forbidOverwrite
-		? `${bindsContentIntegrity ? 'content-length;content-md5;' : ''}content-type;host;x-cos-forbid-overwrite${metadataSha256 === undefined ? '' : ';x-cos-meta-sha256'}`
+		? `${bindsContentIntegrity ? 'content-length;content-md5;' : ''}content-type;host${objectAcl === undefined ? '' : ';x-cos-acl'};x-cos-forbid-overwrite${metadataSha256 === undefined ? '' : ';x-cos-meta-sha256'}`
 		: 'host'
 	const canonicalHeaders = forbidOverwrite
-		? `${bindsContentIntegrity ? `content-length=${options.contentLength}&content-md5=${encodeRfc3986(options.contentMd5!)}` + '&' : ''}content-type=${encodeRfc3986(options.contentType)}&host=${encodeRfc3986(host)}&x-cos-forbid-overwrite=true${metadataSha256 === undefined ? '' : `&x-cos-meta-sha256=${encodeRfc3986(metadataSha256)}`}`
+		? `${bindsContentIntegrity ? `content-length=${options.contentLength}&content-md5=${encodeRfc3986(options.contentMd5!)}` + '&' : ''}content-type=${encodeRfc3986(options.contentType)}&host=${encodeRfc3986(host)}${objectAcl === undefined ? '' : `&x-cos-acl=${objectAcl}`}&x-cos-forbid-overwrite=true${metadataSha256 === undefined ? '' : `&x-cos-meta-sha256=${encodeRfc3986(metadataSha256)}`}`
 		: `host=${encodeRfc3986(host)}`
 	const httpString = `${method}\n/${options.objectKey}\n\n${canonicalHeaders}\n`
 	const stringToSign = `sha1\n${signTime}\n${await sha1(httpString)}\n`
@@ -205,6 +208,7 @@ async function createCosAuthorization(method: 'put' | 'head' | 'get' | 'delete',
 			Authorization: authorization,
 			...(bindsContentIntegrity ? { 'Content-Length': String(options.contentLength), 'Content-MD5': options.contentMd5! } : {}),
 			...(method === 'put' ? { 'Content-Type': options.contentType } : {}),
+			...(objectAcl === undefined ? {} : { 'x-cos-acl': objectAcl }),
 			...(forbidOverwrite ? { 'x-cos-forbid-overwrite': 'true' as const } : {}),
 			...(metadataSha256 === undefined ? {} : { 'x-cos-meta-sha256': metadataSha256 }),
 		},

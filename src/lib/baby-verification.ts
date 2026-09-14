@@ -301,7 +301,7 @@ export async function authorizeBabyEvidence(env: Env, userId: number, applicatio
 	if (existing?.status === 'ready') return { evidence_id: existing.id, status: 'ready', already_uploaded: true }
 	const id = existing ? String(existing.id) : crypto.randomUUID()
 	const objectKey = existing ? String(existing.object_key) : `baby-verification/private/${userId}/${applicationId}/${id}.${extension}`
-	const authorization = await createCosPutAuthorization({ ...cosOptions(env), objectKey, contentType: mimeType, metadataSha256: sha256, contentLength: size, contentMd5: md5, expiresInSeconds: config.upload_ttl_seconds })
+	const authorization = await createCosPutAuthorization({ ...cosOptions(env), objectKey, contentType: mimeType, metadataSha256: sha256, contentLength: size, contentMd5: md5, objectAcl: 'private', expiresInSeconds: config.upload_ttl_seconds })
 	if (existing) await env.abdl_space_db.prepare(`UPDATE baby_verification_evidence SET upload_expires_at=? WHERE id=? AND user_id=? AND status='pending'`).bind(authorization.expiresAt,id,userId).run()
 	else {
 		const result = await env.abdl_space_db.prepare(`INSERT INTO baby_verification_evidence(id,application_id,user_id,kind,mime_type,object_key,declared_size,content_sha256,content_md5,status,upload_expires_at) VALUES(?,?,?,?,?,?,?,?,?,'pending',?) ON CONFLICT(application_id,kind) DO NOTHING`).bind(id,applicationId,userId,kind,mimeType,objectKey,size,sha256,md5,authorization.expiresAt).run()
