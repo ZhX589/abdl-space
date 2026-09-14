@@ -766,7 +766,7 @@ CREATE INDEX IF NOT EXISTS idx_friend_request_snapshots_original ON friend_reque
 -- 宝宝认证
 -- ============================================================
 
--- 0064: 宝宝认证首版。QQ 与照片证据均为严格私密数据。
+-- 0065: 宝宝认证首版。QQ 与照片证据均为严格私密数据。
 CREATE TABLE IF NOT EXISTS baby_verification_settings (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   version INTEGER NOT NULL CHECK (version > 0),

@@ -200,7 +200,7 @@ npx wrangler d1 execute abdl-space-db --remote --file schemas/seeds/diapers.sql
 
 ## 9. 宝宝认证部署前置（仅说明，不在本任务执行）
 
-现有 D1 先单独执行 `migrations/0064_baby_verification.sql`，再部署依赖该 schema 的 Worker。禁止用完整 schema 覆盖现有库。
+现有 D1 先确认小说 `0064_novel_authoring_v2.sql` 已执行，再单独执行 `migrations/0065_baby_verification.sql`，最后部署依赖该 schema 的 Worker。禁止用完整 schema 覆盖现有库。
 
 宝宝认证复用发帖传图已有的 `COS_SECRET_ID`、`COS_SECRET_KEY`、`COS_BUCKET`、`COS_REGION`，对象固定写入 `baby-verification/private/<user>/<application>/` 独立前缀。无需创建新 Bucket 或新 COS 密钥。
 

@@ -1,4 +1,4 @@
--- 0064: 宝宝认证首版。QQ 与照片证据均为严格私密数据。
+-- 0065: 宝宝认证首版。QQ 与照片证据均为严格私密数据。
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS baby_verification_settings (

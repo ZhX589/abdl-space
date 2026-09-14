@@ -17,14 +17,14 @@ function database(): DatabaseSync {
 
 function d1(db:DatabaseSync){const statement=(sql:string,params:unknown[]=[]):D1PreparedStatement=>({bind:(...next:unknown[])=>statement(sql,next),first:async<T>()=>(db.prepare(sql).get(...params)??null) as T|null,run:async()=>{const r=db.prepare(sql).run(...params);return{success:true,meta:{changes:Number(r.changes)}} as D1Result},all:async<T>()=>({success:true,results:db.prepare(sql).all(...params) as T[]}) as D1Result<T>,raw:async()=>[],columnNames:async()=>[]} as unknown as D1PreparedStatement);return{prepare:(sql:string)=>statement(sql),batch:async(items:D1PreparedStatement[])=>{db.exec('BEGIN');try{const results=[];for(const item of items)results.push(await item.run());db.exec('COMMIT');return results}catch(error){db.exec('ROLLBACK');throw error}}}}
 
-test('complete schema and migration 0064 are independently repeatable',()=>{
+test('complete schema and migration 0065 are independently repeatable',()=>{
 	const complete=new DatabaseSync(':memory:')
 	const migrated=new DatabaseSync(':memory:')
 	try{
 		const schema=readFileSync(new URL('../../schemas/schema.sql',import.meta.url),'utf8')
 		complete.exec(schema);complete.exec(schema)
 		migrated.exec(`PRAGMA foreign_keys=ON;CREATE TABLE users(id INTEGER PRIMARY KEY);CREATE TABLE notifications(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL);CREATE TABLE badges(id INTEGER PRIMARY KEY,key TEXT UNIQUE NOT NULL,name TEXT NOT NULL,icon TEXT NOT NULL,description TEXT NOT NULL,condition_type TEXT NOT NULL,condition_value INTEGER NOT NULL);`)
-		const migration=readFileSync(new URL('../../migrations/0064_baby_verification.sql',import.meta.url),'utf8')
+		const migration=readFileSync(new URL('../../migrations/0065_baby_verification.sql',import.meta.url),'utf8')
 		migrated.exec(migration);migrated.exec(migration)
 		assert.equal(complete.prepare("SELECT COUNT(*) AS count FROM baby_verification_settings").get()?.count,1)
 		assert.equal(migrated.prepare("SELECT COUNT(*) AS count FROM baby_verification_settings").get()?.count,1)
