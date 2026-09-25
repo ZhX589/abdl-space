@@ -7,7 +7,7 @@ import type { SponsorStockEnv } from '../types/sponsor-stock.ts'
 // Deployment attestations plus a controlled positively reconciled probe are required.
 const ORIGIN = 'https://ifdian.net'
 const MAX_BYTES = 256 * 1024
-const TIMEOUT_MS = 8000
+const TIMEOUT_MS = 10000
 const ID = /^[a-f0-9]{32}$/i
 
 /** Redacted adapter failure. Never propagate upstream em/debug/request/sign material. */
@@ -120,8 +120,11 @@ export class AfdianClient {
 		})
 		try {
 			const task = async () => {
-				const response = await (this.options.fetch ?? fetch)(`${ORIGIN}/api/open/${endpoint}`, {
-					method: 'POST', redirect: 'error', signal: controller.signal,
+const response = await (this.options.fetch ?? fetch)(`${ORIGIN}/api/open/${endpoint}`, {
+					method: 'POST',
+					// Workers 不支持 redirect:'error'（该值在 edge 直接抛 TypeError）；
+					// 用 'manual'：3xx 时 response.ok=false，下方即按 HTTP 异常拒绝，不会跟随重定向。
+					redirect: 'manual', signal: controller.signal,
 					headers: { 'content-type': 'application/json', accept: 'application/json' },
 					body: JSON.stringify({ user_id: this.env.AFDIAN_USER_ID, params: paramsString, ts, sign }),
 				})
@@ -139,6 +142,10 @@ export class AfdianClient {
 			return await Promise.race([task(), deadline])
 		} catch (error) {
 			if (error instanceof AfdianError) throw error
+			// 超时后 controller.abort() 引发的 AbortError 属于超时，而非网络链路异常。
+			if (typeof error === 'object' && error !== null && (error as { name?: unknown }).name === 'AbortError') throw new AfdianError('afdian_timeout')
+			// 非 JSON 响应（如网关 HTML）走到这里会以 SyntaxError 抛出，单独归类便于排查。
+			if (typeof error === 'object' && error !== null && (error as { name?: unknown }).name === 'SyntaxError') throw new AfdianError('afdian_json_shape')
 			throw new AfdianError('afdian_transport_unknown')
 		} finally {
 			if (timer !== undefined) clearTimeout(timer)

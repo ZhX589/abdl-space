@@ -27,7 +27,7 @@ adminBabyVerification.get('/applications/:id',async c=>{
 	if(!row)return c.json({error:'申请不存在',code:'application_not_found'},404)
 	const user=await c.env.abdl_space_db.prepare('SELECT id,username,avatar FROM users WHERE id=?').bind(row.user_id).first()
 	const evidence=await c.env.abdl_space_db.prepare('SELECT id,kind,mime_type,declared_size,verified_size,status,completed_at FROM baby_verification_evidence WHERE application_id=? ORDER BY kind').bind(row.id).all()
-	const capture_session=await c.env.abdl_space_db.prepare('SELECT id,status,instructions_version,paper_shape,paper_color,fold_instruction,placement_instruction,random_text,expires_at,completed_at FROM baby_verification_capture_sessions WHERE id=? AND user_id=?').bind(row.capture_session_id,row.user_id).first()
+	const capture_session=await c.env.abdl_space_db.prepare('SELECT id,status,instructions_version,paper_shape,fold_instruction,placement_instruction,random_text,expires_at,completed_at FROM baby_verification_capture_sessions WHERE id=? AND user_id=?').bind(row.capture_session_id,row.user_id).first()
 	const certificateRow=await c.env.abdl_space_db.prepare(`SELECT c.id,c.status,c.issued_at,c.revoked_at,c.current_credential_id,c.credential_generation AS generation FROM baby_verification_certificates c WHERE c.application_id=?`).bind(row.id).first<Record<string,unknown>>()
 	let certificate:Record<string,unknown>|null=null
 	if(certificateRow){

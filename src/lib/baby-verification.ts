@@ -1,7 +1,7 @@
 import type { Context, Next } from 'hono'
 import { assertSessionNotStale } from '../middleware/auth.ts'
 import { mastodonAuthDetails } from '../mastodon/shared.ts'
-import { createCosGetAuthorization, createCosPutAuthorization, getPrivateObjectFromCos, headPrivateObjectFromCos, isCanonicalContentMd5 } from './tencent-cos.ts'
+import { CosHttpError, createCosGetAuthorization, createCosPutAuthorization, getPrivateObjectFromCos, headPrivateObjectFromCos, isCanonicalContentMd5 } from './tencent-cos.ts'
 import type { BabyVerificationConfig, BabyVerificationMe, Env, JWTPayload } from '../types/index.ts'
 
 export type BabyVerificationAppType = { Bindings: Env; Variables: { user: JWTPayload } }
@@ -224,14 +224,16 @@ export async function createBabyCaptureSession(env: Env, userId: number): Promis
 	const nonce = encode64Url(crypto.getRandomValues(new Uint8Array(18)))
 	const choose = <T>(items: readonly T[]): T => items[crypto.getRandomValues(new Uint32Array(1))[0] % items.length]
 	const paperShape = choose(['正方形','三角形','圆形','长方形'] as const)
-	const paperColor = choose(['白色纸张','浅黄色纸张','浅蓝色纸张','浅粉色纸张'] as const)
-	const foldInstruction = choose(['无需折角','折起左上角','折起右上角'] as const)
-	const placementInstruction = choose(['纸条压住纸尿裤左上角','纸条放在纸尿裤正中间','纸条紧贴纸尿裤右侧'] as const)
+	// 三角形/圆形没有明确可操作的角，折角指令只对四边形形状生成，避免「圆形纸条折角」这类自相矛盾的要求
+	const foldInstruction = (paperShape === '正方形' || paperShape === '长方形')
+		? choose(['无需折角','折起左上角','折起右上角'] as const)
+		: '无需折角'
+	const placementInstruction = choose(['纸条压住纸尿裤左上角','纸条放在纸尿裤正中间','纸条紧贴纸尿裤一侧'] as const)
 	const words = ['今日认证','真实拍摄','宝宝同行','安心相伴','星光作证','此刻留证'] as const
 	const randomText = `${choose(words)}-${encode64Url(crypto.getRandomValues(new Uint8Array(4))).slice(0,6)}`
 	const expiresAt = Math.floor(Date.now() / 1000) + config.capture_ttl_seconds
-	await env.abdl_space_db.prepare(`INSERT INTO baby_verification_capture_sessions(id,user_id,status,nonce,instructions_version,paper_shape,paper_color,fold_instruction,placement_instruction,random_text,expires_at) VALUES(?,?,'active',?,1,?,?,?,?,?,?)`).bind(id, userId, nonce, paperShape, paperColor, foldInstruction, placementInstruction, randomText, expiresAt).run()
-	return { id, status: 'active', nonce, instructions_version: 1, paper_shape: paperShape, paper_color: paperColor, fold_instruction: foldInstruction, placement_instruction: placementInstruction, random_text: randomText, expires_at: expiresAt }
+	await env.abdl_space_db.prepare(`INSERT INTO baby_verification_capture_sessions(id,user_id,status,nonce,instructions_version,paper_shape,fold_instruction,placement_instruction,random_text,expires_at) VALUES(?,?,'active',?,1,?,?,?,?,?)`).bind(id, userId, nonce, paperShape, foldInstruction, placementInstruction, randomText, expiresAt).run()
+	return { id, status: 'active', nonce, instructions_version: 1, paper_shape: paperShape, fold_instruction: foldInstruction, placement_instruction: placementInstruction, random_text: randomText, expires_at: expiresAt }
 }
 
 /** Complete or cancel a capture session with a conditional state transition. */
@@ -239,7 +241,7 @@ export async function transitionBabyCaptureSession(env: Env, userId: number, id:
 	const next = action === 'complete' ? 'completed' : 'cancelled'
 	await env.abdl_space_db.prepare(`UPDATE baby_verification_capture_sessions SET status='expired',cancelled_at=unixepoch() WHERE id=? AND user_id=? AND status='active' AND expires_at<=unixepoch()`).bind(id,userId).run()
 	const result = await env.abdl_space_db.prepare(`UPDATE baby_verification_capture_sessions SET status=?,completed_at=CASE WHEN ?='completed' THEN unixepoch() ELSE NULL END,cancelled_at=CASE WHEN ?='cancelled' THEN unixepoch() ELSE NULL END WHERE id=? AND user_id=? AND status='active' AND expires_at>unixepoch()`).bind(next, next, next, id, userId).run()
-	const row = await env.abdl_space_db.prepare('SELECT id,status,nonce,instructions_version,paper_shape,paper_color,fold_instruction,placement_instruction,random_text,expires_at,completed_at,cancelled_at FROM baby_verification_capture_sessions WHERE id=? AND user_id=?').bind(id, userId).first<Record<string, unknown>>()
+	const row = await env.abdl_space_db.prepare('SELECT id,status,nonce,instructions_version,paper_shape,fold_instruction,placement_instruction,random_text,expires_at,completed_at,cancelled_at FROM baby_verification_capture_sessions WHERE id=? AND user_id=?').bind(id, userId).first<Record<string, unknown>>()
 	if (!row) throw new BabyVerificationError('capture_session_not_found', '认证拍摄会话不存在', 404)
 	if (result.meta.changes !== 1 && row.status !== next) throw new BabyVerificationError(row.expires_at && Number(row.expires_at) <= Math.floor(Date.now() / 1000) ? 'capture_session_expired' : 'capture_session_conflict', '认证拍摄会话不可用', 409)
 	return row
@@ -310,6 +312,16 @@ export async function authorizeBabyEvidence(env: Env, userId: number, applicatio
 	return { evidence_id:id,status:'pending',upload_url:authorization.url,expires_at:authorization.expiresAt,required_headers:authorization.headers }
 }
 
+async function logBabyEvidenceDiagnostic(evidenceId: string, status: 'HEAD' | 'GET' | 'metadata' | 'hash' | 'unavailable', httpStatus: number | null, objectKey: string, requestId: string | null): Promise<void> {
+	console.error('baby evidence verification diagnostic', {
+		evidence_id: evidenceId,
+		status,
+		http_status: httpStatus,
+		object_key_hash: await babyHash('evidence-object-key:v1', objectKey),
+		request_id: requestId,
+	})
+}
+
 /** Verify the private COS object MIME, length, SHA-256 and MD5-bound upload before marking it ready. */
 export async function completeBabyEvidence(env: Env, userId: number, evidenceId: string): Promise<Record<string, unknown>> {
 	const row = await env.abdl_space_db.prepare(`SELECT id,application_id,user_id,mime_type,object_key,declared_size,content_sha256,status,upload_expires_at,verification_token,verification_started_at,verified_size FROM baby_verification_evidence WHERE id=? AND user_id=?`).bind(evidenceId,userId).first<Record<string, unknown>>()
@@ -320,20 +332,44 @@ export async function completeBabyEvidence(env: Env, userId: number, evidenceId:
 	const staleBefore = Math.floor(Date.now()/1000)-120
 	const claim = await env.abdl_space_db.prepare(`UPDATE baby_verification_evidence SET status='verifying',verification_token=?,verification_started_at=unixepoch() WHERE id=? AND user_id=? AND (status='pending' OR (status='verifying' AND verification_started_at<=?))`).bind(token,evidenceId,userId,staleBefore).run()
 	if (claim.meta.changes !== 1) throw new BabyVerificationError('evidence_verifying','照片正在校验',409)
+	const objectKey = String(row.object_key)
 	try {
-		const options = { ...cosOptions(env), objectKey:String(row.object_key), contentType:String(row.mime_type) }
-		const head = await headPrivateObjectFromCos(options)
+		const options = { ...cosOptions(env), objectKey, contentType:String(row.mime_type) }
+		let head: Response
+		try {
+			head = await headPrivateObjectFromCos(options)
+			await logBabyEvidenceDiagnostic(evidenceId, 'HEAD', head.status, objectKey, head.headers.get('x-cos-request-id'))
+		} catch (error) {
+			await logBabyEvidenceDiagnostic(evidenceId, 'HEAD', error instanceof CosHttpError ? error.status : null, objectKey, error instanceof CosHttpError ? error.requestId : null)
+			throw new BabyVerificationError('verification_unavailable','私有照片校验暂不可用',502)
+		}
 		const headSize = Number(head.headers.get('content-length'))
-		if (!Number.isSafeInteger(headSize) || headSize !== Number(row.declared_size) || head.headers.get('content-type')?.trim().toLowerCase() !== row.mime_type) throw new BabyVerificationError('evidence_mismatch','照片元数据校验失败',422)
-		const object = await getPrivateObjectFromCos(options)
+		const headType = head.headers.get('content-type')?.trim().toLowerCase()
+		if (!Number.isSafeInteger(headSize) || headSize !== Number(row.declared_size) || headType !== row.mime_type) {
+			await logBabyEvidenceDiagnostic(evidenceId, 'metadata', head.status, objectKey, head.headers.get('x-cos-request-id'))
+			throw new BabyVerificationError('evidence_mismatch','照片元数据校验失败',422)
+		}
+		let object: Response
+		try {
+			object = await getPrivateObjectFromCos(options)
+			await logBabyEvidenceDiagnostic(evidenceId, 'GET', object.status, objectKey, object.headers.get('x-cos-request-id'))
+		} catch (error) {
+			await logBabyEvidenceDiagnostic(evidenceId, 'unavailable', error instanceof CosHttpError ? error.status : null, objectKey, error instanceof CosHttpError ? error.requestId : null)
+			throw new BabyVerificationError('verification_unavailable','私有照片校验暂不可用',502)
+		}
 		const bytes = await object.arrayBuffer()
-		if (bytes.byteLength !== Number(row.declared_size) || toHex(await crypto.subtle.digest('SHA-256',bytes)) !== row.content_sha256) throw new BabyVerificationError('evidence_mismatch','照片内容校验失败',422)
+		const digest = toHex(await crypto.subtle.digest('SHA-256',bytes))
+		if (bytes.byteLength !== Number(row.declared_size) || digest !== row.content_sha256) {
+			await logBabyEvidenceDiagnostic(evidenceId, 'hash', object.status, objectKey, object.headers.get('x-cos-request-id'))
+			throw new BabyVerificationError('evidence_mismatch','照片内容校验失败',422)
+		}
 		const updated = await env.abdl_space_db.prepare(`UPDATE baby_verification_evidence SET status='ready',verified_size=?,completed_at=unixepoch(),verification_token=NULL,verification_started_at=NULL WHERE id=? AND user_id=? AND status='verifying' AND verification_token=?`).bind(bytes.byteLength,evidenceId,userId,token).run()
 		if (updated.meta.changes !== 1) throw new BabyVerificationError('evidence_conflict','照片状态已变化',409)
 		return { id:evidenceId,status:'ready',verified_size:bytes.byteLength }
 	} catch (error) {
 		await env.abdl_space_db.prepare(`UPDATE baby_verification_evidence SET status='pending',verification_token=NULL,verification_started_at=NULL WHERE id=? AND user_id=? AND status='verifying' AND verification_token=?`).bind(evidenceId,userId,token).run().catch(()=>undefined)
 		if (error instanceof BabyVerificationError) throw error
+		await logBabyEvidenceDiagnostic(evidenceId, 'unavailable', null, objectKey, null)
 		throw new BabyVerificationError('verification_unavailable','私有照片校验暂不可用',502)
 	}
 }
@@ -475,10 +511,15 @@ export async function decideBabyApplication(env: Env, adminId: number, applicati
 
 /** Authorize a short-lived private evidence GET for the claimed application's administrator. */
 export async function authorizeAdminBabyEvidence(env: Env, adminId: number, applicationId: string, evidenceId: string): Promise<Record<string,unknown>> {
-	const row=await env.abdl_space_db.prepare(`SELECT e.object_key,e.mime_type,e.status FROM baby_verification_evidence e JOIN baby_verification_applications a ON a.id=e.application_id WHERE e.id=? AND e.application_id=? AND a.status='reviewing' AND a.claimed_by=?`).bind(evidenceId,applicationId,adminId).first<Record<string,unknown>>()
-	if(!row||row.status!=='ready') throw new BabyVerificationError('evidence_not_found','照片不存在或不可查看',404)
+	const application=await env.abdl_space_db.prepare('SELECT status,claimed_by FROM baby_verification_applications WHERE id=?').bind(applicationId).first<{status:string;claimed_by:number|null}>()
+	if(!application) throw new BabyVerificationError('evidence_not_found','照片不存在',404)
+	const evidence=await env.abdl_space_db.prepare('SELECT object_key,mime_type,status FROM baby_verification_evidence WHERE id=? AND application_id=?').bind(evidenceId,applicationId).first<Record<string,unknown>>()
+	if(!evidence) throw new BabyVerificationError('evidence_not_found','照片不存在',404)
+	if(application.status!=='reviewing') throw new BabyVerificationError('application_claim_required','申请必须处于审核中',409)
+	if(application.claimed_by!==adminId) throw new BabyVerificationError('application_claimed_by_other','申请已由其他管理员领取',409)
+	if(evidence.status!=='ready') throw new BabyVerificationError('evidence_not_ready','照片尚未完成校验',409)
 	const config=await getBabyVerificationConfig(env)
-	const authorization=await createCosGetAuthorization({...cosOptions(env),objectKey:String(row.object_key),contentType:String(row.mime_type),expiresInSeconds:config.upload_ttl_seconds})
+	const authorization=await createCosGetAuthorization({...cosOptions(env),objectKey:String(evidence.object_key),contentType:String(evidence.mime_type),expiresInSeconds:config.upload_ttl_seconds})
 	return {download_url:authorization.url,expires_at:authorization.expiresAt}
 }
 

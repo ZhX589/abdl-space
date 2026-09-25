@@ -85,13 +85,6 @@
 | 2026-05-16 | `fix/ratelimit-error` | 频率限制 + 错误信息脱敏 | ✅ |
 | 2026-05-17 | `fix/prod-bugs` | fix: SQL语法错误 + computeAvgScore统一 + terms验证 | ✅ |
 
-### 默认管理员账号
+### 管理员初始化
 
-```
-username: admin
-email: admin@abdl.space
-password: admin@ZhX&ZYongX
-role: admin
-
-导入命令: npx wrangler d1 execute abdl-space-db --local --file schemas/seeds/admin.sql
-```
+管理员凭据属于本地/部署配置，不应记录在仓库文档中。请通过受保护的初始化流程设置，并在首次登录后轮换密码。

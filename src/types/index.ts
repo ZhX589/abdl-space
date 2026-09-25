@@ -348,6 +348,10 @@ export interface UpdateUserRequest {
 export interface Env {
   abdl_space_db: D1Database
   JWT_SECRET: string
+  // Android QQ 登录：App ID 为非敏感 vars；App Key 与身份 HMAC key 仅通过 secrets 配置。
+  QQ_ANDROID_APP_ID?: string
+  QQ_ANDROID_APP_KEY?: string
+  QQ_IDENTITY_HMAC_KEY?: string
   // 赞助者兑换码和爱发电凭据仅通过 Worker secrets 配置。
   SPONSOR_CODE_KEY?: string
   AFDIAN_USER_ID?: string

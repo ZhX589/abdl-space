@@ -46,4 +46,35 @@ adminSponsorStockRoutes.post('/batches/:id/reconcile', async c => {
 	return c.json(await new SponsorStockService(c.env).reconcile(c.req.param('id'), body.reason, String(c.get('user').sub), body.out_trade_nos))
 })
 
+// 只读诊断端点：验证 Worker 侧 MD5 签名链是否可用、到爱发电接口的网络是否可达；
+// 仅回错误名称与 HTTP 状态，不输出密钥、签名原文或上游响应体。
+adminSponsorStockRoutes.get('/diag/net', async c => {
+	const out: Record<string, unknown> = { ts: Math.floor(Date.now() / 1000) }
+	try {
+		const bytes = new TextEncoder().encode('diagnostic')
+		await crypto.subtle.digest('MD5', bytes)
+		out.md5 = true
+	} catch (error) {
+		out.md5 = false
+		out.md5ErrorName = (error as { name?: string }).name
+	}
+	const t0 = Date.now()
+	try {
+		const response = await fetch('https://ifdian.net/api/open/query-plan', {
+			method: 'POST', redirect: 'manual',
+			headers: { 'content-type': 'application/json', accept: 'application/json' },
+			body: JSON.stringify({ user_id: c.env.AFDIAN_USER_ID ?? '', params: '{}', ts: 1, sign: '00000000000000000000000000000000' }),
+		})
+		out.reachable = true
+		out.httpStatus = response.status
+		out.redirected = response.redirected
+		out.elapsedMs = Date.now() - t0
+	} catch (error) {
+		out.reachable = false
+		out.errorName = (error as { name?: string }).name
+		out.elapsedMs = Date.now() - t0
+	}
+	return c.json(out)
+})
+
 export default adminSponsorStockRoutes

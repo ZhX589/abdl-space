@@ -307,11 +307,18 @@ webauthn.delete('/credentials/:id', authMiddleware, async (c) => {
   const id = c.req.param('id')
   const db = c.env.abdl_space_db
 
-  const result = await run(db, 'DELETE FROM passkeys WHERE id = ? AND user_id = ?', [id, user.sub])
-  if ((result.meta.changes || 0) !== 1) {
-    return c.json({ success: false, error: '安全识别不存在' }, 404)
+  try {
+    const result = await run(db, 'DELETE FROM passkeys WHERE id = ? AND user_id = ?', [id, user.sub])
+    if ((result.meta.changes || 0) !== 1) {
+      return c.json({ success: false, error: '安全识别不存在' }, 404)
+    }
+    return c.json({ success: true })
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('AUTH_LAST_LOGIN_METHOD')) {
+      return c.json({ success: false, error: 'AUTH_LAST_LOGIN_METHOD' }, 409)
+    }
+    throw error
   }
-  return c.json({ success: true })
 })
 
 export default webauthn

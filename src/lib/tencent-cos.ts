@@ -40,11 +40,13 @@ export interface CosAuthorization {
 
 export class CosHttpError extends Error {
 	readonly status: number
+	readonly requestId: string | null
 
-	constructor(status: number, operation?: string) {
+	constructor(status: number, operation?: string, requestId: string | null = null) {
 		super(operation ? `COS ${operation} failed: ${status}` : `COS request failed: ${status}`)
 		this.name = 'CosHttpError'
 		this.status = status
+		this.requestId = requestId
 	}
 }
 
@@ -278,7 +280,7 @@ export async function headPrivateObjectFromCos(options: CosAuthorizationOptions)
 		redirect: 'manual',
 	})
 	if (!response.ok) {
-		throw new CosHttpError(response.status >= 300 && response.status < 400 ? 502 : response.status)
+		throw new CosHttpError(response.status >= 300 && response.status < 400 ? 502 : response.status, 'HEAD', response.headers.get('x-cos-request-id'))
 	}
 	return response
 }
@@ -291,7 +293,7 @@ export async function getPrivateObjectFromCos(options: CosAuthorizationOptions):
 		redirect: 'manual',
 	})
 	if (!response.ok) {
-		throw new CosHttpError(response.status >= 300 && response.status < 400 ? 502 : response.status)
+		throw new CosHttpError(response.status >= 300 && response.status < 400 ? 502 : response.status, 'GET', response.headers.get('x-cos-request-id'))
 	}
 	return response
 }

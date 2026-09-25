@@ -65,6 +65,7 @@ import adminSponsors from './routes/admin-sponsors.ts'
 import { sponsorAccountProjectionMiddleware } from './lib/sponsors.ts'
 import babyVerification from './routes/baby-verification.ts'
 import adminBabyVerification from './routes/admin-baby-verification.ts'
+import qq from './routes/qq.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
@@ -289,6 +290,7 @@ app.route('/api/oauth/clients', oauthClients)
 app.route('/api/content/keys', contentKeys)
 app.route('/api/v1/content', contentV1)
 app.route('/api/auth/nbw', nbw)
+app.route('/api/auth/qq', qq)
 
 // Mastodon OAuth compatibility: mount /oauth/* on same router
 app.route('/oauth', oauth)

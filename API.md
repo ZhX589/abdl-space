@@ -2034,7 +2034,25 @@ Cloudflare Turnstile 验证。
 
 #### GET /api/admin/users
 
-用户列表（含 email、role 等管理字段）。
+用户列表（含 email、role、`qq_bound` 等管理字段）。支持 `qq_bound=bound|unbound` 筛选。JWT 会实时读取管理员角色；OAuth 需要 `read admin` scope。
+
+#### GET /api/admin/identities/users/:id
+
+返回用户的最小化登录方式视图、QQ 绑定版本及最近 20 条身份审计。QQ 仅返回 `bound/nickname/avatar/created_at/updated_at/can_unbind/block_reason`，绝不返回 UnionID、OpenID、HMAC、token 或 app_id；头像只接受 HTTPS。
+
+- JWT：实时管理员角色并检查会话失效边界
+- OAuth：需要 `read admin` scope
+- 响应头：`Cache-Control: private, no-store`、`Referrer-Policy: no-referrer`
+
+#### POST /api/admin/identities/users/:id/qq/unbind
+
+管理员原子解除普通用户的 QQ 登录绑定，并使旧 JWT/OAuth 会话失效、写通知和审计。禁止操作自己或管理员目标；0068 数据库触发器继续保护最后一种登录方式。
+
+- OAuth：需要 `write admin` scope
+- 请求 JSON：`{ "operation_id": "UUID", "reason": "1-500 字符", "confirm_username": "target", "expected_binding_version": 1710000000 }`
+- 同一 `operation_id` 和同一请求重放保存的响应；同 ID 不同请求返回 409
+- 绑定版本、用户名或最后登录方式变化返回稳定 409
+- 写请求要求 JSON，并校验 `Origin` / `Sec-Fetch-Site`
 
 #### DELETE /api/admin/users/:id
 

@@ -6,6 +6,8 @@ import type { StockBatch, StockSetting, SponsorStockEnv } from '../types/sponsor
 
 const PLAN_IDS = ['week', 'month', 'quarter', 'year', 'permanent'] as const
 const LEASE_SECONDS = 180
+// 网络瞬时故障（超时/传输/上游异常）的单次自动重试间隔；不能快速重试以免抖动放大
+const AUTO_RETRY_AFTER = 120
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const CONTRACT_MESSAGE = '须依据官方证据确认完整未发送随机码池及追加契约，并设置两个部署验证开关；不得将商品库存当作兑换码库存。'
 
@@ -53,10 +55,24 @@ function integer(value: unknown, min: number, max: number): value is number {
 	return typeof value === 'number' && Number.isSafeInteger(value) && value >= min && value <= max
 }
 
+/** 网络瞬时故障：可安全自动重试，绝不视为写入不确定，也不暂停或禁用方案。 */
+function isTransientAfdianError(error: unknown): error is AfdianError {
+	return error instanceof AfdianError && [
+		'afdian_timeout', 'afdian_http_unknown', 'afdian_transport_unknown', 'afdian_json_shape', 'afdian_empty_response', 'afdian_response_limit',
+	].includes(error.code)
+}
+
 function safeError(error: unknown): string {
 	if (error instanceof AfdianError) {
 		if (error.code.startsWith('afdian_mapping')) return '爱发电商品、全部五个型号、名称或价格与后台方案不一致，请核对后重试'
 		if (error.code.startsWith('afdian_pool')) return '爱发电随机码池格式不明确或包含重复行，已停止补货'
+		if (error.code === 'afdian_credentials_missing') return '未配置爱发电密钥（AFDIAN_USER_ID / AFDIAN_API_TOKEN）'
+		if (error.code === 'afdian_timeout') return '爱发电接口 10 秒内未响应，将自动重试'
+		if (error.code === 'afdian_json_shape') return '爱发电接口返回内容不是合法 JSON，将自动重试'
+		if (error.code === 'afdian_api_unknown') return '爱发电业务接口返回错误；多半是 token 已失效或 user_id/token 不匹配，请重新对照后重试'
+		if (error.code === 'afdian_http_unknown') return '爱发电接口 HTTP 请求异常，将自动重试'
+		if (error.code === 'afdian_transport_unknown') return '与爱发电接口通信异常，将自动重试'
+		if (error.code === 'afdian_empty_response' || error.code === 'afdian_response_limit') return '爱发电响应为空或超过大小限制，将自动重试'
 		return '爱发电查询或写入结果无法确认；写入批次不得重发，请人工对账'
 	}
 	return '库存操作未完成；请检查配置及持久化批次状态，不要重复发送'
@@ -175,7 +191,8 @@ export class SponsorStockService {
 			// This state proves append was not started. Abandon, never resume with new codes.
 			await this.fenced(lease, "UPDATE sponsor_stock_batches SET state='rejected',last_error=? WHERE id=? AND state='prepared'", ['准备阶段中断，未执行外部追加；请审核核心码批次', row.id])
 		} else {
-			await this.fenced(lease, 'UPDATE sponsor_stock_settings SET paused=1,enabled=0,last_error=? WHERE plan_id=?', ['存在未确认发送批次，必须人工正向对账', planId])
+			// 未确认批次已存在：暂停但不销毁启用状态，交给 cron 自动证明后恢复
+			await this.fenced(lease, 'UPDATE sponsor_stock_settings SET paused=1,last_error=? WHERE plan_id=?', ['存在未确认发送批次；系统将自动核实入池情况，必要时人工对账', planId])
 		}
 	}
 	private async refresh(lease: Lease, planId: string, plans: Plan[]) {
@@ -191,7 +208,13 @@ export class SponsorStockService {
 			[item.productStock, item.lines.length, this.env.AFDIAN_STOCK_POOL_VERIFIED === 'true' ? item.lines.length : null, this.now(), this.now(), fingerprint, fingerprint, fingerprint, planId])
 			return item
 		} catch (error) {
-			await this.fenced(lease, 'UPDATE sponsor_stock_settings SET last_stock=NULL,last_checked_at=?,next_check_at=?+check_interval_seconds,last_error=?,read_fingerprint=NULL,enabled=0 WHERE plan_id=?', [this.now(), this.now(), safeError(error), planId])
+			if (isTransientAfdianError(error)) {
+				// 网络瞬时故障：保留启用状态与只读指纹，记录错误，推迟到下一自动检查周期重试
+				await this.fenced(lease, 'UPDATE sponsor_stock_settings SET last_error=?,next_check_at=? WHERE plan_id=?', [safeError(error), this.now() + AUTO_RETRY_AFTER, planId])
+			} else {
+				// 非瞬时错误（映射/密钥/池格式等）：必须人工排查，清空只读指纹并禁用
+				await this.fenced(lease, 'UPDATE sponsor_stock_settings SET last_stock=NULL,last_checked_at=?,next_check_at=?+check_interval_seconds,last_error=?,read_fingerprint=NULL,enabled=0 WHERE plan_id=?', [this.now(), this.now(), safeError(error), planId])
+			}
 			throw error
 		}
 	}
@@ -243,13 +266,44 @@ export class SponsorStockService {
 
 	private async markUnknown(lease: Lease, batch: BatchRow, message: string) {
 		await this.fenced(lease, "UPDATE sponsor_stock_batches SET state='unknown',last_error=? WHERE id=? AND state IN ('sending','unknown')", [message, batch.id])
-		await this.fenced(lease, 'UPDATE sponsor_stock_settings SET paused=1,enabled=0,last_error=? WHERE plan_id=?', [message, batch.plan_id])
+		// 只暂停，保留 enabled 状态；cron 自动对账确认入池后解除暂停即可恢复
+		await this.fenced(lease, 'UPDATE sponsor_stock_settings SET paused=1,last_error=? WHERE plan_id=?', [message, batch.plan_id])
 	}
 	private async confirm(lease: Lease, batch: BatchRow, plans: Plan[]) {
 		await this.fenced(lease, "UPDATE sponsor_stock_batches SET state='confirmed',confirmed_at=?,last_error=NULL WHERE id=? AND state IN ('sending','unknown')", [this.now(), batch.id])
 		// Never auto-unpause/enable after uncertainty; an admin must explicitly resume.
 		if (batch.fingerprint === this.fingerprint(plans) && this.contracts()) {
 			await this.fenced(lease, 'UPDATE sponsor_stock_settings SET verified=1,verified_fingerprint=?,last_error=NULL WHERE plan_id=?', [batch.fingerprint, batch.plan_id])
+		}
+	}
+	private async autoResume(lease: Lease, planId: string) {
+		await this.fenced(lease, 'UPDATE sponsor_stock_settings SET paused=0,last_error=NULL,next_check_at=? WHERE plan_id=?', [this.now(), planId])
+	}
+
+/** 只读实证：查询爱发电码池(按五个 SKU 契约),若目标 SKU 池已包含全部码则说明追加已生效。 */
+	private async verifyAppended(plans: Plan[], planId: string, codes: string[]): Promise<boolean> {
+		const observed = await this.client.queryPlans(plans)
+		const item = observed.find(p => p.planId === planId)
+		return Boolean(item && codes.every(code => item.lines.includes(code)))
+	}
+
+	/** cron 首阶段：对未确认批次做只读实证,全部入池则自动确认并解除暂停,无需人工重配。 */
+	private async autoResolveUnknownBatches(plans: Plan[]) {
+		const rows = await this.db().prepare("SELECT * FROM sponsor_stock_batches WHERE state='unknown' ORDER BY created_at LIMIT 5").all<BatchRow>()
+		for (const batch of rows.results) {
+			if (!batch.code_batch_id) continue // 未持久化码批次只能人工对账
+			if (batch.fingerprint !== this.fingerprint(plans) || !this.contracts()) continue
+			let lease: Lease | undefined
+			try {
+				lease = await this.acquire(batch.sku_id)
+				const codes = await (this.deps.exportBatch ?? exportSponsorCodeBatch)(this.env, batch.code_batch_id)
+				if (await this.verifyAppended(plans, batch.plan_id, codes)) {
+					await this.confirm(lease, batch, plans)
+					await this.autoResume(lease, batch.plan_id)
+					await this.audit(null, `stock.auto_recover:${batch.id}`, '自动对账：码池已包含全部追加码，解除暂停并恢复补货')
+				}
+			} catch { /* 网络瞬时失败：保留 unknown，下一轮 cron 自动再试 */ }
+			finally { if (lease) await this.release(lease) }
 		}
 	}
 	private response(batch: StockBatch) { return { batch_id: batch.id, state: batch.state } }
@@ -284,34 +338,64 @@ export class SponsorStockService {
 			(SELECT 1 FROM sponsor_stock_leases WHERE sku_id=? AND owner=? AND expires_at>?)`)
 			.bind(id, operationId, planId, plan.afdian_plan_id, plan.afdian_sku_id, fingerprint, amount, Number(!verified), actorId, reason, this.now(), lease.skuId, lease.owner, this.now()).run()
 		if (inserted.meta.changes !== 1) throw new SponsorStockError('stock_lease_lost', '库存租约已失效')
-		let batch = (await this.db().prepare('SELECT * FROM sponsor_stock_batches WHERE id=?').bind(id).first<BatchRow>())!
+let batch = (await this.db().prepare('SELECT * FROM sponsor_stock_batches WHERE id=?').bind(id).first<BatchRow>())!
+		let codes: string[] = []
 		try {
 			const created = await (this.deps.createBatch ?? createSponsorCodeBatch)(this.env, { planId, count: amount, expiresAt: null, operationId, reason, actorId, source: 'afdian' })
 			await this.fenced(lease, "UPDATE sponsor_stock_batches SET code_batch_id=? WHERE id=? AND state='prepared'", [created.id, id])
 			batch = { ...batch, code_batch_id: created.id }
-			const codes = await (this.deps.exportBatch ?? exportSponsorCodeBatch)(this.env, created.id)
+			codes = await (this.deps.exportBatch ?? exportSponsorCodeBatch)(this.env, created.id)
 			if (codes.length !== amount || codes.some(code => observed.lines.includes(code))) throw new SponsorStockError('stock_code_batch_invalid', '生成的兑换码批次无法安全追加')
 			// Recheck server switches/catalog after asynchronous encryption, before the one-way send fence.
 			if (!(await (this.deps.getConfig ?? getSponsorConfig)(this.env)).enabled || this.fingerprint(await this.plans()) !== fingerprint) throw new SponsorStockError('stock_catalog_changed', '后台方案已变化，禁止继续追加')
 			await this.fenced(lease, "UPDATE sponsor_stock_batches SET state='sending',sent_at=? WHERE id=? AND state='prepared' AND code_batch_id IS NOT NULL", [this.now(), id])
 			batch.state = 'sending'
-			try { await this.client.append(plan.afdian_sku_id, codes) } catch (error) {
+try { await this.client.append(plan.afdian_sku_id, codes) } catch (error) {
 				if (error instanceof AfdianError && error.definitelyRejected) {
 					await this.fenced(lease, "UPDATE sponsor_stock_batches SET state='rejected',last_error=? WHERE id=? AND state='sending'", ['接口在执行前明确拒绝请求；原批次不会重发', id])
 					return { batch_id: id, state: 'rejected' as const }
 				}
+				// 瞬时错误：先只读实证(查询全部五个 SKU 契约),池中已含全部码则追加实际成功，自动确认且不暂停
+				if (isTransientAfdianError(error) && await this.verifyAppended(plans, planId, codes)) {
+					await this.confirm(lease, batch, plans)
+					await this.autoResume(lease, planId)
+					return { batch_id: id, state: 'confirmed' as const }
+				}
 				await this.markUnknown(lease, batch, safeError(error))
 				return { batch_id: id, state: 'unknown' as const }
 			}
-			const after = await this.refresh(lease, planId, plans)
-			if (!codes.every(code => after.lines.includes(code))) {
-				await this.markUnknown(lease, batch, '追加响应不能证明全部兑换码已入池；缺失不代表失败，禁止重发')
+			try {
+				const after = await this.refresh(lease, planId, plans)
+				if (!codes.every(code => after.lines.includes(code))) {
+					// 重读未见全部码：爱发电可能异步落池，先自动实证一次；仍不能证实则进入 unknown 由 cron 自动对账
+					if (await this.verifyAppended(plans, planId, codes)) {
+						await this.confirm(lease, batch, plans)
+						await this.autoResume(lease, planId)
+						return { batch_id: id, state: 'confirmed' as const }
+					}
+					await this.markUnknown(lease, batch, '追加响应不能证明全部兑换码已入池；缺失不代表失败，禁止重发')
+					return { batch_id: id, state: 'unknown' as const }
+				}
+			} catch {
+				// 追读失败按网络瞬时处理：实证一次，能证实就确认，否则交由 cron 自动恢复
+				if (await this.verifyAppended(plans, planId, codes)) {
+					await this.confirm(lease, batch, plans)
+					await this.autoResume(lease, planId)
+					return { batch_id: id, state: 'confirmed' as const }
+				}
+				await this.markUnknown(lease, batch, '追加后的网络读回失败；缺失不代表失败，禁止重发')
 				return { batch_id: id, state: 'unknown' as const }
 			}
 			await this.confirm(lease, batch, plans)
 			return { batch_id: id, state: 'confirmed' as const }
 		} catch (error) {
 			if (batch.state === 'sending') {
+				// 发送后不确定（本地异常/竞态超时）：先实证一次，能证实则确认，不立即暂停方案
+				if (await this.verifyAppended(plans, planId, codes)) {
+					await this.confirm(lease, batch, plans)
+					await this.autoResume(lease, planId)
+					return { batch_id: id, state: 'confirmed' as const }
+				}
 				await this.markUnknown(lease, batch, safeError(error))
 				return { batch_id: id, state: 'unknown' as const }
 			}
@@ -380,6 +464,7 @@ export class SponsorStockService {
 		if (!this.configured() || !this.contracts()) return { ...result, skipped: 5 }
 		if (!(await (this.deps.getConfig ?? getSponsorConfig)(this.env)).enabled) return { ...result, skipped: 5 }
 		const plans = await this.plans()
+		await this.autoResolveUnknownBatches(plans) // unknown 批次自动实证恢复,不再要求人工重配
 		const due = await this.db().prepare(`SELECT plan_id FROM sponsor_stock_settings WHERE enabled=1 AND verified=1 AND paused=0 AND (next_check_at IS NULL OR next_check_at<=?) LIMIT 5`).bind(this.now()).all<{ plan_id: string }>()
 		for (const item of due.results) {
 			const plan = this.selectPlan(plans, item.plan_id)

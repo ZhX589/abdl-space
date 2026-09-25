@@ -21,7 +21,8 @@ CREATE TABLE IF NOT EXISTS users (
   bio TEXT,                              -- 最长 500
   email_verified INTEGER DEFAULT 0,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  password_changed_at DATETIME           -- BUG-177: invalidate old sessions after password reset
+  password_changed_at DATETIME,          -- BUG-177: invalidate old sessions after password reset
+  auth_invalid_before INTEGER            -- invalidate JWTs issued at or before this Unix second
 );
 
 -- 纸尿裤主表
@@ -491,6 +492,29 @@ CREATE INDEX IF NOT EXISTS idx_page_versions_page_id ON page_versions(page_id);
 CREATE INDEX IF NOT EXISTS idx_wiki_inline_comments_page_id ON wiki_inline_comments(page_id);
 CREATE INDEX IF NOT EXISTS idx_notifications_user_id ON notifications(user_id);
 CREATE INDEX IF NOT EXISTS idx_notifications_user_unread ON notifications(user_id, read);
+
+-- Android QQ 登录。仅保存带域分隔的 HMAC，不保存原始 UnionID/OpenID/token/code。
+CREATE TABLE IF NOT EXISTS qq_identities (
+  unionid_hmac TEXT PRIMARY KEY NOT NULL CHECK (length(unionid_hmac) = 64),
+  user_id INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+  nickname TEXT NOT NULL DEFAULT '' CHECK (length(nickname) <= 100),
+  avatar TEXT NOT NULL DEFAULT '' CHECK (length(avatar) <= 2048),
+  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE INDEX IF NOT EXISTS idx_qq_identities_user ON qq_identities(user_id);
+
+CREATE TABLE IF NOT EXISTS qq_app_subjects (
+  app_id TEXT NOT NULL CHECK (length(app_id) BETWEEN 5 AND 32),
+  openid_hmac TEXT NOT NULL CHECK (length(openid_hmac) = 64),
+  unionid_hmac TEXT NOT NULL CHECK (length(unionid_hmac) = 64),
+  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  PRIMARY KEY (app_id, openid_hmac),
+  UNIQUE (app_id, unionid_hmac)
+);
+CREATE INDEX IF NOT EXISTS idx_qq_app_subjects_identity ON qq_app_subjects(unionid_hmac);
+
 CREATE INDEX IF NOT EXISTS idx_experience_user_id ON experience(user_id);
 CREATE INDEX IF NOT EXISTS idx_terms_category ON terms(category);
 
@@ -789,7 +813,6 @@ CREATE TABLE IF NOT EXISTS baby_verification_capture_sessions (
   nonce TEXT NOT NULL,
   instructions_version INTEGER NOT NULL,
   paper_shape TEXT NOT NULL,
-  paper_color TEXT NOT NULL,
   fold_instruction TEXT NOT NULL,
   placement_instruction TEXT NOT NULL,
   random_text TEXT NOT NULL,
@@ -943,6 +966,40 @@ CREATE TABLE IF NOT EXISTS baby_verification_notification_details (
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 CREATE INDEX IF NOT EXISTS idx_baby_notification_application ON baby_verification_notification_details(application_id,notification_id);
+
+-- 管理员身份解绑操作、审计和持久化限流。敏感 QQ 标识不写入这些表。
+CREATE TABLE IF NOT EXISTS admin_identity_operations (
+  operation_id TEXT PRIMARY KEY NOT NULL,
+  actor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  target_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  action TEXT NOT NULL,
+  request_hash TEXT NOT NULL CHECK (length(request_hash) = 64),
+  confirmed_username TEXT NOT NULL,
+  expected_binding_version INTEGER NOT NULL CHECK (expected_binding_version >= 0),
+  response_status INTEGER NOT NULL CHECK (response_status BETWEEN 100 AND 599),
+  response_body TEXT NOT NULL CHECK (json_valid(response_body)),
+  created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE INDEX IF NOT EXISTS idx_admin_identity_operations_target ON admin_identity_operations(target_user_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS admin_identity_audit (
+  id TEXT PRIMARY KEY NOT NULL,
+  operation_id TEXT NOT NULL UNIQUE,
+  actor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  target_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  action TEXT NOT NULL,
+  reason TEXT NOT NULL CHECK (length(reason) BETWEEN 1 AND 500),
+  metadata_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(metadata_json)),
+  created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE INDEX IF NOT EXISTS idx_admin_identity_audit_target ON admin_identity_audit(target_user_id, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_admin_identity_audit_actor ON admin_identity_audit(actor_id, created_at DESC, id DESC);
+
+CREATE TABLE IF NOT EXISTS admin_identity_rate_limits (
+  bucket TEXT PRIMARY KEY NOT NULL,
+  window_start INTEGER NOT NULL,
+  count INTEGER NOT NULL CHECK (count >= 0)
+);
 
 
 -- ============================================================

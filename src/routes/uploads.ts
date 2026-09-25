@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 
+import { generateBlurhash } from '../lib/blurhash.ts'
 import { queryOne } from '../lib/db.ts'
 import { buildMediaObjectKey, validateMediaUpload } from '../lib/media-upload.ts'
 import { buildCosObjectUrl, createCosPutAuthorization, headObjectFromCos } from '../lib/tencent-cos.ts'
@@ -178,6 +179,39 @@ function attachment(row: MediaUploadRow, preview?: MediaUploadRow) {
 	}
 }
 
+// 生成 blurhash 时最多拉取 2MiB 的对象：status_preview 本身被客户端压缩到
+// 540px 内且 ≤2MiB，用它当采样源即可写出与原图一致的占位色块；更大的原图
+// （avatar/header/generic 可达 10MiB）不值得为一张占位图把整个对象拖进 Worker。
+const BLURHASH_MAX_SOURCE_BYTES = 2 * 1024 * 1024
+
+async function fetchObjectBytes(url: string): Promise<Uint8Array | null> {
+	try {
+		const response = await fetch(url)
+		if (!response.ok) return null
+		return new Uint8Array(await response.arrayBuffer())
+	} catch {
+		return null
+	}
+}
+
+async function computeUploadBlur(upload: MediaUploadRow, preview?: MediaUploadRow): Promise<string | null> {
+	if (!upload.mime_type.startsWith('image/')) return null
+	const source = preview?.public_url && (preview.declared_size ?? 0) <= BLURHASH_MAX_SOURCE_BYTES
+		? { url: preview.public_url, mimeType: preview.mime_type }
+		: upload.declared_size <= BLURHASH_MAX_SOURCE_BYTES
+			? { url: upload.public_url, mimeType: upload.mime_type }
+			: null
+	if (!source) return null
+	// 生成失败不阻塞上传完成：只返回 null，客户端走通用占位图（与 /api/v1/media 一致）
+	try {
+		const bytes = await fetchObjectBytes(source.url)
+		if (!bytes) return null
+		return await generateBlurhash(new Blob([bytes], { type: source.mimeType }))
+	} catch {
+		return null
+	}
+}
+
 async function getUpload(db: D1Database, id: string): Promise<MediaUploadRow | null> {
 	const result = await db.prepare(`
 		SELECT id, user_id, purpose, object_key, public_url,
@@ -300,6 +334,14 @@ uploads.post('/:id/complete', async (c) => {
 				return c.json(attachment(current, linkedPreview ?? undefined))
 			}
 			return c.json({ error: 'Upload state changed', code: 'upload_conflict' }, 409)
+		}
+
+		const blurhash = await computeUploadBlur(upload, preview)
+		if (blurhash) {
+			const blurResult = await c.env.abdl_space_db.prepare(
+				'UPDATE media_uploads SET blurhash = ? WHERE id = ? AND blurhash IS NULL'
+			).bind(blurhash, upload.id).run()
+			if (!blurResult.success) throw new Error('Database operation failed')
 		}
 
 		const completed = await getUpload(c.env.abdl_space_db, upload.id)

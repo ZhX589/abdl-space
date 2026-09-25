@@ -28,7 +28,7 @@ babyVerification.get('/me',async c=>c.json(await getBabyVerificationMe(c.env,c.g
 babyVerification.post('/capture-sessions',async c=>c.json(await createBabyCaptureSession(c.env,c.get('user').sub),201))
 babyVerification.get('/capture-sessions/:id',async c=>{
 	await c.env.abdl_space_db.prepare(`UPDATE baby_verification_capture_sessions SET status='expired',cancelled_at=unixepoch() WHERE id=? AND user_id=? AND status='active' AND expires_at<=unixepoch()`).bind(c.req.param('id'),c.get('user').sub).run()
-	const row=await c.env.abdl_space_db.prepare('SELECT id,status,nonce,instructions_version,paper_shape,paper_color,fold_instruction,placement_instruction,random_text,expires_at,completed_at,cancelled_at,created_at FROM baby_verification_capture_sessions WHERE id=? AND user_id=?').bind(c.req.param('id'),c.get('user').sub).first()
+	const row=await c.env.abdl_space_db.prepare('SELECT id,status,nonce,instructions_version,paper_shape,fold_instruction,placement_instruction,random_text,expires_at,completed_at,cancelled_at,created_at FROM baby_verification_capture_sessions WHERE id=? AND user_id=?').bind(c.req.param('id'),c.get('user').sub).first()
 	return row?c.json(row):c.json({error:'认证拍摄会话不存在',code:'capture_session_not_found'},404)
 })
 babyVerification.post('/capture-sessions/:id/complete',async c=>c.json(await transitionBabyCaptureSession(c.env,c.get('user').sub,c.req.param('id'),'complete')))
