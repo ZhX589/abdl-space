@@ -6,7 +6,7 @@
  * 默认账号:
  *   username: admin
  *   email: admin@abdl.space
- *   password: admin@ZhX&ZYongX
+ *   password: 通过 ADMIN_SEED_PASSWORD 环境变量提供
  *   role: admin
  *
  * 注意: 此脚本直接写入数据库，请仅在本地开发或首次部署时使用。
@@ -17,8 +17,12 @@ import { hashPassword } from '../src/lib/auth.ts'
 async function main() {
   const username = 'admin'
   const email = 'admin@abdl.space'
-  const password = 'admin@ZhX&ZYongX'
+  const password = process.env.ADMIN_SEED_PASSWORD
   const role = 'admin'
+
+  if (!password || password.length < 16) {
+    throw new Error('ADMIN_SEED_PASSWORD must be set to at least 16 characters')
+  }
 
   console.log(`Hashing password for ${username}...`)
   const passwordHash = await hashPassword(password)
