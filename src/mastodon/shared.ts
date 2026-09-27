@@ -97,7 +97,7 @@ function fallbackInstance(): MastodonInstance {
     thumbnail: 'https://img.abdl-space.top/file/system/1781439303787_play_store_512.png',
     languages: ['zh', 'en'],
     configuration: {
-      urls: { streaming: null, status: null, about: 'https://abdl-space.top', privacy_policy: null, terms_of_service: null },
+      urls: { streaming: null, status: null, about: 'https://abdl-space.top', privacy_policy: 'https://abdl-space.top/privacy', terms_of_service: 'https://abdl-space.top/terms' },
       vapid: { public_key: '' },
       accounts: { max_featured_tags: 10, max_pinned_statuses: 5 },
       statuses: { max_characters: 5000, max_media_attachments: 4, characters_reserved_per_url: 23 },
@@ -151,7 +151,7 @@ export async function buildInstance(db: D1Database, kv?: KVNamespace): Promise<M
     thumbnail: 'https://img.abdl-space.top/file/system/1781439303787_play_store_512.png',
     languages: ['zh', 'en'],
     configuration: {
-      urls: { streaming: null, status: null, about: 'https://abdl-space.top', privacy_policy: null, terms_of_service: null },
+      urls: { streaming: null, status: null, about: 'https://abdl-space.top', privacy_policy: 'https://abdl-space.top/privacy', terms_of_service: 'https://abdl-space.top/terms' },
       vapid: { public_key: '' },
       accounts: { max_featured_tags: 10, max_pinned_statuses: 5 },
       statuses: { max_characters: 5000, max_media_attachments: 4, characters_reserved_per_url: 23 },
@@ -181,7 +181,7 @@ export async function buildInstance(db: D1Database, kv?: KVNamespace): Promise<M
   cacheSet(cacheKey, instance, INSTANCE_CACHE_TTL_MS)
   await kvCacheSet(kv, INSTANCE_KV_KEY, instance, INSTANCE_KV_TTL_SEC)
   return instance
-  } catch (e) {
+  } catch {
     // D1 故障（配额耗尽等）：CPU 内存短暂缓存兜底，避免每请求都重建。
     cacheSet(cacheKey, fallbackInstance(), INSTANCE_CACHE_TTL_MS)
     return fallbackInstance()
