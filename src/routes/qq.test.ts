@@ -105,6 +105,18 @@ async function request(db: ReturnType<typeof createDb>, method: string, path: st
 
 test.afterEach(() => { globalThis.fetch = originalFetch })
 
+test('missing QQ app configuration returns a stable unavailable error', async () => {
+  const db = createDb()
+  try {
+    addUser(db, 1, { password: 'hash' })
+    mockQQ()
+    delete (db.env as Partial<typeof db.env>).QQ_ANDROID_APP_ID
+    const response = await request(db, 'POST', '/android/bind', 1)
+    assert.equal(response.status, 503)
+    assert.deepEqual(await response.json(), { error: 'QQ_UPSTREAM_UNAVAILABLE' })
+  } finally { db.database.close() }
+})
+
 test('exchange distinguishes unbound and bound QQ without setting cookies', async () => {
   const db = createDb()
   try {
@@ -115,9 +127,11 @@ test('exchange distinguishes unbound and bound QQ without setting cookies', asyn
     assert.deepEqual(await unbound.json(), { action: 'not_bound', code: 'QQ_ACCOUNT_NOT_BOUND' })
     assert.equal(unbound.headers.get('set-cookie'), null)
 
-    const bind = await request(db, 'POST', '/android/bind', 1)
-    assert.equal(bind.status, 200)
-    const login = await request(db, 'POST', '/android/exchange')
+		const bind = await request(db, 'POST', '/android/bind', 1)
+		assert.equal(bind.status, 200)
+		assert.match(bind.headers.get('content-type') ?? '', /^application\/json/)
+		assert.deepEqual(await bind.json(), { bound: true, nickname: 'QQ User', avatar: 'https://q.qlogo.cn/avatar' })
+		const login = await request(db, 'POST', '/android/exchange')
     assert.equal(login.status, 200)
     const body = await login.json() as Record<string, unknown>
     assert.equal(body.action, 'login')

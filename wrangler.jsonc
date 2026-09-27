@@ -25,6 +25,7 @@
 		"COS_BUCKET": "abdl-1339643562",
 		"COS_REGION": "ap-shanghai",
 		"COS_PUBLIC_ORIGIN": "https://abdl-1339643562.cos.ap-shanghai.myqcloud.com",
+		"QQ_ANDROID_APP_ID": "1905661071",
 		"NOVEL_PRIVATE_COS_BUCKET": "abdl-1339643562",
 		"NOVEL_PRIVATE_COS_REGION": "ap-shanghai"
 	},
