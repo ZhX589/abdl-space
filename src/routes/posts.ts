@@ -6,6 +6,8 @@ import { authMiddleware } from '../middleware/auth.ts'
 import { rateLimit } from '../lib/rate-limit.ts'
 import { syncPostToNBW } from '../lib/nbw-sync.ts'
 import { sendJPushNotification } from '../lib/jpush.ts'
+import { cacheGet, cacheSet } from '../lib/ttl-cache.ts'
+import { kvCacheGet, kvCacheSet } from '../lib/kv-cache.ts'
 
 const IMGBED_URL = 'https://img.abdl-space.top'
 
@@ -141,11 +143,42 @@ posts.get('/', async (c) => {
 
   const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
 
-  const countResult = await query<{ total: number }>(
-    c.env.abdl_space_db,
-    `SELECT COUNT(*) as total FROM posts p ${whereClause}`,
-    params
-  )
+  // 默认时间线（无搜索、无筛选）的 total 走两级缓存：内存 60s + KV 15min。
+  // COUNT(*) WHERE in_reply_to_id IS NULL 选择性差、接近全表扫描，是 D1 读取行数最大的一条；
+  // total 仅用于分页展示，允许最长 KV TTL 的滞后。
+  const FEED_COUNT_MEM_TTL_MS = 60_000
+  const FEED_COUNT_KV_KEY = 'feed:top:total'
+  const FEED_COUNT_KV_TTL_SEC = 900
+  const isDefaultFeed = !search && !filter
+  let total: number
+  if (isDefaultFeed) {
+    const memTotal = cacheGet<number>(FEED_COUNT_KV_KEY)
+    if (memTotal !== undefined) {
+      total = memTotal
+    } else {
+      const kvTotal = await kvCacheGet<number>(c.env.NOTICE_KV, FEED_COUNT_KV_KEY)
+      if (kvTotal !== null) {
+        total = kvTotal
+        cacheSet(FEED_COUNT_KV_KEY, kvTotal, FEED_COUNT_MEM_TTL_MS)
+      } else {
+        const countResult = await query<{ total: number }>(
+          c.env.abdl_space_db,
+          `SELECT COUNT(*) as total FROM posts p ${whereClause}`,
+          params
+        )
+        total = countResult[0]?.total ?? 0
+        cacheSet(FEED_COUNT_KV_KEY, total, FEED_COUNT_MEM_TTL_MS)
+        await kvCacheSet(c.env.NOTICE_KV, FEED_COUNT_KV_KEY, total, FEED_COUNT_KV_TTL_SEC)
+      }
+    }
+  } else {
+    const countResult = await query<{ total: number }>(
+      c.env.abdl_space_db,
+      `SELECT COUNT(*) as total FROM posts p ${whereClause}`,
+      params
+    )
+    total = countResult[0]?.total ?? 0
+  }
 
   const offset = (page - 1) * limit
   const rows = await query<Record<string, unknown>>(
@@ -242,8 +275,8 @@ posts.get('/', async (c) => {
     posts: postsList,
     pagination: {
       page, limit,
-      total: countResult[0].total,
-      totalPages: Math.ceil(countResult[0].total / limit)
+      total,
+      totalPages: Math.ceil(total / limit)
     }
   })
 })

@@ -83,6 +83,45 @@ follows.delete('/:userId', authMiddleware, async (c) => {
 })
 
 /**
+ * GET /api/follows/batch-status?ids=1,2,3 — 批量关注状态
+ * 信息流场景一次取回多个作者的关注关系，替代逐作者调用 /:userId/status 的 N+1 模式
+ * （原每作者 2 条查询，N 个作者 2N 条；批量后固定 2 条）。
+ */
+follows.get('/batch-status', authMiddleware, async (c) => {
+  const user = c.get('user')
+  const ids = [...new Set(
+    (c.req.query('ids') || '')
+      .split(',')
+      .map(s => parseInt(s.trim(), 10))
+      .filter(n => Number.isInteger(n) && n > 0)
+  )].slice(0, 100)
+
+  if (ids.length === 0) return c.json({ statuses: {} })
+
+  const placeholders = ids.map(() => '?').join(',')
+  const followingRows = await query<{ following_id: number }>(
+    c.env.abdl_space_db,
+    `SELECT following_id FROM follows WHERE follower_id = ? AND following_id IN (${placeholders})`,
+    [user.sub, ...ids]
+  )
+  const followerRows = await query<{ follower_id: number }>(
+    c.env.abdl_space_db,
+    `SELECT follower_id FROM follows WHERE following_id = ? AND follower_id IN (${placeholders})`,
+    [user.sub, ...ids]
+  )
+  const followingSet = new Set(followingRows.map(r => r.following_id))
+  const followerSet = new Set(followerRows.map(r => r.follower_id))
+
+  const statuses: Record<string, { following: boolean; follower: boolean; mutual: boolean }> = {}
+  for (const id of ids) {
+    const following = followingSet.has(id)
+    const follower = followerSet.has(id)
+    statuses[String(id)] = { following, follower, mutual: following && follower }
+  }
+  return c.json({ statuses })
+})
+
+/**
  * GET /api/follows/:userId/status — 关注状态
  */
 follows.get('/:userId/status', authMiddleware, async (c) => {

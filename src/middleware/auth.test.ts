@@ -13,10 +13,9 @@ test('authMiddleware installs a valid current user payload', async () => {
   }, secret)
   let installedUser: unknown = null
   let nextCalled = false
+  // authMiddleware 合并后单条查询：SELECT role, password_changed_at FROM users WHERE id = ?
   const rows = [
-    { name: 'auth_invalid_before' },
-    { password_changed_at: null, auth_invalid_before: null },
-    { role: 'user' },
+    { role: 'user', password_changed_at: null },
   ]
   const db = {
     prepare() {

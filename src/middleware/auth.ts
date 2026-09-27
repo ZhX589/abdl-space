@@ -37,8 +37,21 @@ async function lookupOAuthToken(db: D1Database, token: string): Promise<JWTPaylo
 /**
  * Extract and verify JWT or OAuth token from Authorization header or Cookie
  * Returns payload or null
+ *
+ * 同一请求内 memoize：ip-security 与 auth/admin 中间件都会调用 extractUser，
+ * OAuth token 路径每次调用要查 2 条 D1，memo 后每个请求只解析一次。
  */
+const extractUserMemo = new WeakMap<object, JWTPayload | null>()
+
 export async function extractUser(c: Context<AppType>): Promise<JWTPayload | null> {
+  const memoized = extractUserMemo.get(c)
+  if (memoized !== undefined) return memoized
+  const result = await extractUserUncached(c)
+  extractUserMemo.set(c, result)
+  return result
+}
+
+async function extractUserUncached(c: Context<AppType>): Promise<JWTPayload | null> {
   // Try Authorization header first
   const authHeader = c.req.header('Authorization')
   if (authHeader && authHeader.startsWith('Bearer ')) {
@@ -66,8 +79,24 @@ export async function extractUser(c: Context<AppType>): Promise<JWTPayload | nul
 }
 
 /**
+ * BUG-177: 密码修改后旧 JWT 失效（仅 JWT，跳过 OAuth token）—— 纯判断部分。
+ * 同一秒内无法证明先后，fail-closed。
+ */
+export function checkSessionStale(payload: JWTPayload, passwordChangedAt: string | null | undefined): string | null {
+  if (payload.iat <= 0) return null // OAuth token, skip check
+  if (passwordChangedAt) {
+    const pwdChangedSec = Math.floor(new Date(passwordChangedAt).getTime() / 1000)
+    const tokenIat = payload.iat > 1e12 ? Math.floor(payload.iat / 1000) : payload.iat
+    if (tokenIat <= pwdChangedSec) {
+      return 'Session expired, please login again'
+    }
+  }
+  return null
+}
+
+/**
  * BUG-177: 密码修改后旧 JWT 失效（仅 JWT，跳过 OAuth token）
- * 抽取为共享函数，authMiddleware 和 adminMiddleware 都调用
+ * 抽取为共享函数，authMiddleware、adminMiddleware 及 sponsor/baby-verification/novel 等鉴权路径都调用
  */
 export async function assertSessionNotStale(payload: JWTPayload, db: D1Database): Promise<string | null> {
   if (payload.iat <= 0) return null // OAuth token, skip check
@@ -77,20 +106,14 @@ export async function assertSessionNotStale(payload: JWTPayload, db: D1Database)
     [payload.sub]
   )
   if (!user) return 'Session expired, please login again'
-  if (user?.password_changed_at) {
-    const pwdChangedSec = Math.floor(new Date(user.password_changed_at).getTime() / 1000)
-    const tokenIat = payload.iat > 1e12 ? Math.floor(payload.iat / 1000) : payload.iat
-    // Second-resolution timestamps cannot prove ordering within the same second, so fail closed.
-    if (tokenIat <= pwdChangedSec) {
-      return 'Session expired, please login again'
-    }
-  }
-  return null
+  return checkSessionStale(payload, user.password_changed_at)
 }
 
 /**
  * JWT 认证中间件，从 Authorization: Bearer <token> 或 Cookie 提取并验证 JWT
  * 验证成功后设置 c.set('user', payload)，失败返回 401
+ *
+ * role 与 password_changed_at 同在 users 表，单条查询取回（原每请求 2 条 → 1 条）
  */
 export async function authMiddleware(c: Context<AppType>, next: Next): Promise<Response | void> {
   const payload = await extractUser(c)
@@ -98,18 +121,18 @@ export async function authMiddleware(c: Context<AppType>, next: Next): Promise<R
     return c.json({ error: 'Authentication required' }, 401)
   }
 
-  const staleError = await assertSessionNotStale(payload, c.env.abdl_space_db)
-  if (staleError) {
-    return c.json({ error: staleError }, 401)
-  }
-
-  const currentUser = await queryOne<{ role: string }>(
+  const currentUser = await queryOne<{ role: string; password_changed_at: string | null }>(
     c.env.abdl_space_db,
-    'SELECT role FROM users WHERE id = ?',
+    'SELECT role, password_changed_at FROM users WHERE id = ?',
     [payload.sub]
   )
   if (!currentUser) {
-    return c.json({ error: 'Authentication required' }, 401)
+    return c.json({ error: 'Session expired, please login again' }, 401)
+  }
+
+  const staleError = checkSessionStale(payload, currentUser.password_changed_at)
+  if (staleError) {
+    return c.json({ error: staleError }, 401)
   }
 
   c.set('user', { ...payload, role: currentUser.role })
@@ -126,17 +149,21 @@ export async function adminMiddleware(c: Context<AppType>, next: Next): Promise<
     return c.json({ error: 'Authentication required' }, 401)
   }
 
-  const staleError = await assertSessionNotStale(payload, c.env.abdl_space_db)
+  const currentUser = await queryOne<{ role: string; password_changed_at: string | null }>(
+    c.env.abdl_space_db,
+    'SELECT role, password_changed_at FROM users WHERE id = ?',
+    [payload.sub]
+  )
+  if (!currentUser) {
+    return c.json({ error: 'Session expired, please login again' }, 401)
+  }
+
+  const staleError = checkSessionStale(payload, currentUser.password_changed_at)
   if (staleError) {
     return c.json({ error: staleError }, 401)
   }
 
-  const currentUser = await queryOne<{ role: string }>(
-    c.env.abdl_space_db,
-    'SELECT role FROM users WHERE id = ?',
-    [payload.sub]
-  )
-  if (currentUser?.role !== 'admin') {
+  if (currentUser.role !== 'admin') {
     return c.json({ error: 'Admin access required' }, 403)
   }
 
