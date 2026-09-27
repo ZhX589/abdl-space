@@ -1,7 +1,7 @@
 import { Hono } from 'hono'
 import { bodyLimit } from 'hono/body-limit'
 import type { BabyVerificationAppType } from '../lib/baby-verification.ts'
-import { authorizeAdminBabyEvidence, babyAdminMiddleware, babyText, babyVerificationErrorResponse, claimBabyApplication, decideBabyApplication, decryptBabyQq, getBabyApplication, getBabyVerificationConfig, mutateBabyCertificate, readBabyJson, releaseBabyApplication, updateBabyVerificationConfig } from '../lib/baby-verification.ts'
+import { authorizeAdminBabyEvidence, babyAdminMiddleware, babyText, babyVerificationErrorResponse, claimBabyApplication, decideBabyApplication, decryptBabyQq, getAdminBabyCertificate, getBabyApplication, getBabyVerificationConfig, mutateBabyCertificate, readBabyJson, releaseBabyApplication, updateBabyVerificationConfig } from '../lib/baby-verification.ts'
 
 const adminBabyVerification=new Hono<BabyVerificationAppType>()
 adminBabyVerification.use('*',bodyLimit({maxSize:65536,onError:c=>c.json({error:'请求内容过大',code:'request_too_large'},413)}))
@@ -28,13 +28,7 @@ adminBabyVerification.get('/applications/:id',async c=>{
 	const user=await c.env.abdl_space_db.prepare('SELECT id,username,avatar FROM users WHERE id=?').bind(row.user_id).first()
 	const evidence=await c.env.abdl_space_db.prepare('SELECT id,kind,mime_type,declared_size,verified_size,status,completed_at FROM baby_verification_evidence WHERE application_id=? ORDER BY kind').bind(row.id).all()
 	const capture_session=await c.env.abdl_space_db.prepare('SELECT id,status,instructions_version,paper_shape,fold_instruction,placement_instruction,random_text,expires_at,completed_at FROM baby_verification_capture_sessions WHERE id=? AND user_id=?').bind(row.capture_session_id,row.user_id).first()
-	const certificateRow=await c.env.abdl_space_db.prepare(`SELECT c.id,c.status,c.issued_at,c.revoked_at,c.current_credential_id,c.credential_generation AS generation FROM baby_verification_certificates c WHERE c.application_id=?`).bind(row.id).first<Record<string,unknown>>()
-	let certificate:Record<string,unknown>|null=null
-	if(certificateRow){
-		const {deriveBabyCredentialToken}=await import('../lib/baby-verification.ts')
-		const token=certificateRow.current_credential_id ? await deriveBabyCredentialToken(c.env,String(certificateRow.current_credential_id)) : null
-		certificate={id:certificateRow.id,status:certificateRow.status,issued_at:certificateRow.issued_at,revoked_at:certificateRow.revoked_at,generation:certificateRow.generation,...(token?{verification_token:token,verify_path:`/api/v1/baby-verification/verify/${token}`}:{})}
-	}
+	const certificate=await getAdminBabyCertificate(c.env,row.id)
 	return c.json({...row,qq:await decryptBabyQq(c.env,row.qq,row.id),adult_declaration:!!row.adult_declaration,user,capture_session,evidence:evidence.results,certificate})
 })
 adminBabyVerification.post('/applications/:id/claim',async c=>c.json(await claimBabyApplication(c.env,c.get('user').sub,c.req.param('id'))))

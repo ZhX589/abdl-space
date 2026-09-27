@@ -404,12 +404,40 @@ export async function acknowledgeBabyRejection(env: Env, userId: number, applica
 	return { id:applicationId,status:row.status,rejection_acknowledged_at:row.rejection_acknowledged_at }
 }
 
-/** Return a private certificate and reproducible current QR token to its owner. */
+/** Return explicit certificate state and the reproducible current QR token only while active. */
 export async function getBabyCertificateMe(env: Env, userId: number): Promise<Record<string, unknown> | null> {
-	const row = await env.abdl_space_db.prepare(`SELECT c.id,c.status,c.issued_at,c.revoked_at,c.current_credential_id,g.generation FROM baby_verification_certificates c LEFT JOIN baby_verification_credentials g ON g.id=c.current_credential_id WHERE c.user_id=? ORDER BY c.created_at DESC LIMIT 1`).bind(userId).first<Record<string, unknown>>()
+	const row = await env.abdl_space_db.prepare(`SELECT c.id,c.status,c.issued_at,c.revoked_at,c.revoke_reason,c.current_credential_id,c.credential_generation AS generation,g.status AS credential_status FROM baby_verification_certificates c LEFT JOIN baby_verification_credentials g ON g.id=c.current_credential_id WHERE c.user_id=? ORDER BY c.created_at DESC LIMIT 1`).bind(userId).first<Record<string, unknown>>()
 	if (!row) return null
-	const token = row.current_credential_id ? await deriveBabyCredentialToken(env,String(row.current_credential_id)) : null
-	return { ...row, verification_token:token, verify_path:token ? `/api/v1/baby-verification/verify/${token}` : null }
+	const activeCredentialId = row.status === 'active' && row.credential_status === 'active' && row.current_credential_id ? String(row.current_credential_id) : null
+	const token = activeCredentialId ? await deriveBabyCredentialToken(env,activeCredentialId) : null
+	return {
+		id:row.id,
+		status:row.status,
+		issued_at:row.issued_at,
+		revoked_at:row.revoked_at,
+		revoke_reason:row.revoke_reason,
+		generation:row.generation,
+		...(token?{verification_token:token,verify_path:`/api/v1/baby-verification/verify/${token}`}:{})
+	}
+}
+
+/** Return the certificate projection included in an administrator's application detail. */
+export async function getAdminBabyCertificate(env: Env, applicationId: string): Promise<Record<string, unknown> | null> {
+	const row=await env.abdl_space_db.prepare(`SELECT c.id,c.status,c.issued_at,c.revoked_at,c.revoke_reason,c.revoked_by,admin.username AS revoked_by_username,c.current_credential_id,c.credential_generation AS generation,g.status AS credential_status FROM baby_verification_certificates c LEFT JOIN baby_verification_credentials g ON g.id=c.current_credential_id LEFT JOIN users admin ON admin.id=c.revoked_by WHERE c.application_id=?`).bind(applicationId).first<Record<string,unknown>>()
+	if(!row)return null
+	const activeCredentialId=row.status==='active'&&row.credential_status==='active'&&row.current_credential_id?String(row.current_credential_id):null
+	const token=activeCredentialId?await deriveBabyCredentialToken(env,activeCredentialId):null
+	return {
+		id:row.id,
+		status:row.status,
+		issued_at:row.issued_at,
+		revoked_at:row.revoked_at,
+		revoke_reason:row.revoke_reason,
+		revoked_by:row.revoked_by,
+		revoked_by_username:row.revoked_by_username,
+		generation:row.generation,
+		...(token?{verification_token:token,verify_path:`/api/v1/baby-verification/verify/${token}`}:{})
+	}
 }
 
 /** Return the minimal public certificate projection used by profile account entities. */
@@ -424,10 +452,10 @@ export async function getPublicBabyVerification(env: Env, userId: number): Promi
 export async function verifyBabyCredential(env: Env, token: string): Promise<Record<string, unknown>> {
 	if (!/^[A-Za-z0-9_-]{43}$/.test(token)) return { valid:false,status:'unknown' }
 	const hash = await babyHash('public-credential:v1',token)
-	const row = await env.abdl_space_db.prepare(`SELECT g.status AS credential_status,g.generation,g.issued_at,c.status AS certificate_status,c.issued_at AS certificate_issued_at,u.username FROM baby_verification_credentials g JOIN baby_verification_certificates c ON c.id=g.certificate_id JOIN users u ON u.id=c.user_id WHERE g.token_hash=?`).bind(hash).first<Record<string, unknown>>()
+	const row = await env.abdl_space_db.prepare(`SELECT g.status AS credential_status,g.generation,g.issued_at,g.superseded_at,g.revoked_at AS credential_revoked_at,c.status AS certificate_status,c.issued_at AS certificate_issued_at,c.revoked_at AS certificate_revoked_at,c.revoke_reason,u.username FROM baby_verification_credentials g JOIN baby_verification_certificates c ON c.id=g.certificate_id JOIN users u ON u.id=c.user_id WHERE g.token_hash=?`).bind(hash).first<Record<string, unknown>>()
 	if (!row) return { valid:false,status:'unknown' }
-	if (row.credential_status === 'superseded') return { valid:false,status:'superseded',superseded:true }
-	if (row.credential_status === 'revoked' || row.certificate_status === 'revoked') return { valid:false,status:'revoked' }
+	if (row.credential_status === 'superseded') return { valid:false,status:'superseded',superseded:true,superseded_at:row.superseded_at }
+	if (row.credential_status === 'revoked' || row.certificate_status === 'revoked') return { valid:false,status:'revoked',revoked_at:row.certificate_revoked_at??row.credential_revoked_at,revoke_reason:row.revoke_reason }
 	return { valid:true,status:'active',username:row.username,issued_at:row.certificate_issued_at,generation:row.generation }
 }
 
@@ -539,7 +567,8 @@ export async function mutateBabyCertificate(env: Env, adminId: number, certifica
 	const now=Math.floor(Date.now()/1000)
 	if(action==='revoke'){
 		if(certificate.status!=='active')throw new BabyVerificationError('certificate_conflict','证书已吊销',409)
-		const body={id:certificateId,status:'revoked',revoked_at:now}; const text=JSON.stringify(body)
+			const body={id:certificateId,status:'revoked',revoked_at:now,revoke_reason:reason}; const text=JSON.stringify(body)
+
 		let results:D1Result[]
 		try { results=await env.abdl_space_db.batch([
 			env.abdl_space_db.prepare(`UPDATE baby_verification_certificates SET status='revoked',revoked_at=?,revoked_by=?,revoke_reason=? WHERE id=? AND status='active'`).bind(now,adminId,reason,certificateId),
