@@ -10,7 +10,8 @@ function mockDb(results: Record<string, unknown>[][]) {
     prepare() {
       prepareCount++
       const all = async () => ({ success: true, results: results.shift() ?? [] })
-      return { all, bind() { return { all } } }
+      const run = async () => ({ success: true, meta: {} })
+      return { all, run, bind() { return { all, run } } }
     },
   }
   return { db, count: () => prepareCount }
@@ -69,4 +70,25 @@ test('tracking rule lookup is cached per user', async () => {
   const second = await ipSecurityMiddleware(makeContext(db, headers), next)
   assert.equal(second, 'nexted')
   assert.equal(count(), 2, 'second request: both lookups served from cache')
+})
+
+test('automatic ban replaces an earlier negative cache entry immediately', async () => {
+  cacheClear()
+  const token = await signJWT({ sub: 9, username: 'tracked', email: 'tracked@example.com', role: 'user' }, 'test-secret')
+  const ip = '203.0.113.13'
+  const { db, count } = mockDb([[], [{ user_id: 9 }]])
+
+  const trackedResponse = await ipSecurityMiddleware(
+    makeContext(db, { 'CF-Connecting-IP': ip, Authorization: `Bearer ${token}` }),
+    next,
+  )
+  assert.equal((trackedResponse as Response).status, 403)
+  assert.equal(count(), 4, 'ban lookup + tracking lookup + event insert + ban insert')
+
+  const anonymousResponse = await ipSecurityMiddleware(
+    makeContext(db, { 'CF-Connecting-IP': ip }),
+    next,
+  )
+  assert.equal((anonymousResponse as Response).status, 403)
+  assert.equal(count(), 4, 'anonymous retry is blocked from the positive cache without D1')
 })

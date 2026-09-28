@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import type { Env, JWTPayload } from '../types/index.ts'
 import { query, queryOne, run } from '../lib/db.ts'
+import { invalidateFeedCount } from '../lib/post-count-cache.ts'
 import { authMiddleware, adminMiddleware } from '../middleware/auth.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
@@ -121,7 +122,11 @@ reports.patch('/admin/:id', adminMiddleware, async (c) => {
 
   if (delete_content && action === 'resolve') {
     if (report.target_type === 'post') {
+      const target = await queryOne<{ in_reply_to_id: number | null }>(
+        c.env.abdl_space_db, 'SELECT in_reply_to_id FROM posts WHERE id = ?', [report.target_id]
+      )
       await run(c.env.abdl_space_db, 'DELETE FROM posts WHERE id = ?', [report.target_id])
+      if (target?.in_reply_to_id === null) await invalidateFeedCount(c.env)
     } else {
       // 删除评论图片
       const cmtImages = await query<{ image_url: string }>(

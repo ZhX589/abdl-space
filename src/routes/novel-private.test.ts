@@ -119,10 +119,10 @@ function createDb(initialRows: BookRow[] = [], options: {
 								const token = oauthTokens.get(String(params[0]))
 								return { success: true, results: token ? [{ client_id: 'novel-client', user_id: token.userId, scopes: token.scopes, access_expires_at: Math.floor(Date.now() / 1000) + 300, revoked: 0 }] : [] }
 							}
-							if (sql.includes('SELECT password_changed_at FROM users')) {
-								const id = Number(params[0])
-								return { success: true, results: [{ password_changed_at: passwordChangedAt.get(id) ?? null }] }
-							}
+								if (sql.includes('password_changed_at') && sql.includes('FROM users')) {
+									const id = Number(params[0])
+									return { success: true, results: [{ password_changed_at: passwordChangedAt.get(id) ?? null, auth_invalid_before: null }] }
+								}
 							if (sql.includes('FROM users')) {
 								const id = Number(params[0])
 								return { success: true, results: [{ id, username: `user${id}`, email: `user${id}@example.test`, role: 'user' }] }

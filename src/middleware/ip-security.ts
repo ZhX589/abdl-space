@@ -1,7 +1,7 @@
 import type { Context, Next } from 'hono'
 import type { Env, JWTPayload } from '../types/index.ts'
 import { queryOne, run } from '../lib/db.ts'
-import { cacheGet, cacheSet } from '../lib/ttl-cache.ts'
+import { cacheIpBan, cacheTrackingRule, getCachedIpBan, getCachedTrackingRule } from '../lib/ip-security-cache.ts'
 import { extractUser } from './auth.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
@@ -11,27 +11,17 @@ function getClientIp(c: Context<AppType>): string | null {
   return ip && ip !== 'unknown' ? ip : null
 }
 
-// 封禁检查挂在 app.use('*')，是全站每个请求的第一跳，D1 直查会成为执行次数最高的查询。
-// 内存缓存命中后跳过 D1；封禁生效/解封最多延迟一个 TTL（与 KV 最终一致同量级）。
-const IP_BAN_CACHE_TTL_MS = 30_000
-const IP_BAN_CACHE_KEY_PREFIX = 'ipban:'
-
-// 追踪规则由管理员低频开关；缓存后启用追踪最多延迟一个 TTL。
-const TRACKING_RULE_CACHE_TTL_MS = 60_000
-const TRACKING_RULE_CACHE_KEY_PREFIX = 'trackrule:'
-
 export async function ipSecurityMiddleware(c: Context<AppType>, next: Next): Promise<Response | void> {
   const ip = getClientIp(c)
   const db = c.env.abdl_space_db
 
   if (ip) {
-    const banKey = IP_BAN_CACHE_KEY_PREFIX + ip
-    const cachedBan = cacheGet<boolean>(banKey)
+    const cachedBan = getCachedIpBan(ip)
     if (cachedBan === true) return c.json({ error: 'Access denied' }, 403)
     if (cachedBan === undefined) {
       try {
         const ban = await queryOne<{ ip: string }>(db, 'SELECT ip FROM ip_bans WHERE ip = ?', [ip])
-        cacheSet(banKey, !!ban, IP_BAN_CACHE_TTL_MS)
+        cacheIpBan(ip, !!ban)
         if (ban) return c.json({ error: 'Access denied' }, 403)
       } catch {
         // D1 故障（配额耗尽等）：fail-open 放行，避免把每个请求都拖成 500。
@@ -49,8 +39,7 @@ export async function ipSecurityMiddleware(c: Context<AppType>, next: Next): Pro
   }
   if (!user) return next()
 
-  const ruleKey = TRACKING_RULE_CACHE_KEY_PREFIX + user.sub
-  let tracked = cacheGet<boolean>(ruleKey)
+  let tracked = getCachedTrackingRule(user.sub)
   if (tracked === undefined) {
     try {
       const tracking = await queryOne<{ user_id: number }>(
@@ -59,7 +48,7 @@ export async function ipSecurityMiddleware(c: Context<AppType>, next: Next): Pro
         [user.sub],
       )
       tracked = !!tracking
-      cacheSet(ruleKey, tracked, TRACKING_RULE_CACHE_TTL_MS)
+      cacheTrackingRule(user.sub, tracked)
     } catch {
       // D1 故障：按未开启追踪处理放行（与封禁检查的 fail-open 语义一致）。
       tracked = false
@@ -80,6 +69,9 @@ export async function ipSecurityMiddleware(c: Context<AppType>, next: Next): Pro
      ON CONFLICT(ip) DO NOTHING`,
     [ip, user.sub, 'Tracked account access', user.sub, now],
   )
+  // 本请求前半段可能已把该 IP 负缓存为未封禁；写入成功后必须立刻改为 true，
+  // 防止客户端去掉认证信息后在 TTL 窗口内绕过封禁。
+  cacheIpBan(ip, true)
 
   return c.json({ error: 'Access denied' }, 403)
 }

@@ -6,8 +6,7 @@ import { authMiddleware } from '../middleware/auth.ts'
 import { rateLimit } from '../lib/rate-limit.ts'
 import { syncPostToNBW } from '../lib/nbw-sync.ts'
 import { sendJPushNotification } from '../lib/jpush.ts'
-import { cacheGet, cacheSet } from '../lib/ttl-cache.ts'
-import { kvCacheGet, kvCacheSet } from '../lib/kv-cache.ts'
+import { cacheFeedCount, cacheFeedCountInMemory, getFeedCountFromKv, getFeedCountFromMemory, invalidateFeedCount } from '../lib/post-count-cache.ts'
 
 const IMGBED_URL = 'https://img.abdl-space.top'
 
@@ -144,22 +143,18 @@ posts.get('/', async (c) => {
   const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
 
   // 默认时间线（无搜索、无筛选）的 total 走两级缓存：内存 60s + KV 15min。
-  // COUNT(*) WHERE in_reply_to_id IS NULL 选择性差、接近全表扫描，是 D1 读取行数最大的一条；
-  // total 仅用于分页展示，允许最长 KV TTL 的滞后。
-  const FEED_COUNT_MEM_TTL_MS = 60_000
-  const FEED_COUNT_KV_KEY = 'feed:top:total'
-  const FEED_COUNT_KV_TTL_SEC = 900
+  // 所有顶层帖子创建/删除写路径都会主动失效该缓存。
   const isDefaultFeed = !search && !filter
   let total: number
   if (isDefaultFeed) {
-    const memTotal = cacheGet<number>(FEED_COUNT_KV_KEY)
+    const memTotal = getFeedCountFromMemory()
     if (memTotal !== undefined) {
       total = memTotal
     } else {
-      const kvTotal = await kvCacheGet<number>(c.env.NOTICE_KV, FEED_COUNT_KV_KEY)
+      const kvTotal = await getFeedCountFromKv(c.env)
       if (kvTotal !== null) {
         total = kvTotal
-        cacheSet(FEED_COUNT_KV_KEY, kvTotal, FEED_COUNT_MEM_TTL_MS)
+        cacheFeedCountInMemory(kvTotal)
       } else {
         const countResult = await query<{ total: number }>(
           c.env.abdl_space_db,
@@ -167,8 +162,7 @@ posts.get('/', async (c) => {
           params
         )
         total = countResult[0]?.total ?? 0
-        cacheSet(FEED_COUNT_KV_KEY, total, FEED_COUNT_MEM_TTL_MS)
-        await kvCacheSet(c.env.NOTICE_KV, FEED_COUNT_KV_KEY, total, FEED_COUNT_KV_TTL_SEC)
+        await cacheFeedCount(c.env, total)
       }
     }
   } else {
@@ -539,6 +533,8 @@ posts.post('/', authMiddleware, async (c) => {
   )
 
   const postId = result.meta.last_row_id
+  // INSERT 已改变默认时间线总数；后续图片/奖励步骤即使失败，也不能继续沿用旧 COUNT。
+  await invalidateFeedCount(c.env)
 
   // NBW 异步双发（不阻塞响应）
   const mediaUrls = (images || []).map(img => typeof img === 'string' ? img : img.url).filter(Boolean)
@@ -622,8 +618,8 @@ posts.delete('/:id', authMiddleware, async (c) => {
   const user = c.get('user')
   const id = parseInt(c.req.param('id') || '')
 
-  const post = await queryOne<{ id: number; user_id: number }>(
-    c.env.abdl_space_db, 'SELECT id, user_id FROM posts WHERE id = ?', [id]
+  const post = await queryOne<{ id: number; user_id: number; in_reply_to_id: number | null }>(
+    c.env.abdl_space_db, 'SELECT id, user_id, in_reply_to_id FROM posts WHERE id = ?', [id]
   )
   if (!post) return c.json({ error: 'Post not found' }, 404)
   if (user.role !== 'admin' && post.user_id !== user.sub) {
@@ -696,6 +692,7 @@ posts.delete('/:id', authMiddleware, async (c) => {
   }
 
   await c.env.abdl_space_db.batch(batchOps)
+  if (post.in_reply_to_id === null) await invalidateFeedCount(c.env)
   return c.json({ message: '已删除' })
 })
 

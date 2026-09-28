@@ -33,6 +33,7 @@ import { buildMediaPreviewUrl, canonicalMediaPreviewCacheUrl, fetchTrustedMediaS
 import { buildMediaObjectKey, validateMediaUpload } from '../lib/media-upload.ts'
 import { buildCosObjectUrl, putObjectToCos } from '../lib/tencent-cos.ts'
 import { getCompletedUploadReference, uploadLegacyObject } from '../lib/upload-consumer.ts'
+import { invalidateFeedCount } from '../lib/post-count-cache.ts'
 import type { MediaUploadPurpose } from '../lib/media-upload.ts'
 import { getPublicBabyVerification } from '../lib/baby-verification.ts'
 
@@ -1132,6 +1133,7 @@ mastodon.post('/statuses', async (c) => {
   } catch (error) {
     console.error('Status creation failed after post insert', { postId, userId: user.sub, error: String(error) })
     await run(c.env.abdl_space_db, 'DELETE FROM posts WHERE id = ?', [postId])
+    if (inReplyToId === null) await invalidateFeedCount(c.env)
     return c.json({ error: 'Failed to attach media to status' }, 500)
   }
 
@@ -1186,6 +1188,7 @@ mastodon.post('/statuses', async (c) => {
     )
   )
 
+  if (inReplyToId === null) await invalidateFeedCount(c.env)
   return c.json(toStatus({
     id: post.id as number, user_id: post.user_id as number, content: post.content as string,
     like_count: post.like_count as number, comment_count: post.comment_count as number,
@@ -1343,10 +1346,11 @@ mastodon.delete('/statuses/:id', async (c) => {
     return c.json({ id: rawId, text: '', account: toAccount({ id: user.sub, username: 'user', avatar: null, role: 'user', bio: null, created_at: new Date().toISOString() }), media_attachments: [], poll: null })
   }
 
-  const post = await queryOne<{ id: number; user_id: number }>(c.env.abdl_space_db, 'SELECT id, user_id FROM posts WHERE id = ?', [resolved.realId])
+  const post = await queryOne<{ id: number; user_id: number; in_reply_to_id: number | null }>(c.env.abdl_space_db, 'SELECT id, user_id, in_reply_to_id FROM posts WHERE id = ?', [resolved.realId])
   if (!post) return c.json({ error: 'Record not found' }, 404)
   if (post.user_id !== user.sub && user.role !== 'admin') return c.json({ error: 'Forbidden' }, 403)
   await run(c.env.abdl_space_db, 'DELETE FROM posts WHERE id = ?', [resolved.realId])
+  if (post.in_reply_to_id === null) await invalidateFeedCount(c.env)
   return c.json({ id: rawId, text: '', account: toAccount({ id: user.sub, username: 'user', avatar: null, role: 'user', bio: null, created_at: new Date().toISOString() }), media_attachments: [], poll: null })
 })
 
@@ -1467,6 +1471,7 @@ mastodon.post('/statuses/:id/reblog', async (c) => {
     'INSERT INTO posts (user_id, content, repost_id) VALUES (?, ?, ?)',
     [user.sub, '', realId]
   )
+  await invalidateFeedCount(c.env)
 
   // Notify original post author
   const origPost = await queryOne<{ user_id: number }>(c.env.abdl_space_db, 'SELECT user_id FROM posts WHERE id = ?', [realId])
@@ -1515,6 +1520,7 @@ mastodon.post('/statuses/:id/unreblog', async (c) => {
   )
   if (repost) {
     await run(c.env.abdl_space_db, 'DELETE FROM posts WHERE id = ?', [repost.id])
+    await invalidateFeedCount(c.env)
   }
 
   // Return original post with reblogged: false
@@ -3071,6 +3077,7 @@ mastodon.post('/announcements', async (c) => {
     'INSERT INTO posts (user_id, content, is_announcement) VALUES (?, ?, 1)',
     [user.sub, body.content]
   )
+  await invalidateFeedCount(c.env)
 
   return c.json({ id: String(result.meta.last_row_id) }, 201)
 })
@@ -3087,6 +3094,7 @@ mastodon.delete('/announcements/:id', async (c) => {
   if (!resolved || resolved.kind !== 'post') return c.json({ error: 'Record not found' }, 404)
 
   await run(c.env.abdl_space_db, 'DELETE FROM posts WHERE id = ?', [resolved.realId])
+  await invalidateFeedCount(c.env)
   return c.json({})
 })
 

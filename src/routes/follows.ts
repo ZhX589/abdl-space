@@ -92,9 +92,11 @@ follows.get('/batch-status', authMiddleware, async (c) => {
   const ids = [...new Set(
     (c.req.query('ids') || '')
       .split(',')
-      .map(s => parseInt(s.trim(), 10))
-      .filter(n => Number.isInteger(n) && n > 0)
-  )].slice(0, 100)
+      .map(s => s.trim())
+      .filter(s => /^\d+$/.test(s))
+      .map(Number)
+      .filter(n => Number.isSafeInteger(n) && n > 0)
+  )].slice(0, 99) // 加上前导 user.sub 后总绑定参数不超过 D1 的 100 个上限
 
   if (ids.length === 0) return c.json({ statuses: {} })
 

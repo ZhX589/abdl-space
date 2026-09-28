@@ -5,6 +5,8 @@ import type { Env, JWTPayload } from '../types/index.ts'
 import { query, queryOne, run } from '../lib/db.ts'
 import { cacheDelete, cacheDeletePrefix } from '../lib/ttl-cache.ts'
 import { kvCacheInvalidate } from '../lib/kv-cache.ts'
+import { cacheIpBan, cacheTrackingRule, clearIpBanCache, invalidateTrackingRule } from '../lib/ip-security-cache.ts'
+import { invalidateFeedCount } from '../lib/post-count-cache.ts'
 import { adminMiddleware } from '../middleware/auth.ts'
 
 const IMGBED_URL = 'https://img.abdl-space.top'
@@ -515,6 +517,7 @@ admin.delete('/users/:id', adminMiddleware, async (c) => {
   // 投票
   await run(db, 'DELETE FROM polls WHERE status_id IN (SELECT id FROM posts WHERE user_id = ?)', [id])
   await run(db, 'DELETE FROM posts WHERE user_id = ?', [id])
+  if (postIds.length > 0) await invalidateFeedCount(c.env)
   // 点赞/收藏/评分/感受
   await run(db, 'DELETE FROM likes WHERE user_id = ?', [id])
   await run(db, 'DELETE FROM ratings WHERE user_id = ?', [id])
@@ -574,8 +577,11 @@ admin.delete('/users/:id', adminMiddleware, async (c) => {
   // IP 追踪记录（ip_tracking_rules.user_id、ip_tracking_events.user_id、ip_bans.source_user_id
   // 均指向 users 无 CASCADE，须在删用户前清理；封禁表还引用了创建者）
   await run(db, 'DELETE FROM ip_tracking_rules WHERE user_id = ? OR created_by = ?', [id, id])
+  invalidateTrackingRule(id)
   await run(db, 'DELETE FROM ip_tracking_events WHERE user_id = ?', [id])
   await run(db, 'DELETE FROM ip_bans WHERE source_user_id = ? OR created_by = ?', [id, id])
+  // 删除条件无法列出所有受影响 IP，保守清空当前 isolate 的封禁缓存。
+  clearIpBanCache()
   // Wiki 内容与条款（author_id / created_by 指向 users 且 no CASCADE，保留内容、置空归属）
   await run(db, 'UPDATE wiki_pages SET author_id = NULL WHERE author_id = ?', [id])
   await run(db, 'UPDATE page_versions SET author_id = NULL WHERE author_id = ?', [id])
@@ -639,6 +645,7 @@ admin.post('/security/users/:id/track-and-ban', adminMiddleware, async (c) => {
      ON CONFLICT(user_id) DO UPDATE SET enabled = 1, created_by = excluded.created_by, created_at = excluded.created_at`,
     [id, operator.sub, now],
   )
+  cacheTrackingRule(id, true)
   const ips = await query<{ ip: string }>(
     db,
     'SELECT DISTINCT ip FROM ip_tracking_events WHERE user_id = ? AND ip <> ? AND ip <> ? ',
@@ -652,6 +659,7 @@ admin.post('/security/users/:id/track-and-ban', adminMiddleware, async (c) => {
        ON CONFLICT(ip) DO NOTHING`,
       [row.ip, id, 'Tracked account access', operator.sub, now],
     )
+    cacheIpBan(row.ip, true)
   }
 
   return c.json({ tracked: true, banned_ip_count: ips.length })
@@ -776,7 +784,7 @@ admin.delete('/posts/:id', adminMiddleware, async (c) => {
   const id = parseInt(c.req.param('id') || '')
 
   const db = c.env.abdl_space_db
-  const post = await queryOne<{ id: number }>(db, 'SELECT id FROM posts WHERE id = ?', [id])
+  const post = await queryOne<{ id: number; in_reply_to_id: number | null }>(db, 'SELECT id, in_reply_to_id FROM posts WHERE id = ?', [id])
   if (!post) return c.json({ error: 'Post not found' }, 404)
 
   // 浏览记录：post_views.post_id -> posts 无 ON DELETE CASCADE，删帖前必须清
@@ -794,6 +802,7 @@ admin.delete('/posts/:id', adminMiddleware, async (c) => {
   await deleteCommentTree(db, comments.map(r => r.id))
   // 转发/投票：post_shares、polls 对 posts 均为 ON DELETE CASCADE，随 posts 删除自动清理
   await run(db, 'DELETE FROM posts WHERE id = ?', [id])
+  if (post.in_reply_to_id === null) await invalidateFeedCount(c.env)
   return c.json({ message: '已删除' })
 })
 

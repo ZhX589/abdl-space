@@ -78,35 +78,75 @@ async function extractUserUncached(c: Context<AppType>): Promise<JWTPayload | nu
   return null
 }
 
+type UserSessionState = {
+  role?: string
+  password_changed_at: string | null
+  auth_invalid_before?: number | null
+}
+
+// 恢复期旧库可能没有 auth_invalid_before。新库直接用合并查询；只有遇到明确的
+// 缺列错误时才缓存为 legacy 并回退，正常生产请求仍只有一条 users 查询。
+const LEGACY_AUTH_SCHEMA_RETRY_MS = 60_000
+const authInvalidBeforeSupport = new WeakMap<object, { supported: boolean; expiresAt: number }>()
+
+function isMissingAuthInvalidBefore(error: unknown): boolean {
+  return error instanceof Error
+    && /auth_invalid_before/i.test(error.message)
+    && /(no such column|no column named|unknown column)/i.test(error.message)
+}
+
+async function queryUserSessionState(db: D1Database, userId: number, includeRole: boolean): Promise<UserSessionState | null> {
+  const dbKey = db as object
+  const roleField = includeRole ? 'role, ' : ''
+  const support = authInvalidBeforeSupport.get(dbKey)
+  if (support?.supported === false && Date.now() < support.expiresAt) {
+    return queryOne<UserSessionState>(db, `SELECT ${roleField}password_changed_at FROM users WHERE id = ?`, [userId])
+  }
+
+  try {
+    const user = await queryOne<UserSessionState>(
+      db,
+      `SELECT ${roleField}password_changed_at, auth_invalid_before FROM users WHERE id = ?`,
+      [userId]
+    )
+    authInvalidBeforeSupport.set(dbKey, { supported: true, expiresAt: Number.POSITIVE_INFINITY })
+    return user
+  } catch (error) {
+    if (!isMissingAuthInvalidBefore(error)) throw error
+    authInvalidBeforeSupport.set(dbKey, { supported: false, expiresAt: Date.now() + LEGACY_AUTH_SCHEMA_RETRY_MS })
+    return queryOne<UserSessionState>(db, `SELECT ${roleField}password_changed_at FROM users WHERE id = ?`, [userId])
+  }
+}
+
 /**
- * BUG-177: 密码修改后旧 JWT 失效（仅 JWT，跳过 OAuth token）—— 纯判断部分。
- * 同一秒内无法证明先后，fail-closed。
+ * 密码修改或管理员强制撤销后旧 JWT 失效（仅 JWT，跳过 OAuth token）。
+ * 秒级时间戳无法证明同一秒内的先后，故使用 <= fail-closed。
  */
-export function checkSessionStale(payload: JWTPayload, passwordChangedAt: string | null | undefined): string | null {
+export function checkSessionStale(
+  payload: JWTPayload,
+  passwordChangedAt: string | null | undefined,
+  authInvalidBefore?: number | null,
+): string | null {
   if (payload.iat <= 0) return null // OAuth token, skip check
+  const tokenIat = payload.iat > 1e12 ? Math.floor(payload.iat / 1000) : payload.iat
   if (passwordChangedAt) {
     const pwdChangedSec = Math.floor(new Date(passwordChangedAt).getTime() / 1000)
-    const tokenIat = payload.iat > 1e12 ? Math.floor(payload.iat / 1000) : payload.iat
-    if (tokenIat <= pwdChangedSec) {
-      return 'Session expired, please login again'
-    }
+    if (tokenIat <= pwdChangedSec) return 'Session expired, please login again'
+  }
+  if (authInvalidBefore != null && tokenIat <= authInvalidBefore) {
+    return 'Session expired, please login again'
   }
   return null
 }
 
 /**
- * BUG-177: 密码修改后旧 JWT 失效（仅 JWT，跳过 OAuth token）
- * 抽取为共享函数，authMiddleware、adminMiddleware 及 sponsor/baby-verification/novel 等鉴权路径都调用
+ * 共享会话新鲜度检查，供 sponsor/baby-verification/novel 等非标准鉴权路径调用。
  */
 export async function assertSessionNotStale(payload: JWTPayload, db: D1Database): Promise<string | null> {
   if (payload.iat <= 0) return null // OAuth token, skip check
-  const user = await queryOne<{ password_changed_at: string | null }>(
-    db,
-    'SELECT password_changed_at FROM users WHERE id = ?',
-    [payload.sub]
-  )
+  const user = await queryUserSessionState(db, payload.sub, false)
   if (!user) return 'Session expired, please login again'
-  return checkSessionStale(payload, user.password_changed_at)
+  return checkSessionStale(payload, user.password_changed_at, user.auth_invalid_before)
 }
 
 /**
@@ -121,16 +161,12 @@ export async function authMiddleware(c: Context<AppType>, next: Next): Promise<R
     return c.json({ error: 'Authentication required' }, 401)
   }
 
-  const currentUser = await queryOne<{ role: string; password_changed_at: string | null }>(
-    c.env.abdl_space_db,
-    'SELECT role, password_changed_at FROM users WHERE id = ?',
-    [payload.sub]
-  )
+  const currentUser = await queryUserSessionState(c.env.abdl_space_db, payload.sub, true)
   if (!currentUser) {
     return c.json({ error: 'Session expired, please login again' }, 401)
   }
 
-  const staleError = checkSessionStale(payload, currentUser.password_changed_at)
+  const staleError = checkSessionStale(payload, currentUser.password_changed_at, currentUser.auth_invalid_before)
   if (staleError) {
     return c.json({ error: staleError }, 401)
   }
@@ -149,16 +185,12 @@ export async function adminMiddleware(c: Context<AppType>, next: Next): Promise<
     return c.json({ error: 'Authentication required' }, 401)
   }
 
-  const currentUser = await queryOne<{ role: string; password_changed_at: string | null }>(
-    c.env.abdl_space_db,
-    'SELECT role, password_changed_at FROM users WHERE id = ?',
-    [payload.sub]
-  )
+  const currentUser = await queryUserSessionState(c.env.abdl_space_db, payload.sub, true)
   if (!currentUser) {
     return c.json({ error: 'Session expired, please login again' }, 401)
   }
 
-  const staleError = checkSessionStale(payload, currentUser.password_changed_at)
+  const staleError = checkSessionStale(payload, currentUser.password_changed_at, currentUser.auth_invalid_before)
   if (staleError) {
     return c.json({ error: staleError }, 401)
   }
