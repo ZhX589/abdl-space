@@ -2839,7 +2839,7 @@ src/mastodon/
 - `POST /applications`：`{ capture_session_id, qq, adult_declaration: true, declaration_version }`；QQ 加密存储。
 - `GET /applications/:id`、`POST /applications/:id/cancel`。
 - `POST /applications/:id/evidence/authorize`：`{ kind, mime_type, declared_size, content_sha256, content_md5 }`；服务端生成 object key，返回短期私有 PUT 与必须签名的完整性头。
-- `POST /evidence/:id/complete`：私有 HEAD+GET 校验 MIME、长度和实际 SHA-256。
+- `POST /evidence/:id/complete`：私有 HEAD+GET 校验 MIME、长度和实际 SHA-256。明确 COS HEAD/GET 404 返回 `409 { error, code: "evidence_object_missing" }`；当前校验租约释放回 `pending`，客户端可用同一照片元数据重新 authorize→PUT→complete。权限错误、COS 5xx 与网络异常仍为 `502 verification_unavailable`，不能视为对象缺失；元数据/内容不符为 `422 evidence_mismatch`。`ready` 重放幂等，不重新读取 COS；未 ready 的过期授权为 `410 upload_expired`。重授权保持 evidence ID、object key、hash/大小绑定、private ACL、禁止覆盖及原授权 TTL；`failed` 或超过原 120 秒校验租约可回 `pending`，活跃 `verifying` 返回 `409 evidence_verifying`。
 - `POST /applications/:id/submit`：仅成功草稿→submitted 转换计入自然月额度；普通 2 次，有效赞助者 3 次。
 - `POST /applications/:id/rejection-acknowledge`。
 - `GET /certificates/me`：返回当前证书、256-bit 验证 token 与验证路径。

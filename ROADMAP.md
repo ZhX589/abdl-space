@@ -23,6 +23,7 @@
 | 4 | 证书、256-bit 凭证、公开验证、吊销与补发 | ✅ |
 | 5 | `verified` 徽章名称更新、通知跳转与 admin `unlocked_at` 修复 | ✅ |
 | 6 | migration 0065、完整 schema、API/部署说明与 node:test | ✅ |
+| 7 | COS 对象缺失返回 `409 evidence_object_missing`、上传重授权状态修复与真实函数/路由恢复链路回归（未部署） | ✅ |
 
 产品约束：不读取 `users.age`；仅接受并记录 `adult_declaration=true`、声明版本及时间。普通用户每自然月 2 次，有效赞助者 3 次，仅成功 submit 计入额度。
 
