@@ -298,14 +298,18 @@ export async function authorizeBabyEvidence(env: Env, userId: number, applicatio
 	const application = await getBabyApplication(env,applicationId,userId)
 	if (!application) throw new BabyVerificationError('application_not_found','申请不存在',404)
 	if (application.status !== 'draft') throw new BabyVerificationError('application_conflict','仅草稿申请可上传照片',409)
-	const existing = await env.abdl_space_db.prepare('SELECT id,kind,mime_type,declared_size,content_sha256,content_md5,status,object_key FROM baby_verification_evidence WHERE application_id=? AND kind=?').bind(applicationId,kind).first<Record<string, unknown>>()
+	const existing = await env.abdl_space_db.prepare('SELECT id,kind,mime_type,declared_size,content_sha256,content_md5,status,object_key,verification_started_at FROM baby_verification_evidence WHERE application_id=? AND kind=?').bind(applicationId,kind).first<Record<string, unknown>>()
 	if (existing && (existing.mime_type !== mimeType || existing.declared_size !== size || existing.content_sha256 !== sha256 || existing.content_md5 !== md5)) throw new BabyVerificationError('evidence_conflict','照片元数据与现有上传不一致',409)
 	if (existing?.status === 'ready') return { evidence_id: existing.id, status: 'ready', already_uploaded: true }
+	const staleBefore = Math.floor(Date.now()/1000)-120
+	if (existing?.status === 'verifying' && (existing.verification_started_at === null || Number(existing.verification_started_at) > staleBefore)) throw new BabyVerificationError('evidence_verifying','照片正在校验',409)
 	const id = existing ? String(existing.id) : crypto.randomUUID()
 	const objectKey = existing ? String(existing.object_key) : `baby-verification/private/${userId}/${applicationId}/${id}.${extension}`
 	const authorization = await createCosPutAuthorization({ ...cosOptions(env), objectKey, contentType: mimeType, metadataSha256: sha256, contentLength: size, contentMd5: md5, objectAcl: 'private', expiresInSeconds: config.upload_ttl_seconds })
-	if (existing) await env.abdl_space_db.prepare(`UPDATE baby_verification_evidence SET upload_expires_at=? WHERE id=? AND user_id=? AND status='pending'`).bind(authorization.expiresAt,id,userId).run()
-	else {
+	if (existing) {
+		const result = await env.abdl_space_db.prepare(`UPDATE baby_verification_evidence SET status='pending',upload_expires_at=?,verification_token=NULL,verification_started_at=NULL WHERE id=? AND user_id=? AND (status IN ('pending','failed') OR (status='verifying' AND verification_started_at<=?))`).bind(authorization.expiresAt,id,userId,staleBefore).run()
+		if (result.meta.changes !== 1) throw new BabyVerificationError('evidence_conflict','照片状态已变化，请重试',409)
+	} else {
 		const result = await env.abdl_space_db.prepare(`INSERT INTO baby_verification_evidence(id,application_id,user_id,kind,mime_type,object_key,declared_size,content_sha256,content_md5,status,upload_expires_at) VALUES(?,?,?,?,?,?,?,?,?,'pending',?) ON CONFLICT(application_id,kind) DO NOTHING`).bind(id,applicationId,userId,kind,mimeType,objectKey,size,sha256,md5,authorization.expiresAt).run()
 		if (result.meta.changes !== 1) throw new BabyVerificationError('evidence_conflict','照片上传并发冲突，请重试',409)
 	}
@@ -341,6 +345,7 @@ export async function completeBabyEvidence(env: Env, userId: number, evidenceId:
 			await logBabyEvidenceDiagnostic(evidenceId, 'HEAD', head.status, objectKey, head.headers.get('x-cos-request-id'))
 		} catch (error) {
 			await logBabyEvidenceDiagnostic(evidenceId, 'HEAD', error instanceof CosHttpError ? error.status : null, objectKey, error instanceof CosHttpError ? error.requestId : null)
+			if (error instanceof CosHttpError && error.status === 404) throw new BabyVerificationError('evidence_object_missing','照片尚未上传，请重新授权上传',409)
 			throw new BabyVerificationError('verification_unavailable','私有照片校验暂不可用',502)
 		}
 		const headSize = Number(head.headers.get('content-length'))
@@ -354,7 +359,8 @@ export async function completeBabyEvidence(env: Env, userId: number, evidenceId:
 			object = await getPrivateObjectFromCos(options)
 			await logBabyEvidenceDiagnostic(evidenceId, 'GET', object.status, objectKey, object.headers.get('x-cos-request-id'))
 		} catch (error) {
-			await logBabyEvidenceDiagnostic(evidenceId, 'unavailable', error instanceof CosHttpError ? error.status : null, objectKey, error instanceof CosHttpError ? error.requestId : null)
+			await logBabyEvidenceDiagnostic(evidenceId, 'GET', error instanceof CosHttpError ? error.status : null, objectKey, error instanceof CosHttpError ? error.requestId : null)
+			if (error instanceof CosHttpError && error.status === 404) throw new BabyVerificationError('evidence_object_missing','照片尚未上传，请重新授权上传',409)
 			throw new BabyVerificationError('verification_unavailable','私有照片校验暂不可用',502)
 		}
 		const bytes = await object.arrayBuffer()

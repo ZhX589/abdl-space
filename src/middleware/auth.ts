@@ -51,11 +51,17 @@ export async function extractUser(c: Context<AppType>): Promise<JWTPayload | nul
   return result
 }
 
-async function extractUserUncached(c: Context<AppType>): Promise<JWTPayload | null> {
-  // Try Authorization header first
+/** Verify only the native timeline bearer, never a fallback cookie or another path's auth memo. */
+export async function extractBearerUser(c: Context<AppType>): Promise<JWTPayload | null> {
+  return extractUserUncached(c, false)
+}
+
+async function extractUserUncached(c: Context<AppType>, allowCookie = true): Promise<JWTPayload | null> {
+  // Keep unrelated auth's existing case-sensitive behavior; Mastodon bearer auth is case-insensitive.
   const authHeader = c.req.header('Authorization')
-  if (authHeader && authHeader.startsWith('Bearer ')) {
-    const token = authHeader.slice(7)
+  const bearer = allowCookie ? (authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null) : authHeader?.match(/^Bearer\s+(.+)$/i)?.[1]
+  if (bearer) {
+    const token = bearer
     // 先尝试 JWT
     const payload = await verifyJWT(token, c.env.JWT_SECRET)
     if (payload) return payload
@@ -64,7 +70,7 @@ async function extractUserUncached(c: Context<AppType>): Promise<JWTPayload | nu
     if (oauthUser) return oauthUser
   }
   // Fallback to Cookie
-  const cookieHeader = c.req.header('Cookie')
+  const cookieHeader = allowCookie ? c.req.header('Cookie') : undefined
   if (cookieHeader) {
     const match = cookieHeader.match(/(?:^|;\s*)token=([^;]+)/)
     if (match) {

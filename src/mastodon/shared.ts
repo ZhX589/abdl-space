@@ -74,7 +74,10 @@ export async function mastodonAuthDetails(c: { req: { header: (name: string) => 
   return null
 }
 
-export async function mastodonAuth(c: { req: { header: (name: string) => string | undefined }; env: Env }): Promise<JWTPayload | null> {
+/** Native timelines reuse the request-local fresh session; other API auth is unchanged. */
+export async function mastodonAuth(c: { req: { header: (name: string) => string | undefined }; env: Env; get?: (key: 'appClientSession') => JWTPayload | null | undefined }): Promise<JWTPayload | null> {
+  const session = c.get?.('appClientSession')
+  if (session !== undefined) return session
   return (await mastodonAuthDetails(c))?.user ?? null
 }
 

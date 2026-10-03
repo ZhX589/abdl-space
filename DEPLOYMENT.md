@@ -27,7 +27,7 @@ npm run deploy
 
 **触发**: 基础 schema 或任一功能迁移有变更。
 
-`schemas/schema.sql` 只包含基础表。新数据库必须使用受测试的 bootstrap，按固定顺序应用基础 schema、账号徽章、赞助者、小说 v2 和宝宝认证迁移：
+`schemas/schema.sql` 包含基础表与部分完整功能表，不能替代有序增量迁移。新数据库必须使用 bootstrap manifest，按固定顺序应用 schema 与账号徽章、赞助者、小说 v2、宝宝认证、QQ 身份和 App client 等迁移（当前已有 paper_color 历史迁移回归缺陷需要单独处理，不能宣称 bootstrap 已全部通过）：
 
 ```bash
 npm run db:bootstrap -- --remote
@@ -49,7 +49,19 @@ npx wrangler d1 execute abdl-space-db --remote --file migrations/0043_cos_upload
 
 **必须在依赖新 schema 的代码部署之前执行**，否则新代码会因查不到表/字段而报错。
 
-### 2.3 种子数据部署（手动）
+### 2.3 Native App timeline policy rollout (migration 0070)
+
+1. Review and apply only `migrations/0070_app_clients.sql` to the intended existing D1 **before** deploying the Worker. New databases include it in `scripts/database-bootstrap-files.mjs`; do not replace existing tables with the full schema. This starts a new stable measurement epoch and deliberately does not backfill legacy has_app data.
+2. Deploy the reviewed Worker. Existing header-preserving proxies have been verified; no proxy implementation changes are required for this feature. Every identified native timeline must bypass HTTP CDN/shared response-cache lookup and preserve request User-Agent/X-App-Version-Code/Authorization plus response private,no-store/Vary. Internal shared real-data snapshots remain allowed only after per-request fresh authentication, observation and policy evaluation; synthetic notices never enter those snapshots. Purge or bypass any pre-existing native timeline CDN response caches; otherwise the Worker never observes cache-hit calls.
+3. Deploy the admin UI. Policy defaults are `enabled=false`, empty deprecated codes, `block_unversioned=false`. Missing/corrupt policy returns503 to administrators; timeline delivery fails open. Do not enable the policy to test deployment health.
+4. Verify admin stats `available=true`, stable epoch, current-user observations, authenticated home401, unchanged web responses and native response no-store. Monitor structured `app_client_observation_failed`, `app_client_policy_unavailable` and `app_client_stats_unavailable`; current read availability does not certify no historical write gaps.
+5. Configure explicit deprecated codes/message first. Enable the master switch only after legacy native/all/NBW notice rendering is verified. Missing-version blocking is a separate deliberate switch. Fixed download page is https://abdl-space.top/app. Rollback is master `enabled=false`; observation continues independently. Retain migrated measurement tables on code rollback.
+
+Counts are authenticated timeline-observed accounts with self-reported client version, not all installations or all active users. Unknown historical native UAs cannot be reconstructed. See API.md for distinct-account, version overlap, rolling UTC activity windows, latest downgrade and unavailability semantics. Reserved account `-1` and status `app-update-required` are presentation-only and real read/mutation routes return404. This gate is timeline-only, not complete server-wide blocking.
+
+2026-10-03 已执行生产 migration 0070，并部署 Worker `1ee067d7-728e-4428-9f2d-5237fce3f4a0` 与管理端生产 Pages `8ebd6f4f-1618-42a5-9653-52cb1c4ac8b7`。总开关仍关闭。迁移起点、恢复点、真实代理链路检查及未完成的登录/旧APK验收见 [生产部署记录](docs/app-clients-production-deployment-2026-10-03.md)。
+
+### 2.4 种子数据部署（手动）
 
 **触发**: `schemas/seeds/` 目录下新增或更新了 SQL 文件
 
@@ -59,7 +71,7 @@ npx wrangler d1 execute abdl-space-db --remote --file schemas/seeds/<name>.sql
 
 种子数据可在代码部署前后任意时间执行，不影响已有功能。
 
-### 2.4 环境变量 / 密钥部署（手动）
+### 2.5 环境变量 / 密钥部署（手动）
 
 **触发**: 新增或修改了密钥（如 `JWT_SECRET`、`AI_API_KEY` 等）
 

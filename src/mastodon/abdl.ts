@@ -8,14 +8,18 @@
  */
 
 import { Hono } from 'hono'
-import type { Env, JWTPayload } from '../types/index.ts'
+import type { Env } from '../types/index.ts'
 import { query, queryOne } from '../lib/db.ts'
 import { mastodonAuth } from './shared.ts'
 import { handleNBWTimeline } from './nbw-timeline.ts'
+import { appClientTimelineMiddleware } from '../middleware/app-clients.ts'
+import type { AppClientVariables } from '../types/app-clients.ts'
 
-type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
+type AppType = { Bindings: Env; Variables: AppClientVariables }
 
 const abdl = new Hono<AppType>()
+
+abdl.use('/nbw/sync-threads', appClientTimelineMiddleware)
 
 const DEFAULT_AVATAR = 'https://img.abdl-space.top/file/system/1781439303787_play_store_512.png'
 

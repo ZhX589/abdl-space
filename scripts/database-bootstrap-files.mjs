@@ -11,4 +11,5 @@ export const databaseBootstrapFiles = [
   'migrations/0067_qq_android_auth.sql',
   'migrations/0068_auth_login_method_guards.sql',
   'migrations/0069_admin_identity_management.sql',
+  'migrations/0070_app_clients.sql',
 ]

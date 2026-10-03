@@ -2839,7 +2839,7 @@ src/mastodon/
 - `POST /applications`：`{ capture_session_id, qq, adult_declaration: true, declaration_version }`；QQ 加密存储。
 - `GET /applications/:id`、`POST /applications/:id/cancel`。
 - `POST /applications/:id/evidence/authorize`：`{ kind, mime_type, declared_size, content_sha256, content_md5 }`；服务端生成 object key，返回短期私有 PUT 与必须签名的完整性头。
-- `POST /evidence/:id/complete`：私有 HEAD+GET 校验 MIME、长度和实际 SHA-256。
+- `POST /evidence/:id/complete`：私有 HEAD+GET 校验 MIME、长度和实际 SHA-256。明确 COS HEAD/GET 404 返回 `409 { error, code: "evidence_object_missing" }`；当前校验租约释放回 `pending`，客户端可用同一照片元数据重新 authorize→PUT→complete。权限错误、COS 5xx 与网络异常仍为 `502 verification_unavailable`，不能视为对象缺失；元数据/内容不符为 `422 evidence_mismatch`。`ready` 重放幂等，不重新读取 COS；未 ready 的过期授权为 `410 upload_expired`。重授权保持 evidence ID、object key、hash/大小绑定、private ACL、禁止覆盖及原授权 TTL；`failed` 或超过原 120 秒校验租约可回 `pending`，活跃 `verifying` 返回 `409 evidence_verifying`。
 - `POST /applications/:id/submit`：仅成功草稿→submitted 转换计入自然月额度；普通 2 次，有效赞助者 3 次。
 - `POST /applications/:id/rejection-acknowledge`。
 - `GET /certificates/me`：返回当前证书、256-bit 验证 token 与验证路径。
@@ -2857,3 +2857,72 @@ src/mastodon/
 - `GET /audit`。
 
 证书 token 原文不入库；数据库仅存 domain-separated SHA-256。QQ/照片不进入公开 API、通知、审计 metadata 或日志。
+
+
+## Native App timeline retirement policy and observed-client metrics
+
+All endpoints below require the existing fresh-session administrator authentication (current database role), and return `Cache-Control: private, no-store`, including authentication errors. Client identification is metadata, **not install attestation or an authentication mechanism**.
+
+### `GET /api/admin/app-clients/policy` / `PUT /api/admin/app-clients/policy`
+
+Successful GET/PUT has exactly this shape:
+
+```json
+{
+  "enabled": false,
+  "deprecated_version_codes": [],
+  "block_unversioned": false,
+  "update_message": "当前 App 版本已停止支持，请更新到最新版本后继续使用。"
+}
+```
+
+PUT requires all four fields and rejects unknown fields, coerced types and duplicate codes (`422`). Flags are booleans. Codes are distinct positive integers `1..2147483647`, at most 200. The message is trimmed, nonempty, at most 2000 characters, rendered as escaped plain text. The download destination is fixed by code to the verified existing page **https://abdl-space.top/app**; no administrator-supplied URL or HTML is accepted. One validated JSON document is written atomically to reserved `site_settings.app_client_policy`. Generic `PUT /api/admin/settings` rejects this key, so it cannot bypass validation. Missing/corrupt policy, missing migration or read failure makes dedicated policy GET return `503 {"error":"App client policy unavailable"}`; PUT infrastructure failure also returns `503`. A failed save is never reported as success.
+
+### Native GET timeline behavior
+
+Eligibility requires the **entire anchored** `User-Agent: MastodonAndroid/<major>.<minor>.<patch>` with an optional known Android build suffix (`-debug`, `-github`, `-nightly+@<date/local>`). Browser UAs, an `Android` substring, OAuth client identity, `users.has_app`, IP address, and the version header alone do not classify a request. Unrecognized historical native UAs cannot be inferred retrospectively and remain excluded. Headers are self-reported/spoofable; this feature is a UX retirement gate, not an API security boundary.
+
+`X-App-Version-Code` must be a canonical positive decimal int32 (no whitespace, leading zero, sign, fraction or trailing text). Missing and malformed values are one `null` group. The master flag defaults to **off**. When enabled, an explicit code match or `block_unversioned=true` for the null group returns **only one** fully populated synthetic Mastodon status. No real post/account is created and no `Link` pagination header is returned, even if `max_id`, `since_id` or `limit=1` was supplied. Status ID is `app-update-required`, account ID is numeric-compatible reserved `-1`, username/acct `app-update`; reserved account/status read or mutation routes return `404` before real data access.
+
+The gate runs before timeline D1 content queries, cache/snapshot fallback and NBW upstream requests for `/api/v1/timelines/*` (home, geo, popular, public, NBW, all, tag, and future list/bubble/stub routes), plus `/api/v1/abdl/nbw/sync-threads`. Timeline responses are bare `MastodonStatus[]`, including ALL and the NBW alias. Required auth is retained: invalid/missing/stale/deleted/banned native home/list/direct sessions return `401`, not an update notice. Web requests and non-timeline APIs are unaffected; this is not a complete server-wide block.
+
+**Every classified native GET timeline response**, including allowed, fallback and error responses, is `private, no-store` with `Vary: User-Agent, X-App-Version-Code, Authorization` (preserving other Vary fields). Forward these headers through all proxies and bypass any pre-existing native timeline cache lookup; a cache hit before the Worker would skip both fresh policy evaluation and observation. Policy read/migration failure fails open with safe defaults, structured `app_client_policy_unavailable` logs and `X-App-Client-Policy: unavailable`. Synthetic notices never enter content/snapshot caches.
+
+### `GET /api/admin/app-clients/stats`
+
+```json
+{
+  "available": true,
+  "measurement_started_at": "2026-10-03T00:00:00.000Z",
+  "totals": {
+    "observed_users": 0, "versioned_users": 0, "unversioned_users": 0,
+    "active_1d": 0, "active_7d": 0, "active_30d": 0
+  },
+  "versions": [
+    {"version_code": 29, "observed_users": 0, "latest_users": 0, "active_1d": 0, "active_7d": 0, "active_30d": 0}
+  ]
+}
+```
+
+The measurement is **authenticated timeline-observed distinct current accounts, with client-declared version codes**, not installs, IPs, tokens, all registered users or all active users. Observation continues with policy disabled and includes blocked eligible calls, but excludes anonymous/browser/UA-less calls, stale JWTs (password change or auth invalidation), revoked/expired OAuth tokens, deleted accounts and accounts banned at observation time. Native Bearer authentication does not require OAuth client registration (direct JWT works). JWT session freshness follows existing `authMiddleware` checks; OAuth validity is read live. Account deletion cascades observations; valid historical observations are not retroactively removed merely because an account is later banned.
+
+`measurement_started_at` is a new stable epoch initialized by migration **0070**, preserved on rerun; there is **no legacy has_app backfill**. Each user/version pair has first/last seen; missing/malformed codes normalize to database sentinel zero but API null. Pair uniqueness is enforced by D1; a separate per-user latest row allows upgrades **and downgrades**. Latest means greatest server request observation timestamp, not largest version code; equal timestamps are resolved by successful D1 batch order. Pair first_seen takes MIN and last_seen takes MAX so delayed writes cannot regress them. Pair and latest writes are an **awaited atomic D1 batch**, not detached telemetry. Storage is bounded per observed user/version pair and one latest row per user, not an append-only request log.
+
+Total users are exact distinct account IDs. Versioned/unversioned users overlap if the same account has observed both; per-version observed and activity sums can exceed total users. `latest_users` distributes each account once. Activity windows are rolling durations of 24h/7×24h/30×24h in UTC, inclusive lower boundary, using last seen (not calendar-day buckets). Filtered pair timestamps describe that version, while all-filter timestamps describe the user's latest version pair.
+
+Read/migration failure returns `available:false`, `measurement_started_at:null`, zero placeholders and an empty versions array. Those zeros are **unavailable, never accurate zero measurements**. Observation write failure may fail open for timeline delivery but logs `app_client_observation_failed` and returns `X-App-Client-Observation: unavailable`; success is `recorded`. Availability means current storage reads succeeded, **not that historical observation gaps are impossible**. Monitor these structured logs before interpreting counts.
+
+Existing `GET /api/admin/stats` and `/api/admin/stats/overview` totals now use the exact observed distinct count as `appUsers`, or null on unavailability, with `appUsersAvailable` and `appUsersMeasurementStartedAt`. Overview cache schema key changed to `overview_snapshot_v3_app_clients`, so cached legacy has_app totals cannot be served; overview totals may still lag by its documented five-minute snapshot TTL. Unrelated legacy `users.has_app` flags are unchanged.
+
+### `GET /api/admin/app-clients/users`
+
+Query: `version_code=missing|all|<positive int32>` (default all), `page=1`, `limit=20` (1..100), optional `q` (max 200 characters; literal username/display_name substring search). Page is a strict positive integer up to 1,000,000. Invalid query returns `422`; storage/migration failure returns `503`, never a misleading empty list.
+
+```json
+{
+  "users": [{"id":2,"username":"alice","display_name":"Alice","version_code":29,"first_seen_at":"2026-10-03T00:00:00.000Z","last_seen_at":"2026-10-03T01:00:00.000Z"}],
+  "pagination": {"page":1,"limit":20,"total":1,"totalPages":1}
+}
+```
+
+Numeric/missing filters mean **observed calls with that code/group**, one account/version pair per row (not only users whose latest version matches). `all` returns one latest version pair per user. Sort is pair last seen descending, user ID ascending; empty pagination has totalPages zero. No tokens, client registrations or IPs are exposed.

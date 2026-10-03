@@ -1,30 +1,241 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { DatabaseSync } from 'node:sqlite'
+import { DatabaseSync, type SQLInputValue } from 'node:sqlite'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import test from 'node:test'
-import { BabyVerificationError, claimBabyApplication, decideBabyApplication, deriveBabyCredentialToken, getAdminBabyCertificate, getBabyCertificateMe, mutateBabyCertificate, releaseBabyApplication, validateBabyVerificationConfig, verifyBabyCredential } from './baby-verification.ts'
+import { BabyVerificationError, authorizeBabyEvidence, completeBabyEvidence, createBabyApplication, createBabyCaptureSession, transitionBabyCaptureSession, submitBabyApplication, claimBabyApplication, decideBabyApplication, deriveBabyCredentialToken, getAdminBabyCertificate, getBabyCertificateMe, mutateBabyCertificate, releaseBabyApplication, validateBabyVerificationConfig, verifyBabyCredential } from './baby-verification.ts'
+import { createHash } from 'node:crypto'
+
+function fixtureText(relativePath:string):string { return readFileSync(resolve(dirname(fileURLToPath(import.meta.url)),relativePath),'utf8') }
 
 function database(): DatabaseSync {
 	const db=new DatabaseSync(':memory:')
 	db.exec('PRAGMA foreign_keys=ON')
-	db.exec(readFileSync(new URL('../../schemas/schema.sql',import.meta.url),'utf8'))
-	db.exec(readFileSync(new URL('../../migrations/0025_account_system_upgrade.sql',import.meta.url),'utf8'))
-	db.exec(readFileSync(new URL('../../migrations/0058_badge_colors_notification.sql',import.meta.url),'utf8'))
-	db.exec(readFileSync(new URL('../../migrations/0062_sponsors.sql',import.meta.url),'utf8'))
+	db.exec(fixtureText('../../schemas/schema.sql'))
+	db.exec(fixtureText('../../migrations/0025_account_system_upgrade.sql'))
+	db.exec(fixtureText('../../migrations/0058_badge_colors_notification.sql'))
+	db.exec(fixtureText('../../migrations/0062_sponsors.sql'))
 	db.prepare("INSERT INTO users(id,email,password_hash,username) VALUES(1,'one@example.test','hash','one'),(2,'two@example.test','hash','two')").run()
 	return db
 }
 
-function d1(db:DatabaseSync){const statement=(sql:string,params:unknown[]=[]):D1PreparedStatement=>({bind:(...next:unknown[])=>statement(sql,next),first:async<T>()=>(db.prepare(sql).get(...params)??null) as T|null,run:async()=>{const r=db.prepare(sql).run(...params);return{success:true,meta:{changes:Number(r.changes)}} as D1Result},all:async<T>()=>({success:true,results:db.prepare(sql).all(...params) as T[]}) as D1Result<T>,raw:async()=>[],columnNames:async()=>[]} as unknown as D1PreparedStatement);return{prepare:(sql:string)=>statement(sql),batch:async(items:D1PreparedStatement[])=>{db.exec('BEGIN');try{const results=[];for(const item of items)results.push(await item.run());db.exec('COMMIT');return results}catch(error){db.exec('ROLLBACK');throw error}}}}
+const photo = new TextEncoder().encode('verification-photo-fixture')
+const evidenceInput = { kind:'capture_photo', mime_type:'image/jpeg', declared_size:photo.byteLength, content_sha256:createHash('sha256').update(photo).digest('hex'), content_md5:createHash('md5').update(photo).digest('base64') }
+
+type AfterFirst = (sql:string,row:unknown) => Promise<void>
+
+function signal() {
+	let release = () => {}
+	const promise = new Promise<void>(resolve => { release = resolve })
+	return { promise, release }
+}
+
+async function evidenceFixture(afterFirst?:AfterFirst) {
+	const db = database()
+	db.exec('UPDATE baby_verification_settings SET enabled=1')
+	const env = { abdl_space_db:d1(db,afterFirst), COS_SECRET_ID:'test-id', COS_SECRET_KEY:'test-secret', COS_BUCKET:'test-123', COS_REGION:'ap-shanghai', BABY_VERIFICATION_DATA_KEY:Buffer.alloc(32,1).toString('base64') } as never
+	const session = await createBabyCaptureSession(env,1)
+	await transitionBabyCaptureSession(env,1,String(session.id),'complete')
+	const application = await createBabyApplication(env,1,{ capture_session_id:session.id, adult_declaration:true, declaration_version:'2026-09-13', qq:'12345678' })
+	const applicationId = String(application.id)
+	const authorization = await authorizeBabyEvidence(env,1,applicationId,evidenceInput)
+	return { db, env, applicationId, evidenceId:String(authorization.evidence_id), authorization, session }
+}
+
+function errorCode(code:string,status?:number) { return (error:unknown) => error instanceof BabyVerificationError && error.code===code && (status===undefined || error.status===status) }
+function evidenceState(db:DatabaseSync,id:string) { return db.prepare('SELECT status,verification_token,verification_started_at,upload_expires_at,object_key FROM baby_verification_evidence WHERE id=?').get(id) }
+function assertPending(db:DatabaseSync,id:string) { const row=evidenceState(db,id);assert.equal(row?.status,'pending');assert.equal(row?.verification_token,null);assert.equal(row?.verification_started_at,null) }
+
+function d1(db:DatabaseSync,afterFirst?:AfterFirst){const statement=(sql:string,params:SQLInputValue[]=[]):D1PreparedStatement=>({bind:(...next:SQLInputValue[])=>statement(sql,next),first:async<T>()=>{const row=db.prepare(sql).get(...params)??null;await afterFirst?.(sql,row);return row as T|null},run:async()=>{const r=db.prepare(sql).run(...params);return{success:true,meta:{changes:Number(r.changes)}} as D1Result},all:async<T>()=>({success:true,results:db.prepare(sql).all(...params) as T[]}) as D1Result<T>,raw:async()=>[],columnNames:async()=>[]} as unknown as D1PreparedStatement);return{prepare:(sql:string)=>statement(sql),batch:async(items:D1PreparedStatement[])=>{db.exec('BEGIN');try{const results=[];for(const item of items)results.push(await item.run());db.exec('COMMIT');return results}catch(error){db.exec('ROLLBACK');throw error}}}}
+
+test('real evidence functions recover authorize -> missing object -> reauthorize -> PUT -> ready -> submit',async t=>{
+	const {db,env,applicationId,evidenceId,authorization,session}=await evidenceFixture()
+	let uploaded=false
+	t.mock.method(globalThis,'fetch',async(input:string|URL|Request,init?:RequestInit)=>{
+		assert.equal(String(input),authorization.upload_url)
+		if(init?.method==='PUT') {
+			assert.equal(uploaded,false)
+			assert.equal(new Headers(init.headers).get('x-cos-acl'),'private')
+			assert.equal(new Headers(init.headers).get('x-cos-forbid-overwrite'),'true')
+			uploaded=true;return new Response(null,{status:200})
+		}
+		if(!uploaded)return new Response(null,{status:404,headers:{'x-cos-request-id':'missing-fixture'}})
+		return new Response(init?.method==='HEAD'?null:photo,{headers:{'content-type':'image/jpeg','content-length':String(photo.byteLength)}})
+	})
+	try {
+		const original=evidenceState(db,evidenceId)
+		await assert.rejects(()=>completeBabyEvidence(env,1,evidenceId),errorCode('evidence_object_missing',409))
+		assertPending(db,evidenceId)
+		await assert.rejects(()=>submitBabyApplication(env,1,applicationId),errorCode('application_incomplete'))
+		const renewed=await authorizeBabyEvidence(env,1,applicationId,evidenceInput)
+		assert.equal(renewed.evidence_id,evidenceId);assert.equal(renewed.upload_url,authorization.upload_url)
+		assert.equal(evidenceState(db,evidenceId)?.object_key,original?.object_key)
+		assert.equal(db.prepare('SELECT nonce FROM baby_verification_capture_sessions WHERE id=?').get(String(session.id))?.nonce,session.nonce)
+		assert.equal(Number(renewed.expires_at)-Math.floor(Date.now()/1000),300)
+		await fetch(String(renewed.upload_url),{method:'PUT',headers:renewed.required_headers as Record<string,string>,body:photo})
+		const ready=await completeBabyEvidence(env,1,evidenceId)
+		assert.deepEqual(ready,{id:evidenceId,status:'ready',verified_size:photo.byteLength})
+		const replay=await completeBabyEvidence(env,1,evidenceId);assert.deepEqual(replay,ready)
+		assert.deepEqual(await authorizeBabyEvidence(env,1,applicationId,evidenceInput),{evidence_id:evidenceId,status:'ready',already_uploaded:true})
+		assert.equal((await submitBabyApplication(env,1,applicationId)).replayed,false)
+		assert.equal((await submitBabyApplication(env,1,applicationId)).replayed,true)
+		assert.equal(db.prepare('SELECT COUNT(*) AS used FROM baby_verification_applications WHERE submitted_at IS NOT NULL').get()?.used,1)
+	} finally {db.close()}
+})
+
+for(const method of ['HEAD','GET']) for(const status of [404,401,403,500,503]) {
+	test(`real complete ${method} ${status} classifies only 404 as missing and releases its lease`,async t=>{
+		const {db,env,evidenceId}=await evidenceFixture()
+		t.mock.method(globalThis,'fetch',async(_input:unknown,init?:RequestInit)=>init?.method===method
+			?new Response(null,{status,headers:{'x-cos-request-id':'private-diagnostic-id'}})
+			:new Response(null,{headers:{'content-type':'image/jpeg','content-length':String(photo.byteLength)}}))
+		try {
+			await assert.rejects(()=>completeBabyEvidence(env,1,evidenceId),errorCode(status===404?'evidence_object_missing':'verification_unavailable',status===404?409:502))
+			assertPending(db,evidenceId)
+		} finally {db.close()}
+	})
+}
+
+for(const mismatch of ['mime','length','hash','body-length','network']) test(`real evidence ${mismatch} failure never grants ready and permits same-metadata retry`,async t=>{
+	const {db,env,applicationId,evidenceId}=await evidenceFixture()
+	t.mock.method(globalThis,'fetch',async(_input:unknown,init?:RequestInit)=>{
+		if(mismatch==='network')throw new TypeError('network failure')
+		const body=mismatch==='hash'?new Uint8Array(photo.byteLength):mismatch==='body-length'?photo.slice(1):photo
+		return new Response(init?.method==='HEAD'?null:body,{headers:{'content-type':mismatch==='mime'?'image/png':'image/jpeg','content-length':String(photo.byteLength+(mismatch==='length'?1:0))}})
+	})
+	try {
+		await assert.rejects(()=>completeBabyEvidence(env,1,evidenceId),errorCode(mismatch==='network'?'verification_unavailable':'evidence_mismatch'))
+		assertPending(db,evidenceId)
+		await assert.rejects(()=>authorizeBabyEvidence(env,1,applicationId,{...evidenceInput,content_sha256:'f'.repeat(64)}),errorCode('evidence_conflict'))
+		await assert.rejects(()=>submitBabyApplication(env,1,applicationId),errorCode('application_incomplete'))
+		assert.equal((await authorizeBabyEvidence(env,1,applicationId,evidenceInput)).evidence_id,evidenceId)
+	} finally {db.close()}
+})
+
+test('real evidence authorization repairs failed/stale states but never steals a live lease or crosses ownership',async t=>{
+	const {db,env,applicationId,evidenceId}=await evidenceFixture()
+	t.mock.method(globalThis,'fetch',async()=>{throw new Error('unexpected COS request')})
+	try {
+		await assert.rejects(()=>completeBabyEvidence(env,2,evidenceId),errorCode('evidence_not_found'))
+		await assert.rejects(()=>authorizeBabyEvidence(env,2,applicationId,evidenceInput),errorCode('application_not_found'))
+		db.prepare("UPDATE baby_verification_evidence SET status='failed',upload_expires_at=1 WHERE id=?").run(evidenceId)
+		await assert.rejects(()=>completeBabyEvidence(env,1,evidenceId),errorCode('upload_expired',410))
+		assert.equal((await authorizeBabyEvidence(env,1,applicationId,evidenceInput)).status,'pending');assertPending(db,evidenceId)
+		db.prepare("UPDATE baby_verification_evidence SET status='verifying',verification_token='old-token',verification_started_at=unixepoch() WHERE id=?").run(evidenceId)
+		await assert.rejects(()=>authorizeBabyEvidence(env,1,applicationId,evidenceInput),errorCode('evidence_verifying'))
+		await assert.rejects(()=>completeBabyEvidence(env,1,evidenceId),errorCode('evidence_verifying'))
+		assert.equal(evidenceState(db,evidenceId)?.verification_token,'old-token')
+		db.prepare('UPDATE baby_verification_evidence SET verification_started_at=unixepoch()-121,upload_expires_at=1 WHERE id=?').run(evidenceId)
+		await authorizeBabyEvidence(env,1,applicationId,evidenceInput);assertPending(db,evidenceId)
+		assert.ok(Number(evidenceState(db,evidenceId)?.upload_expires_at)>Math.floor(Date.now()/1000))
+	} finally {db.close()}
+})
+
+test('an obsolete completion cannot release a replacement verification token',async t=>{
+	const {db,env,evidenceId}=await evidenceFixture()
+	t.mock.method(globalThis,'fetch',async()=>{
+		db.prepare("UPDATE baby_verification_evidence SET verification_token='replacement-token' WHERE id=?").run(evidenceId)
+		return new Response(null,{status:404})
+	})
+	try {
+		await assert.rejects(()=>completeBabyEvidence(env,1,evidenceId),errorCode('evidence_object_missing'))
+		assert.equal(evidenceState(db,evidenceId)?.status,'verifying')
+		assert.equal(evidenceState(db,evidenceId)?.verification_token,'replacement-token')
+	} finally {db.close()}
+})
+
+test('concurrent first authorizations both read absence but insert only one evidence and retry its identity',async()=>{
+	const bothRead=signal();let armed=false;let reads=0
+	const {db,env,applicationId,evidenceId}=await evidenceFixture(async(sql,row)=>{
+		if(armed && sql.startsWith('SELECT id,kind,mime_type')) {
+			assert.equal(row,null)
+			if(++reads===2)bothRead.release()
+			await bothRead.promise
+		}
+	})
+	try {
+		db.prepare('DELETE FROM baby_verification_evidence WHERE id=?').run(evidenceId)
+		armed=true
+		const results=await Promise.allSettled([authorizeBabyEvidence(env,1,applicationId,evidenceInput),authorizeBabyEvidence(env,1,applicationId,evidenceInput)])
+		armed=false
+		assert.equal(reads,2)
+		const winners=results.filter(result=>result.status==='fulfilled')
+		const losers=results.filter(result=>result.status==='rejected')
+		assert.equal(winners.length,1);assert.equal(losers.length,1)
+		assert.ok(errorCode('evidence_conflict',409)(losers[0].reason))
+		const winner=winners[0].value
+		assert.equal(db.prepare('SELECT COUNT(*) AS count FROM baby_verification_evidence').get()?.count,1)
+		assertPending(db,String(winner.evidence_id))
+		const replay=await authorizeBabyEvidence(env,1,applicationId,evidenceInput)
+		assert.equal(replay.evidence_id,winner.evidence_id);assert.equal(replay.upload_url,winner.upload_url)
+	} finally {bothRead.release();db.close()}
+})
+
+for(const next of ['ready','verifying']) test(`authorize CAS rejects ${next} state installed after its pending snapshot`,async()=>{
+	const read=signal();const resume=signal();let armed=false
+	const {db,env,applicationId,evidenceId}=await evidenceFixture(async(sql,row)=>{
+		if(armed && sql.startsWith('SELECT id,kind,mime_type')) {
+			assert.equal((row as {status:string}).status,'pending')
+			read.release();await resume.promise
+		}
+	})
+	try {
+		armed=true
+		const authorization=authorizeBabyEvidence(env,1,applicationId,evidenceInput)
+		const rejected=assert.rejects(authorization,errorCode('evidence_conflict',409))
+		await read.promise
+		if(next==='ready')db.prepare("UPDATE baby_verification_evidence SET status='ready',verified_size=?,completed_at=unixepoch() WHERE id=?").run(photo.byteLength,evidenceId)
+		else db.prepare("UPDATE baby_verification_evidence SET status='verifying',verification_token='new-live-token',verification_started_at=unixepoch() WHERE id=?").run(evidenceId)
+		const changed=evidenceState(db,evidenceId)
+		resume.release();await rejected
+		assert.deepEqual(evidenceState(db,evidenceId),changed)
+		assert.equal(db.prepare('SELECT verified_size FROM baby_verification_evidence WHERE id=?').get(evidenceId)?.verified_size,next==='ready'?photo.byteLength:null)
+	} finally {resume.release();db.close()}
+})
+
+for(const next of ['pending','verifying','ready']) test(`old complete receiving valid COS bytes cannot overwrite reauthorization and newer ${next} state`,async t=>{
+	const {db,env,applicationId,evidenceId}=await evidenceFixture()
+	const oldGet=signal();const oldResume=signal();const newHead=signal();const newResume=signal()
+	let gets=0;let heads=0
+	t.mock.method(globalThis,'fetch',async(_input:unknown,init?:RequestInit)=>{
+		if(init?.method==='GET' && ++gets===1) {oldGet.release();await oldResume.promise}
+		if(init?.method==='HEAD' && ++heads===2 && next==='verifying') {newHead.release();await newResume.promise}
+		return new Response(init?.method==='HEAD'?null:photo,{headers:{'content-type':'image/jpeg','content-length':String(photo.byteLength)}})
+	})
+	let newer:Promise<Record<string,unknown>>|undefined
+	try {
+		const old=completeBabyEvidence(env,1,evidenceId)
+		const rejected=assert.rejects(old,errorCode('evidence_conflict',409))
+		await oldGet.promise
+		const oldToken=evidenceState(db,evidenceId)?.verification_token
+		db.prepare('UPDATE baby_verification_evidence SET verification_started_at=unixepoch()-121 WHERE id=?').run(evidenceId)
+		assert.equal((await authorizeBabyEvidence(env,1,applicationId,evidenceInput)).status,'pending')
+		if(next!=='pending') {
+			newer=completeBabyEvidence(env,1,evidenceId)
+			if(next==='verifying')await newHead.promise
+			else assert.equal((await newer).status,'ready')
+		}
+		const replacement=evidenceState(db,evidenceId)
+		assert.equal(replacement?.status,next)
+		if(next==='verifying')assert.notEqual(replacement?.verification_token,oldToken)
+		oldResume.release();await rejected
+		assert.deepEqual(evidenceState(db,evidenceId),replacement)
+		if(next!=='ready')await assert.rejects(()=>submitBabyApplication(env,1,applicationId),errorCode('application_incomplete'))
+		if(next==='verifying') {newResume.release();assert.equal((await newer)?.status,'ready')}
+		if(next==='pending')assert.equal((await completeBabyEvidence(env,1,evidenceId)).status,'ready')
+		assert.equal((await submitBabyApplication(env,1,applicationId)).replayed,false)
+	} finally {oldResume.release();newResume.release();await newer;db.close()}
+})
 
 test('complete schema and migration 0065 are independently repeatable',()=>{
 	const complete=new DatabaseSync(':memory:')
 	const migrated=new DatabaseSync(':memory:')
 	try{
-		const schema=readFileSync(new URL('../../schemas/schema.sql',import.meta.url),'utf8')
+		const schema=fixtureText('../../schemas/schema.sql')
 		complete.exec(schema);complete.exec(schema)
 		migrated.exec(`PRAGMA foreign_keys=ON;CREATE TABLE users(id INTEGER PRIMARY KEY);CREATE TABLE notifications(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL);CREATE TABLE badges(id INTEGER PRIMARY KEY,key TEXT UNIQUE NOT NULL,name TEXT NOT NULL,icon TEXT NOT NULL,description TEXT NOT NULL,condition_type TEXT NOT NULL,condition_value INTEGER NOT NULL);`)
-		const migration=readFileSync(new URL('../../migrations/0065_baby_verification.sql',import.meta.url),'utf8')
+		const migration=fixtureText('../../migrations/0065_baby_verification.sql')
 		migrated.exec(migration);migrated.exec(migration)
 		assert.equal(complete.prepare("SELECT COUNT(*) AS count FROM baby_verification_settings").get()?.count,1)
 		assert.equal(migrated.prepare("SELECT COUNT(*) AS count FROM baby_verification_settings").get()?.count,1)
