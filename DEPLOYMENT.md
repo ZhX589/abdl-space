@@ -59,7 +59,7 @@ npx wrangler d1 execute abdl-space-db --remote --file migrations/0043_cos_upload
 
 Counts are authenticated timeline-observed accounts with self-reported client version, not all installations or all active users. Unknown historical native UAs cannot be reconstructed. See API.md for distinct-account, version overlap, rolling UTC activity windows, latest downgrade and unavailability semantics. Reserved account `-1` and status `app-update-required` are presentation-only and real read/mutation routes return404. This gate is timeline-only, not complete server-wide blocking.
 
-This change has not been remotely migrated or deployed by the implementation agent.
+2026-10-03 已执行生产 migration 0070，并部署 Worker `1ee067d7-728e-4428-9f2d-5237fce3f4a0` 与管理端生产 Pages `8ebd6f4f-1618-42a5-9653-52cb1c4ac8b7`。总开关仍关闭。迁移起点、恢复点、真实代理链路检查及未完成的登录/旧APK验收见 [生产部署记录](docs/app-clients-production-deployment-2026-10-03.md)。
 
 ### 2.4 种子数据部署（手动）
 

@@ -23,11 +23,11 @@
 | 4 | 证书、256-bit 凭证、公开验证、吊销与补发 | ✅ |
 | 5 | `verified` 徽章名称更新、通知跳转与 admin `unlocked_at` 修复 | ✅ |
 | 6 | migration 0065、完整 schema、API/部署说明与 node:test | ✅ |
-| 7 | COS 对象缺失返回 `409 evidence_object_missing`、上传重授权状态修复与真实函数/路由恢复链路回归（未部署） | ✅ |
+| 7 | COS 对象缺失返回 `409 evidence_object_missing`、上传重授权状态修复与真实函数/路由恢复链路回归（2026-10-03 随后端部署） | ✅ |
 
 产品约束：不读取 `users.age`；仅接受并记录 `adult_declaration=true`、声明版本及时间。普通用户每自然月 2 次，有效赞助者 3 次，仅成功 submit 计入额度。
 
-## Native App 版本退役与精确观测（2026-10-03，未部署）
+## Native App 版本退役与精确观测（2026-10-03，已生产部署、策略关闭）
 
 | 内容 | 状态 |
 |:---|:---:|
@@ -36,7 +36,7 @@
 | admin policy/stats/users 合约、reserved settings 校验、精确 appUsers/null unavailable、overview cache schema 升级 | ✅ |
 | migration 0070、schema/bootstrap manifest、实际 middleware/routes SQLite 回归、API/部署顺序及指标边界 | ✅ |
 
-范围仅 native GET timeline 退役 UX；客户端 metadata 自报，不能视为安装证明或完整 API 禁用。上线必须先 migration 0070，再 Worker/管理员界面；现有代理透传已验证，无需本功能修改。默认 off，先观察并检查失败日志后再逐步配置退役。尚未执行远程迁移或部署。
+范围仅 native GET timeline 退役 UX；客户端 metadata 自报，不能视为安装证明或完整 API 禁用。2026-10-03 已先执行生产 migration 0070，再部署 Worker与管理员界面；现有代理代码未改。统计起点 `2026-10-03T11:47:04.922Z`，策略仍 off，需真实会话观测并检查失败日志后再配置退役。真实主站链路native时间线200/no-store、未登录home401已检查；无管理员登录/旧APK真机闭环，详见 docs/app-clients-production-deployment-2026-10-03.md。
 
 验证结果：新增 feature 回归 17/17 通过；结合 auth/admin/NBW 的 targeted 回归 27/27 通过；完整 npm test 342 pass / 9 fail，相比既有 baseline 325 pass / 9 fail，失败项未变化。保留已有无关 TypeScript 与 bootstrap paper_color 等 baseline 缺陷。
 
