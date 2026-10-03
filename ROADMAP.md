@@ -40,6 +40,16 @@
 
 验证结果：新增 feature 回归 17/17 通过；结合 auth/admin/NBW 的 targeted 回归 27/27 通过；完整 npm test 342 pass / 9 fail，相比既有 baseline 325 pass / 9 fail，失败项未变化。保留已有无关 TypeScript 与 bootstrap paper_color 等 baseline 缺陷。
 
+## Android 3.0.0 正式版发布（2026-10-03）
+
+| 内容 | 状态 |
+|:---|:---:|
+| 四仓 recovery 合入 main；不单独合并废弃 develop | ✅ |
+| 指定签名 code31 APK 改名、上传既有 R2、完整回下载哈希核验 | ✅ |
+| latest 元数据与用户提供的14条正式版日志上线，API/主站/移动站核验 | ✅ |
+
+发布时间 `2026-10-03T13:14:08.755Z`；版本 `3.0.0 / 31`。未修改管理员鉴权或旧版退役策略；本轮后端全量340 pass / 11 fail，版本/缓存专项17/17通过，不声称全量或真机验收通过。详见 [正式版发布记录](docs/app-release-3.0.0-31-2026-10-03.md)。
+
 ## 版本规划
 
 | 版本 | 目标 | 核心端点 | 状态 |
