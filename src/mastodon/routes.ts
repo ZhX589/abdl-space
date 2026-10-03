@@ -8,7 +8,7 @@
 
 import { Hono } from 'hono'
 import type { Context } from 'hono'
-import type { Env, JWTPayload } from '../types/index.ts'
+import type { Env } from '../types/index.ts'
 import { query, queryOne, run } from '../lib/db.ts'
 import { rateLimit } from '../lib/rate-limit.ts'
 import { cacheGet, cacheSet } from '../lib/ttl-cache.ts'
@@ -36,8 +36,10 @@ import { getCompletedUploadReference, uploadLegacyObject } from '../lib/upload-c
 import { invalidateFeedCount } from '../lib/post-count-cache.ts'
 import type { MediaUploadPurpose } from '../lib/media-upload.ts'
 import { getPublicBabyVerification } from '../lib/baby-verification.ts'
+import { appClientCacheMiddleware, appClientTimelineMiddleware } from '../middleware/app-clients.ts'
+import type { AppClientVariables } from '../types/app-clients.ts'
 
-type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
+type AppType = { Bindings: Env; Variables: AppClientVariables }
 
 async function sha256(input: string): Promise<string> {
   const data = new TextEncoder().encode(input)
@@ -80,9 +82,22 @@ function buildLinkHeader(
 
 const mastodon = new Hono<AppType>()
 
+mastodon.use('/timelines/*', appClientCacheMiddleware)
+mastodon.use('/abdl/nbw/sync-threads', appClientCacheMiddleware)
+// Reserved notice entities are presentation-only, never readable or mutable real records.
+mastodon.use('*', async (c, next) => {
+  const path = c.req.path
+  if (/\/accounts\/(?:-1)(?:\/|$)/.test(path) || /\/statuses\/app-update-required(?:\/|$)/.test(path)) {
+    return c.json({ error: 'Record not found' }, 404)
+  }
+  await next()
+})
+
 // 全局限流：mastodon 兼容端点是最大攻击面（public timeline 无认证且高消耗）。
 // 每 IP/分钟 120 次：正常客户端轮询（App 30-60s + Web 60s）远低于此，刷量/爬虫立刻 429。
 mastodon.use('*', rateLimit('mastodon-api', 60_000, 120))
+// Rate limiting must precede native auth/observation/policy D1 work and short-circuit notices.
+mastodon.use('/timelines/*', appClientTimelineMiddleware)
 
 const IMGBED_HOST = 'https://img.abdl-space.top'
 export const IMGBED_FALLBACK_HEADER = 'X-ABDL-Upload-Fallback'

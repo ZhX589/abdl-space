@@ -8,6 +8,8 @@ import { kvCacheInvalidate } from '../lib/kv-cache.ts'
 import { cacheIpBan, cacheTrackingRule, clearIpBanCache, invalidateTrackingRule } from '../lib/ip-security-cache.ts'
 import { invalidateFeedCount } from '../lib/post-count-cache.ts'
 import { adminMiddleware } from '../middleware/auth.ts'
+import appClients from './admin-app-clients.ts'
+import { APP_CLIENT_POLICY_KEY, appClientStats } from '../lib/app-clients.ts'
 
 const IMGBED_URL = 'https://img.abdl-space.top'
 
@@ -50,6 +52,7 @@ async function deleteImageFromImgbed(env: Env, imageUrl: string) {
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
 const admin = new Hono<AppType>()
+admin.route('/app-clients', appClients)
 
 // ============================================================
 // 运维统计辅助 —— “按天”统一按北京时间 UTC+8 日历分桶
@@ -255,11 +258,9 @@ async function buildOverviewSnapshot(db: D1Database): Promise<Record<string, unk
   ])
   const numOf = (s: PromiseSettledResult<{ c: number } | null>): number =>
     s.status === 'fulfilled' && s.value ? s.value.c : 0
-  const hasApp = await tableHasColumn(db, 'users', 'has_app')
+  const appStats = await appClientStats(db)
   const hasBanned = await tableHasColumn(db, 'users', 'banned')
-  const appUsers = hasApp
-    ? (await queryOne<{ c: number }>(db, 'SELECT COUNT(*) AS c FROM users WHERE has_app = 1').catch(() => null))?.c ?? 0
-    : 0
+  const appUsers = appStats.available ? appStats.totals.observed_users : null
   const bannedUsers = hasBanned
     ? (await queryOne<{ c: number }>(db, 'SELECT COUNT(*) AS c FROM users WHERE banned = 1').catch(() => null))?.c ?? 0
     : 0
@@ -302,7 +303,7 @@ async function buildOverviewSnapshot(db: D1Database): Promise<Record<string, unk
       users: numOf(totals[0]), posts: numOf(totals[1]), comments: numOf(totals[2]),
       ratings: numOf(totals[3]), diapers: numOf(totals[4]), likes: numOf(totals[5]),
       checkins: numOf(totals[6]), badges: numOf(totals[7]), novels: numOf(totals[8]),
-      appUsers, bannedUsers,
+      appUsers, appUsersAvailable: appStats.available, appUsersMeasurementStartedAt: appStats.measurement_started_at, bannedUsers,
     },
     novels,
     pending: {
@@ -336,7 +337,7 @@ admin.get('/stats', adminMiddleware, async (c) => {
     queryOne<{ count: number }>(c.env.abdl_space_db, 'SELECT COUNT(*) as count FROM post_comments'),
     queryOne<{ count: number }>(c.env.abdl_space_db, 'SELECT COUNT(*) as count FROM diapers'),
     queryOne<{ count: number }>(c.env.abdl_space_db, 'SELECT COUNT(*) as count FROM ratings'),
-    queryOne<{ count: number }>(c.env.abdl_space_db, 'SELECT COUNT(*) as count FROM users WHERE has_app = 1'),
+    appClientStats(c.env.abdl_space_db),
   ])
 
   return c.json({
@@ -345,7 +346,9 @@ admin.get('/stats', adminMiddleware, async (c) => {
     comments: comments?.count ?? 0,
     diapers: diapers?.count ?? 0,
     ratings: ratings?.count ?? 0,
-    appUsers: appUsers?.count ?? 0
+    appUsers: appUsers.available ? appUsers.totals.observed_users : null,
+    appUsersAvailable: appUsers.available,
+    appUsersMeasurementStartedAt: appUsers.measurement_started_at
   })
 })
 
@@ -1181,7 +1184,7 @@ admin.get('/stats/overview', adminMiddleware, async (c) => {
   await ensureDailyStats(db)
 
   const snapshot = await withOverviewSnapshot<Record<string, unknown>>(
-    db, 'overview_snapshot_v2', async () => buildOverviewSnapshot(db)
+    db, 'overview_snapshot_v3_app_clients', async () => buildOverviewSnapshot(db)
   )
   const totals = snapshot.totals as Record<string, number>
   const novels = snapshot.novels as Record<string, number>
@@ -1423,9 +1426,10 @@ admin.get('/settings', adminMiddleware, async (c) => {
 })
 
 admin.put('/settings', adminMiddleware, async (c) => {
-  const body = await c.req.json<{ key?: string; value?: string }>()
+  const body = await c.req.json<{ key?: string; value?: string }>().catch(() => null)
   const key = body?.key || ''
   const value = body?.value ?? ''
+  if (key === APP_CLIENT_POLICY_KEY) return c.json({ error: 'Use /api/admin/app-clients/policy to update this reserved setting' }, 422)
   if (!SETTINGS_KEY_RE.test(key)) return c.json({ error: 'key 仅允许小写字母/数字/下划线，长度 ≤ 64' }, 422)
   if (typeof value !== 'string' || value.length > 8000) return c.json({ error: 'value 必须为字符串且长度 ≤ 8000' }, 422)
   await run(c.env.abdl_space_db,

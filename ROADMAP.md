@@ -27,6 +27,19 @@
 
 产品约束：不读取 `users.age`；仅接受并记录 `adult_declaration=true`、声明版本及时间。普通用户每自然月 2 次，有效赞助者 3 次，仅成功 submit 计入额度。
 
+## Native App 版本退役与精确观测（2026-10-03，未部署）
+
+| 内容 | 状态 |
+|:---|:---:|
+| anchored native UA + strict versionCode；所有 timeline 与 NBW alias 提前门禁；web 隔离、默认关闭、单条 synthetic 更新提醒及 no-store/Vary | ✅ |
+| 新鲜 JWT/OAuth 账号会话观测，D1 account/version 唯一性、latest 降级、原子 await 写、无 has_app 回填 | ✅ |
+| admin policy/stats/users 合约、reserved settings 校验、精确 appUsers/null unavailable、overview cache schema 升级 | ✅ |
+| migration 0070、schema/bootstrap manifest、实际 middleware/routes SQLite 回归、API/部署顺序及指标边界 | ✅ |
+
+范围仅 native GET timeline 退役 UX；客户端 metadata 自报，不能视为安装证明或完整 API 禁用。上线必须先 migration 0070，再 Worker/管理员界面；现有代理透传已验证，无需本功能修改。默认 off，先观察并检查失败日志后再逐步配置退役。尚未执行远程迁移或部署。
+
+验证结果：新增 feature 回归 17/17 通过；结合 auth/admin/NBW 的 targeted 回归 27/27 通过；完整 npm test 342 pass / 9 fail，相比既有 baseline 325 pass / 9 fail，失败项未变化。保留已有无关 TypeScript 与 bootstrap paper_color 等 baseline 缺陷。
+
 ## 版本规划
 
 | 版本 | 目标 | 核心端点 | 状态 |

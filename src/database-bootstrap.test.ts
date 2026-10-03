@@ -17,6 +17,7 @@ test('new database bootstrap creates every current feature dependency', () => {
       'baby_verification_applications', 'baby_verification_certificates',
       'qq_identities', 'qq_app_subjects', 'admin_identity_operations',
       'admin_identity_audit', 'admin_identity_rate_limits',
+      'app_client_measurement', 'app_client_observations', 'app_client_latest',
     ]) {
       assert.ok(db.prepare('SELECT 1 FROM sqlite_master WHERE name=?').get(name), `missing ${name}`)
     }
