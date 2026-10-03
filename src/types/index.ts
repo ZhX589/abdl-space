@@ -17,6 +17,56 @@ export interface User {
   created_at: string
 }
 
+/** 管理员用户列表/详情共用字段；QQ 状态仅来自 qq_identities 的关联存在性。 */
+export interface AdminUser {
+  id: number
+  email: string
+  username: string
+  display_name: string | null
+  role: string
+  avatar: string | null
+  email_verified: number | null
+  created_at: string
+  banned: boolean
+  has_app: boolean
+  qq_bound: boolean
+}
+
+/** 管理员用户列表条目。 */
+export interface AdminUserListItem extends AdminUser {
+  post_count: number
+  comment_count: number
+  checkin_count: number
+}
+
+/** 管理员用户列表响应。 */
+export interface AdminUserListResponse {
+  users: AdminUserListItem[]
+  pagination: { page: number; limit: number; total: number; totalPages: number }
+}
+
+/** 管理员用户详情画像；可选字段取决于已应用的用户表迁移。 */
+export interface AdminUserDetail extends AdminUser {
+  region?: string | null
+  age?: number | null
+  weight?: number | null
+  waist?: number | null
+  hip?: number | null
+  style_preference?: string | null
+  bio?: string | null
+  header?: string | null
+}
+
+/** 管理员用户详情响应。 */
+export interface AdminUserDetailResponse {
+  user: AdminUserDetail
+  counts: { posts: number; comments: number; likes: number; ratings: number; feelings: number; checkins: number; points: number }
+  badges: { key: string; name: string; color: string; unlocked_at: string | null }[]
+  tracking: { enabled: boolean; created_at: number | null }
+  trackEvents: { ip: string; path: string; created_at: number }[]
+  recentPosts: { id: number; content: string; created_at: string }[]
+}
+
 /** 纸尿裤 */
 export interface Diaper {
   id: number
