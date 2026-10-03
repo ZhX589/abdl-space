@@ -2034,7 +2034,20 @@ Cloudflare Turnstile 验证。
 
 #### GET /api/admin/users
 
-用户列表（含 email、role、`qq_bound` 等管理字段）。支持 `qq_bound=bound|unbound` 筛选。JWT 会实时读取管理员角色；OAuth 需要 `read admin` scope。
+用户列表（含 email、role、`qq_bound` 等管理字段）。JWT 会实时读取管理员角色；OAuth 需要 `read admin` scope。
+
+- 参数：`page` 默认 1；`limit` 默认 20、范围 1–100。两者只接受无前导零的正十进制安全整数，offset 也必须为安全整数；空值、负数、小数、尾随文字、溢出或越界返回 400（不截断/钳制）。
+- 搜索：`q` 对 username/email 做 LIKE 搜索；`role` 可省略/为空或为 `admin|user`，其他值返回 400。
+- QQ 筛选：省略 `qq_bound` 表示全部；仅接受 `bound|unbound`，空值或其他值返回 400。与搜索、角色条件按 AND 组合，返回条目与 `pagination.total/totalPages` 使用一致条件；id 降序，空结果 totalPages=0，超出末页 users=[] 但 total 保持筛选总数。
+- 成功响应 `{ "users": [...], "pagination": { "page": 1, "limit": 20, "total": 5, "totalPages": 1 } }`，每条用户的 `qq_bound` 始终为 **boolean**。
+- `qq_bound` 仅由 `qq_identities.user_id` 是否关联该用户决定，不读取 `qq_app_subjects`，身份无 app subject 也视为已绑定。不返回 UnionID、OpenID、HMAC、token 或 app_id。
+- 数据库/QQ 状态不可用返回 500，绝不降级为 `qq_bound=false`。响应 `Cache-Control: private, no-store`。
+
+#### GET /api/admin/users/:id/detail
+
+返回 `{ "user": {...}, "counts": {...}, "badges": [...], "tracking": {...}, "trackEvents": [...], "recentPosts": [...] }`。`user.qq_bound` 与列表同源、同样为 boolean；不可用返回 500，不返回 QQ 身份标识。响应 `Cache-Control: private, no-store`。
+
+`:id` 只接受无前导零的正十进制安全整数；非法值返回 400，用户不存在返回 404。鉴权与用户列表一致。
 
 #### GET /api/admin/identities/users/:id
 

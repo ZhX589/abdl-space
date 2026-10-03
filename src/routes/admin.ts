@@ -1,7 +1,7 @@
 import { Hono } from 'hono'
 const DEFAULT_AVATAR = 'https://img.abdl-space.top/file/system/1781439303787_play_store_512.png'
 import type { D1Database, D1PreparedStatement } from '@cloudflare/workers-types'
-import type { Env, JWTPayload } from '../types/index.ts'
+import type { AdminUserDetail, AdminUserDetailResponse, AdminUserListItem, AdminUserListResponse, Env, JWTPayload } from '../types/index.ts'
 import { query, queryOne, run } from '../lib/db.ts'
 import { cacheDelete, cacheDeletePrefix } from '../lib/ttl-cache.ts'
 import { kvCacheInvalidate } from '../lib/kv-cache.ts'
@@ -352,68 +352,100 @@ admin.get('/stats', adminMiddleware, async (c) => {
   })
 })
 
+// SQLite EXISTS must be known (0/1); never turn missing/invalid DB data into an unbound user.
+function qqBound(value: unknown): boolean {
+  if (value === 0) return false
+  if (value === 1) return true
+  throw new Error('QQ binding status unavailable')
+}
+
+function positiveInteger(value: string): number | null {
+  if (!/^[1-9]\d*$/.test(value)) return null
+  const parsed = Number(value)
+  return Number.isSafeInteger(parsed) ? parsed : null
+}
+
 /**
- * GET /api/admin/users — 用户列表（分页 + 搜索 + 角色筛选）
+ * GET /api/admin/users — 用户列表（分页 + 搜索 + 角色/QQ 绑定筛选）
  */
 admin.get('/users', adminMiddleware, async (c) => {
+  c.header('Cache-Control', 'private, no-store')
   const db = c.env.abdl_space_db
-  const page = Math.max(1, parseInt(c.req.query('page') || '1'))
-  const limit = Math.min(100, Math.max(1, parseInt(c.req.query('limit') || '20')))
+  const page = positiveInteger(c.req.query('page') ?? '1')
+  const limit = positiveInteger(c.req.query('limit') ?? '20')
+  if (page === null || limit === null || limit > 100 || !Number.isSafeInteger((page - 1) * limit)) {
+    return c.json({ error: 'Invalid pagination' }, 400)
+  }
   const offset = (page - 1) * limit
   const q = (c.req.query('q') || '').trim()
-  const role = (c.req.query('role') || '').trim()
+  const role = c.req.query('role') ?? ''
+  const qqFilter = c.req.query('qq_bound')
+  if (role !== '' && role !== 'admin' && role !== 'user') return c.json({ error: 'Invalid role' }, 400)
+  if (qqFilter !== undefined && qqFilter !== 'bound' && qqFilter !== 'unbound') {
+    return c.json({ error: 'Invalid qq_bound' }, 400)
+  }
+  const binding = qqFilter === undefined ? -1 : qqFilter === 'bound' ? 1 : 0
 
   const colRows = await query<{ name: string }>(db, "SELECT name FROM pragma_table_info('users')")
   const colSet = new Set(colRows.map(r => r.name))
   const bannedSel = colSet.has('banned') ? 'u.banned,' : ''
   const hasAppSel = colSet.has('has_app') ? 'u.has_app,' : ''
 
-  const where: string[] = ['1=1']
-  const params: unknown[] = []
-  if (q) { where.push('(u.username LIKE ? OR u.email LIKE ?)'); params.push(`%${q}%`, `%${q}%`) }
-  if (role === 'admin' || role === 'user') { where.push('u.role = ?'); params.push(role) }
-  const whereSql = where.join(' AND ')
-
+  // Static predicates and identical bindings keep list and total filters aligned.
+  // Only optional, hard-coded schema columns are interpolated; all request values are bound.
+  const params = [q, `%${q}%`, `%${q}%`, role, role, binding, binding]
   const [totalRow, rows] = await Promise.all([
-    queryOne<{ c: number }>(db, `SELECT COUNT(*) AS c FROM users u WHERE ${whereSql}`, params),
-    query<Record<string, unknown>>(
+    queryOne<{ c: number }>(db,
+      `SELECT COUNT(*) AS c FROM users u
+       WHERE (? = '' OR u.username LIKE ? OR u.email LIKE ?)
+         AND (? = '' OR u.role = ?)
+         AND (? = -1 OR EXISTS (SELECT 1 FROM qq_identities qi WHERE qi.user_id = u.id) = ?)`, params),
+    query<Omit<AdminUserListItem, 'banned' | 'has_app' | 'qq_bound'> & { banned?: number; has_app?: number; qq_bound: number }>(
       db,
       `SELECT u.id, u.email, u.username, u.display_name, u.role, u.avatar, u.email_verified, u.created_at,
               ${bannedSel} ${hasAppSel}
+              EXISTS (SELECT 1 FROM qq_identities qi WHERE qi.user_id = u.id) AS qq_bound,
               (SELECT COUNT(*) FROM posts p WHERE p.user_id = u.id) AS post_count,
               (SELECT COUNT(*) FROM post_comments pc WHERE pc.user_id = u.id) AS comment_count,
               (SELECT COUNT(*) FROM daily_checkins dc WHERE dc.user_id = u.id) AS checkin_count
-       FROM users u WHERE ${whereSql} ORDER BY u.id DESC LIMIT ? OFFSET ?`,
+       FROM users u
+       WHERE (? = '' OR u.username LIKE ? OR u.email LIKE ?)
+         AND (? = '' OR u.role = ?)
+         AND (? = -1 OR EXISTS (SELECT 1 FROM qq_identities qi WHERE qi.user_id = u.id) = ?)
+       ORDER BY u.id DESC LIMIT ? OFFSET ?`,
       [...params, limit, offset]
     ),
   ])
 
-  const total = totalRow?.c ?? 0
+  if (!totalRow || !Number.isSafeInteger(totalRow.c) || totalRow.c < 0) throw new Error('User total unavailable')
+  const total = totalRow.c
   return c.json({
     users: rows.map(r => ({
       id: r.id, email: r.email, username: r.username, display_name: r.display_name || '',
       role: r.role, avatar: r.avatar ?? DEFAULT_AVATAR, email_verified: r.email_verified,
-      created_at: r.created_at, banned: !!r.banned, has_app: !!r.has_app,
+      created_at: r.created_at, banned: !!r.banned, has_app: !!r.has_app, qq_bound: qqBound(r.qq_bound),
       post_count: r.post_count ?? 0, comment_count: r.comment_count ?? 0, checkin_count: r.checkin_count ?? 0,
     })),
     pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
-  })
+  } satisfies AdminUserListResponse)
 })
 
 /**
  * GET /api/admin/users/:id/detail — 用户详情（含画像与行为统计）
  */
 admin.get('/users/:id/detail', adminMiddleware, async (c) => {
-  const id = parseInt(c.req.param('id') || '')
-  if (!Number.isInteger(id) || id <= 0) return c.json({ error: 'Invalid user id' }, 400)
+  c.header('Cache-Control', 'private, no-store')
+  const id = positiveInteger(c.req.param('id') ?? '')
+  if (id === null) return c.json({ error: 'Invalid user id' }, 400)
   const db = c.env.abdl_space_db
 
   const colSet = new Set((await query<{ name: string }>(db, "SELECT name FROM pragma_table_info('users')")).map(r => r.name))
   const safeCol = (n: string) => (colSet.has(n) ? `, ${n}` : '')
 
-  const user = await queryOne<Record<string, unknown>>(
+  const user = await queryOne<Omit<AdminUserDetail, 'banned' | 'has_app' | 'qq_bound'> & { banned?: number; has_app?: number; qq_bound: number }>(
     db,
-    `SELECT id, email, username, display_name, role, avatar, email_verified, created_at
+    `SELECT id, email, username, display_name, role, avatar, email_verified, created_at,
+     EXISTS (SELECT 1 FROM qq_identities qi WHERE qi.user_id = users.id) AS qq_bound
      ${safeCol('banned')} ${safeCol('has_app')} ${safeCol('region')} ${safeCol('age')}
      ${safeCol('weight')} ${safeCol('waist')} ${safeCol('hip')} ${safeCol('style_preference')}
      ${safeCol('bio')} ${safeCol('header')}
@@ -453,7 +485,7 @@ admin.get('/users/:id/detail', adminMiddleware, async (c) => {
   return c.json({
     user: {
       ...user,
-      banned: !!user.banned, has_app: !!user.has_app,
+      banned: !!user.banned, has_app: !!user.has_app, qq_bound: qqBound(user.qq_bound),
       avatar: user.avatar ?? DEFAULT_AVATAR,
     },
     counts: {
@@ -465,7 +497,7 @@ admin.get('/users/:id/detail', adminMiddleware, async (c) => {
     tracking: { enabled: !!trackRule?.enabled, created_at: trackRule?.created_at || null },
     trackEvents,
     recentPosts,
-  })
+  } satisfies AdminUserDetailResponse)
 })
 
 /**

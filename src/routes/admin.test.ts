@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { DatabaseSync } from 'node:sqlite'
+import { DatabaseSync, type SQLInputValue } from 'node:sqlite'
 import test from 'node:test'
 
 import { Hono } from 'hono'
@@ -8,11 +8,16 @@ import { Hono } from 'hono'
 import { signJWT } from '../lib/auth.ts'
 import { cleanupPrivateNovelObjects } from './novel-private.ts'
 import admin from './admin.ts'
+import type { AdminUserDetailResponse, AdminUserListResponse } from '../types/index.ts'
+
+function readSQL(path: string): string {
+  return readFileSync(new URL(path, import.meta.url), 'utf8')
+}
 
 test('admin user deletion preserves a permanently monitored private object job', async () => {
 	const database = new DatabaseSync(':memory:')
 	database.exec('PRAGMA foreign_keys = ON;')
-	database.exec(readFileSync(new URL('../../schemas/schema.sql', import.meta.url), 'utf8'))
+	database.exec(readSQL('../../schemas/schema.sql'))
 	database.prepare(`INSERT INTO users (id, email, password_hash, username, role) VALUES
 		(1, 'admin@example.test', 'hash', 'admin', 'admin'), (2, 'user@example.test', 'hash', 'user', 'user')`).run()
 	database.prepare(`INSERT INTO private_books (
@@ -83,7 +88,7 @@ test('admin user deletion preserves a permanently monitored private object job',
 test('admin can explicitly set and clear post NSFW state with image synchronization', async () => {
 	const database = new DatabaseSync(':memory:')
 	database.exec('PRAGMA foreign_keys = ON;')
-	database.exec(readFileSync(new URL('../../schemas/schema.sql', import.meta.url), 'utf8'))
+	database.exec(readSQL('../../schemas/schema.sql'))
 	database.prepare(`INSERT INTO users (id, email, password_hash, username, role) VALUES
 		(1, 'admin@example.test', 'hash', 'admin', 'admin'), (2, 'user@example.test', 'hash', 'user', 'user')`).run()
 	database.prepare(`INSERT INTO posts (id, user_id, content, has_nsfw) VALUES
@@ -143,4 +148,175 @@ test('admin can explicitly set and clear post NSFW state with image synchronizat
 	assert.equal(noImage.status, 200, await noImage.clone().text())
 	assert.equal(database.prepare('SELECT has_nsfw FROM posts WHERE id = 11').get()?.has_nsfw, 1)
 	database.close()
+})
+
+// Strict D1 adapter: execute real SQLite SQL; never swallow missing tables/columns or failed queries.
+async function adminUsersFixture(optionalColumns = true) {
+  const database = new DatabaseSync(':memory:')
+  database.exec('PRAGMA foreign_keys = ON')
+  database.exec(readSQL('../../schemas/schema.sql'))
+  database.exec(readSQL('../../migrations/0025_account_system_upgrade.sql'))
+  if (optionalColumns) database.exec('ALTER TABLE users ADD COLUMN banned INTEGER DEFAULT 0; ALTER TABLE users ADD COLUMN has_app INTEGER DEFAULT 0;')
+  database.exec(`INSERT INTO users(id,email,password_hash,username,role) VALUES
+    (1,'admin@example.test','hash','admin','admin'),
+    (2,'bound@example.test','hash','target_bound','user'),
+    (3,'unbound@example.test','hash','target_unbound','user'),
+    (4,'admin2@example.test','hash','admin2','admin'),
+    (5,'identityonly@example.test','hash','identityonly','user');`)
+  for (const [id, hmac] of [[2, 'a'], [4, 'b'], [5, 'c']] as const) {
+    database.prepare('INSERT INTO qq_identities(unionid_hmac,user_id) VALUES (?,?)').run(hmac.repeat(64), id)
+  }
+  // Multiple subjects must not duplicate rows; identity-only users are still bound.
+  for (const appId of ['1905661071', '1905661072']) {
+    database.prepare('INSERT INTO qq_app_subjects(app_id,openid_hmac,unionid_hmac) VALUES (?,?,?)').run(appId, 'd'.repeat(64), 'a'.repeat(64))
+  }
+  // Orphan subjects (allowed by schema) are NOT a user binding.
+  database.prepare('INSERT INTO qq_app_subjects(app_id,openid_hmac,unionid_hmac) VALUES (?,?,?)').run('1905661071', 'e'.repeat(64), 'f'.repeat(64))
+  database.exec("INSERT INTO posts(user_id,content) VALUES (2,'post'); INSERT INTO daily_checkins(user_id,checkin_date) VALUES (2,'2026-10-03');")
+  const controls: { qqFailure?: 'throw' | 'unsuccessful' | 'null' | 'missing' } = {}
+  const queries: { sql: string; params: unknown[] }[] = []
+  function statement(sql: string, params: SQLInputValue[] = []) {
+    return {
+      bind: (...next: SQLInputValue[]) => statement(sql, next),
+      async all() {
+        queries.push({ sql, params })
+        const rows = database.prepare(sql).all(...params)
+        if (sql.includes('qq_identities')) {
+          if (controls.qqFailure === 'throw') throw new Error('QQ query failed')
+          if (controls.qqFailure === 'unsuccessful') return { success: false, results: [] }
+          if (sql.includes('AS qq_bound') && controls.qqFailure) {
+            for (const row of rows) {
+              if (controls.qqFailure === 'null') row.qq_bound = null
+              if (controls.qqFailure === 'missing') delete row.qq_bound
+            }
+          }
+        }
+        return { success: true, results: rows }
+      },
+    }
+  }
+  const env = { abdl_space_db: { prepare: (sql: string) => statement(sql) }, JWT_SECRET: 'admin-users-test-secret' }
+  const app = new Hono()
+  app.onError((_error, c) => c.json({ error: 'Internal server error' }, 500))
+  app.route('/api/admin', admin)
+  const token = await signJWT({ sub: 1, username: 'admin', email: 'admin@example.test', role: 'admin' }, env.JWT_SECRET)
+  const request = (path: string) => app.request(`/api/admin${path}`, { headers: { Authorization: `Bearer ${token}` } }, env as never)
+  return { database, request, controls, queries }
+}
+
+async function userList(fixture: Awaited<ReturnType<typeof adminUsersFixture>>, query = '') {
+  const response = await fixture.request(`/users${query}`)
+  const text = await response.text()
+  assert.equal(response.status, 200, text)
+  assert.equal(response.headers.get('cache-control'), 'private, no-store')
+  assert.doesNotMatch(text, /unionid|openid|hmac|access_token|refresh_token|app_id|password_hash/i)
+  for (const hmac of ['a', 'b', 'c', 'd', 'e', 'f']) assert.ok(!text.includes(hmac.repeat(64)))
+  return JSON.parse(text) as AdminUserListResponse
+}
+
+async function userDetail(fixture: Awaited<ReturnType<typeof adminUsersFixture>>, id: number) {
+  const response = await fixture.request(`/users/${id}/detail`)
+  const text = await response.text()
+  assert.equal(response.status, 200, text)
+  assert.equal(response.headers.get('cache-control'), 'private, no-store')
+  assert.doesNotMatch(text, /unionid|openid|hmac|access_token|refresh_token|app_id|password_hash/i)
+  return JSON.parse(text) as AdminUserDetailResponse
+}
+
+for (const optionalColumns of [true, false]) {
+  test(`admin list/detail return minimized QQ booleans from identities (optional columns=${optionalColumns})`, async () => {
+    const fixture = await adminUsersFixture(optionalColumns)
+    try {
+      const list = await userList(fixture)
+      assert.deepEqual(list.users.map(user => [user.id, user.qq_bound]), [[5, true], [4, true], [3, false], [2, true], [1, false]])
+      assert.deepEqual(list.pagination, { page: 1, limit: 20, total: 5, totalPages: 1 })
+      for (const user of list.users) {
+        assert.equal(typeof user.qq_bound, 'boolean')
+        assert.equal((await userDetail(fixture, user.id)).user.qq_bound, user.qq_bound)
+      }
+      assert.equal(list.users.find(user => user.id === 2)?.post_count, 1)
+      assert.equal(list.users.find(user => user.id === 2)?.checkin_count, 1)
+      // The app-subject table is not even needed for these endpoints.
+      fixture.database.exec('DROP TABLE qq_app_subjects')
+      assert.equal((await userList(fixture, '?qq_bound=bound')).pagination.total, 3)
+      assert.equal((await userDetail(fixture, 5)).user.qq_bound, true)
+      assert.equal((await fixture.request('/users/999/detail')).status, 404)
+    } finally { fixture.database.close() }
+  })
+}
+
+test('admin QQ filters align rows, total, pagination, role and search without duplicate subjects', async () => {
+  const fixture = await adminUsersFixture()
+  try {
+    for (const [filter, ids] of [['bound', [5, 4, 2]], ['unbound', [3, 1]]] as const) {
+      const pages = []
+      for (const [index, id] of ids.entries()) {
+        const body = await userList(fixture, `?qq_bound=${filter}&limit=1&page=${index + 1}`)
+        assert.deepEqual(body.users.map(user => user.id), [id])
+        assert.deepEqual(body.pagination, { page: index + 1, limit: 1, total: ids.length, totalPages: ids.length })
+        assert.equal(body.users[0].qq_bound, filter === 'bound')
+        pages.push(body.users[0].id)
+      }
+      assert.deepEqual(pages, [...ids])
+    }
+    assert.deepEqual((await userList(fixture, '?qq_bound=bound&role=user&q=target')).users.map(user => user.id), [2])
+    assert.equal((await userList(fixture, '?qq_bound=bound&role=user&q=target')).pagination.total, 1)
+    assert.deepEqual((await userList(fixture, '?qq_bound=unbound&role=user&q=target')).users.map(user => user.id), [3])
+    assert.equal((await userList(fixture, '?qq_bound=bound&role=admin')).pagination.total, 1)
+    assert.equal((await userList(fixture, '?qq_bound=unbound&role=admin')).pagination.total, 1)
+    const empty = await userList(fixture, '?q=no-match&qq_bound=bound')
+    assert.deepEqual(empty.users, [])
+    assert.deepEqual(empty.pagination, { page: 1, limit: 20, total: 0, totalPages: 0 })
+    const beyond = await userList(fixture, '?qq_bound=bound&page=4&limit=1')
+    assert.deepEqual(beyond.users, [])
+    assert.equal(beyond.pagination.total, 3)
+    const injection = "' OR 1=1 --"
+    assert.equal((await userList(fixture, `?q=${encodeURIComponent(injection)}`)).pagination.total, 0)
+    assert.ok(fixture.queries.some(query => query.params.includes(`%${injection}%`)))
+    assert.ok(fixture.queries.every(query => !query.sql.includes(injection)))
+    // Actual binding removal must immediately change both list and detail, even with leftover subjects.
+    fixture.database.prepare('DELETE FROM qq_identities WHERE user_id=?').run(2)
+    assert.equal((await userDetail(fixture, 2)).user.qq_bound, false)
+    assert.equal((await userList(fixture, '?qq_bound=bound')).pagination.total, 2)
+    assert.deepEqual((await userList(fixture, '?qq_bound=unbound')).users.map(user => user.id), [3, 2, 1])
+  } finally { fixture.database.close() }
+})
+
+test('admin users reject invalid pagination/filter/id values instead of silently coercing them', async () => {
+  const fixture = await adminUsersFixture()
+  try {
+    for (const parameter of ['page', 'limit']) {
+      for (const value of ['', '0', '-1', '1.5', '1x', 'NaN', 'Infinity', '01', '+1', ' 1', '1e2', '9007199254740992']) {
+        const response = await fixture.request(`/users?${parameter}=${encodeURIComponent(value)}`)
+        assert.equal(response.status, 400, `${parameter}=${value}`)
+        assert.equal(typeof (await response.json() as { error: unknown }).error, 'string')
+      }
+    }
+    for (const query of ['limit=101', 'page=9007199254740991&limit=100', 'qq_bound=', 'qq_bound=true', 'qq_bound=all', 'qq_bound=Bound', 'qq_bound=%20bound', 'role=owner', 'role=%20user']) {
+      assert.equal((await fixture.request(`/users?${query}`)).status, 400, query)
+    }
+    for (const id of ['0', '-1', '1x', '1.5', '01', '9007199254740992']) {
+      assert.equal((await fixture.request(`/users/${id}/detail`)).status, 400, id)
+    }
+    assert.equal((await userList(fixture, '?page=1&limit=100&role=')).pagination.limit, 100)
+  } finally { fixture.database.close() }
+})
+
+test('admin users do not fake unbound state when QQ query fails or status is unknown', async () => {
+  const fixture = await adminUsersFixture()
+  try {
+    for (const failure of ['throw', 'unsuccessful', 'null', 'missing'] as const) {
+      fixture.controls.qqFailure = failure
+      for (const path of ['/users', '/users?qq_bound=bound', '/users?qq_bound=unbound', '/users/2/detail', '/users/3/detail']) {
+        const response = await fixture.request(path)
+        assert.equal(response.status, 500, `${failure} ${path}`)
+        assert.doesNotMatch(await response.text(), /qq_bound|unionid|openid|hmac/i)
+      }
+    }
+    delete fixture.controls.qqFailure
+    fixture.database.exec('DROP TABLE qq_identities')
+    for (const path of ['/users', '/users?qq_bound=unbound', '/users/2/detail']) {
+      assert.equal((await fixture.request(path)).status, 500, path)
+    }
+  } finally { fixture.database.close() }
 })

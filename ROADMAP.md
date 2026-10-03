@@ -50,6 +50,19 @@
 
 发布时间 `2026-10-03T13:14:08.755Z`；版本 `3.0.0 / 31`。未修改管理员鉴权或旧版退役策略；本轮后端全量340 pass / 11 fail，版本/缓存专项17/17通过，不声称全量或真机验收通过。详见 [正式版发布记录](docs/app-release-3.0.0-31-2026-10-03.md)。
 
+## 管理员 QQ 绑定状态与存量 beta 徽章（2026-10-03）
+
+修复分支 `fix/admin-qq-beta-20261003`，从 main 切出；QQ 源码修复尚未部署，不将本地验证等同生产验收。
+
+| 内容 | 状态 |
+|:---|:---:|
+| 管理员用户列表及 `/api/admin/users/:id/detail` 从 `qq_identities` 返回准确 boolean `qq_bound`；不依赖 app subject、不输出身份标识、不可用不伪装 false、响应 private/no-store | ✅ |
+| `qq_bound=bound\|unbound` 与搜索/角色/total 同步；静态参数化筛选、分页/筛选/详情 id 非法参数校验，仅覆盖这两个查询接口 | ✅ |
+| 严格内存 SQLite 回归：identity-only、多 subject、筛选分页与 total、非法参数、解绑后刷新、失败/未知状态、敏感字段排除；API/types 同步 | ✅ |
+| 主代理参数化生产补发 `beta`（名称“创始用户”）存量徽章：eligible=65，owned 0→65，missing 65→0，changes=65；未更改新用户发放机制 | ✅ |
+
+验证：新增管理员 QQ 回归 5/5，含既有管理员用例 7/7 通过；admin/qq/auth 专项 25 pass / 5 fail；全量 349 pass / 10 fail，相比修复前 341 pass / 10 fail 新增 8 个通过项（QQ 5 + 主代理徽章脚本 3），失败集合未变化。`admin-identities` 测试已有 TypeScript parameter-property 在 Node strip-only 模式加载失败；QQ 的 4 个既有失败未扩大到本任务修复范围。原样 `tsc --noEmit` 744 个诊断（基线 745，复用测试 SQL 读取函数减少 1 个重复诊断），补齐现有测试所需 `--allowImportingTsExtensions --types node` 后 327 个诊断与原分支快照一致；两种配置均无新增诊断，不声称全量或 typecheck 通过。生产补发记录见 [beta 徽章补发记录](docs/beta-badge-backfill-2026-10-03.md)。
+
 ## 版本规划
 
 | 版本 | 目标 | 核心端点 | 状态 |
