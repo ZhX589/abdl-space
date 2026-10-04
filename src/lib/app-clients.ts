@@ -16,18 +16,20 @@ export const APP_CLIENT_REMINDER_KEY = 'app_client_reminder'
 
 /** Safe defaults when the existing site_settings table has no reminder row. */
 export function defaultAppClientReminder(): AppClientReminder {
-  return { enabled: false, version_codes: [], message: '已有新版本 App，建议更新以获得更好的体验。' }
+  return { enabled: false, version_codes: [], include_unversioned: true, message: '已有新版本 App，建议更新以获得更好的体验。' }
 }
 
-/** Validate exactly three fields without coercion; blank plaintext chooses the default message. */
+/** Validate four fields or exactly the legacy three; absent include_unversioned normalizes to true without coercion. */
 export function validateAppClientReminder(input: unknown): AppClientReminder | null {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return null
   const value = input as Record<string, unknown>
-  if (Object.keys(value).length !== 3 || Object.keys(value).some(key => !['enabled', 'version_codes', 'message'].includes(key))) return null
-  if (typeof value.enabled !== 'boolean' || typeof value.message !== 'string' || value.message.length > 2000) return null
+  const keys = Object.keys(value)
+  const hasIncludeUnversioned = Object.prototype.hasOwnProperty.call(value, 'include_unversioned')
+  if (keys.length !== (hasIncludeUnversioned ? 4 : 3) || keys.some(key => !['enabled', 'version_codes', 'include_unversioned', 'message'].includes(key))) return null
+  if (typeof value.enabled !== 'boolean' || typeof value.message !== 'string' || value.message.length > 2000 || (hasIncludeUnversioned && typeof value.include_unversioned !== 'boolean')) return null
   const codes = value.version_codes
   if (!Array.isArray(codes) || codes.length > 200 || codes.some(code => typeof code !== 'number' || !Number.isInteger(code) || code <= 0 || code > 2147483647) || new Set(codes).size !== codes.length) return null
-  return { enabled: value.enabled, version_codes: [...codes] as number[], message: value.message.trim() || defaultAppClientReminder().message }
+  return { enabled: value.enabled, version_codes: [...codes] as number[], include_unversioned: hasIncludeUnversioned ? value.include_unversioned as boolean : true, message: value.message.trim() || defaultAppClientReminder().message }
 }
 
 /** Read once, uncached and independent of the measurement epoch; missing row is an available default. */

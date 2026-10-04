@@ -6,7 +6,7 @@ import test from 'node:test'
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import { signJWT } from '../lib/auth.ts'
-import { APP_CLIENT_REMINDER_KEY, appClientStats, appClientUsers, defaultAppClientPolicy, defaultAppClientReminder, isNativeAppClient, observeAppClient, parseAppVersionCode } from '../lib/app-clients.ts'
+import { APP_CLIENT_REMINDER_KEY, appClientStats, appClientUsers, defaultAppClientPolicy, defaultAppClientReminder, isNativeAppClient, observeAppClient, parseAppVersionCode, validateAppClientReminder } from '../lib/app-clients.ts'
 import { appClientTimelineMiddleware, appUpdateNotice, buildAppUpdateNotice } from './app-clients.ts'
 import mastodon from '../mastodon/routes.ts'
 import abdl from '../mastodon/abdl.ts'
@@ -403,11 +403,23 @@ test('reminder admin GET/PUT auth, strict validation, default blank message and 
     const initial = await request(); assert.equal(initial.status, 200); assert.equal(initial.headers.get('Cache-Control'), 'private, no-store')
     assert.deepEqual(await initial.json(), defaultAppClientReminder())
     assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS c FROM site_settings WHERE key=?').get(APP_CLIENT_REMINDER_KEY)?.c, 0, 'GET never creates a row')
-    const valid = { enabled: true, version_codes: [1, 29, 2147483647], message: 'custom' }
+    const valid = { enabled: true, version_codes: [1, 29, 2147483647], include_unversioned: true, message: 'custom' }
     for (const body of [null, [], {}, { ...valid, enabled: 1 }, { ...valid, enabled: 'true' }, { ...valid, version_codes: null }, { ...valid, version_codes: [0] }, { ...valid, version_codes: [-1] }, { ...valid, version_codes: [1.2] }, { ...valid, version_codes: ['29'] }, { ...valid, version_codes: [2147483648] }, { ...valid, version_codes: [29, 29] }, { ...valid, version_codes: Array.from({ length: 201 }, (_, i) => i + 1) }, { ...valid, message: null }, { ...valid, message: 'x'.repeat(2001) }, { ...valid, block_unversioned: true }, { enabled: true, version_codes: [29] }]) {
       assert.equal((await request('PUT', body)).status, 422, JSON.stringify(body))
       assert.deepEqual(await (await request()).json(), defaultAppClientReminder())
     }
+    for (const include_unversioned of [null, 'true', 'false', 0, 1, [], {}]) {
+      assert.equal((await request('PUT', { ...valid, include_unversioned })).status, 422)
+      assert.deepEqual(await (await request()).json(), defaultAppClientReminder())
+      assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS c FROM site_settings WHERE key=?').get(APP_CLIENT_REMINDER_KEY)?.c, 0)
+    }
+    for (const body of [
+      { enabled: true, version_codes: [29], include_unversioned: true },
+      { enabled: true, message: 'custom', include_unversioned: true },
+      { version_codes: [29], message: 'custom', include_unversioned: true },
+      { ...valid, extra: true },
+    ]) assert.equal((await request('PUT', body)).status, 422)
+    assert.equal(validateAppClientReminder({ ...valid, include_unversioned: undefined }), null, 'explicit undefined is not a legacy omission')
     const malformed = await f.app.request('/api/admin/app-clients/reminder', { method: 'PUT', headers: headers(adminJwt), body: '{' }, f.env as never)
     assert.equal(malformed.status, 422)
     assert.deepEqual(await (await request('PUT', { ...valid, message: '  ' })).json(), { ...valid, message: defaultAppClientReminder().message })
@@ -423,18 +435,135 @@ test('reminder admin GET/PUT auth, strict validation, default blank message and 
   } finally { f.close() }
 })
 
+test('legacy saved reminder and legacy PUT normalize to four fields with include_unversioned true', async () => {
+  const f = fixture(); const adminJwt = await token(1)
+  const legacy = { enabled: true, version_codes: [29], message: 'Legacy reminder' }
+  const normalized = { ...legacy, include_unversioned: true }
+  const request = (method = 'GET', body?: unknown) => f.app.request('/api/admin/app-clients/reminder', { method, headers: headers(adminJwt), ...(body === undefined ? {} : { body: JSON.stringify(body) }) }, f.env as never)
+  const stored = () => JSON.parse(String(f.sqlite.prepare('SELECT value FROM site_settings WHERE key=?').get(APP_CLIENT_REMINDER_KEY)?.value))
+  try {
+    f.sqlite.prepare('INSERT INTO site_settings(key,value) VALUES(?,?)').run(APP_CLIENT_REMINDER_KEY, JSON.stringify(legacy))
+    const read = await request(); assert.equal(read.status, 200); assert.deepEqual(await read.json(), normalized)
+    assert.deepEqual(stored(), legacy, 'GET normalizes without migrating/writing the row')
+    const saved = await request('PUT', legacy); assert.equal(saved.status, 200); assert.deepEqual(await saved.json(), normalized)
+    assert.deepEqual(stored(), normalized); assert.equal(Object.keys(stored()).length, 4)
+    const disabledGroup = { ...normalized, include_unversioned: false }
+    assert.deepEqual(await (await request('PUT', disabledGroup)).json(), disabledGroup)
+    assert.deepEqual(await (await request()).json(), disabledGroup); assert.deepEqual(stored(), disabledGroup)
+    assert.deepEqual(await (await request('PUT', legacy)).json(), normalized, 'legacy PUT always restores the true default')
+    assert.deepEqual(stored(), normalized)
+  } finally { f.close() }
+})
+
+test('missing and malformed native versions receive nonblocking legacy reminder; group and master toggles remain independent', async () => {
+  const f = fixture(); const jwt = await token()
+  const unversioned = [null, '', 'bad', '29x', '01', '0', '-1', '+29', '29.0', '1e2', '2147483648']
+  const request = (code: string | null) => f.probe.request('/api/v1/timelines/public?limit=1', { headers: headers(jwt, code) }, f.env as never)
+  try {
+    assert.deepEqual(await (await request(null)).json(), [{ id: 'real' }], 'absent row master is off even though include_unversioned defaults true')
+    f.sqlite.prepare('INSERT INTO site_settings(key,value) VALUES(?,?)').run(APP_CLIENT_REMINDER_KEY, JSON.stringify({ enabled: true, version_codes: [29], message: 'Legacy reminder' }))
+    for (const code of unversioned) {
+      const response = await request(code)
+      assert.equal(response.status, 200); assert.equal(response.headers.get('X-App-Client-Observation'), 'recorded')
+      assert.equal(response.headers.get('X-App-Client-Reminder'), null)
+      assert.equal(response.headers.get('Link'), '</next>; rel="next"')
+      assert.deepEqual((await statuses(response)).map(s => s.id), ['app-update-required', 'real'], String(code))
+    }
+    assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS c FROM app_client_observations WHERE version_key=0').get()?.c, 1, 'parser retains one null observation bucket')
+    setReminder(f, { include_unversioned: false })
+    for (const code of unversioned) assert.deepEqual(await (await request(code)).json(), [{ id: 'real' }], String(code))
+    assert.deepEqual((await statuses(await request('29'))).map(s => s.id), ['app-update-required', 'real'])
+    setReminder(f, { version_codes: [] })
+    assert.deepEqual((await statuses(await request(null))).map(s => s.id), ['app-update-required', 'real'], 'unversioned does not require any selected code')
+    setReminder(f, { enabled: false })
+    for (const code of [...unversioned, '29', '30']) assert.deepEqual(await (await request(code)).json(), [{ id: 'real' }])
+    assert.equal((await appClientStats(f.db as never)).totals.observed_users, 1)
+  } finally { f.close() }
+})
+
+test('unversioned inclusion never classifies desktop/android browsers, header-only or OAuth identity; cookie auth stays bearer-only', async () => {
+  const f = fixture(); const jwt = await token(); setReminder(f)
+  try {
+    f.sqlite.exec(`INSERT INTO oauth_tokens VALUES('unversioned-oauth',2,'read',${Math.floor(Date.now()/1000)+1000},0)`)
+    for (const ua of [null, 'Mozilla/5.0 (X11; Linux x86_64)', 'Mozilla/5.0 (Linux; Android 14)', 'Mozilla/5.0 MastodonAndroid/3.0.0', 'MastodonAndroid/3.0.0 browser']) {
+      for (const code of [null, 'bad', '29']) {
+        const before = f.statements.length
+        const response = await f.probe.request('/api/v1/timelines/public', { headers: { ...headers('unversioned-oauth', code, ua), Cookie: `token=${jwt}` } }, f.env as never)
+        assert.deepEqual(await response.json(), [{ id: 'real' }]); assert.equal(response.headers.get('Cache-Control'), 'public,max-age=300')
+        assert.equal(response.headers.get('X-App-Client-Observation'), null); assert.equal(f.statements.length, before)
+      }
+    }
+    assert.equal(f.reminderReads(), 0)
+    for (const code of [null, 'bad']) {
+      for (const authorization of [undefined, 'Bearer invalid']) {
+        const before = f.reminderReads()
+        const response = await f.app.request('/api/v1/timelines/home', { headers: { ...headers(undefined, code), ...(authorization ? { Authorization: authorization } : {}), Cookie: `token=${jwt}` } }, f.env as never)
+        assert.equal(response.status, 401); assert.equal(f.reminderReads(), before)
+      }
+    }
+    assert.equal((await appClientStats(f.db as never)).totals.observed_users, 0)
+    const native = await f.probe.request('/api/v1/timelines/public', { headers: headers('unversioned-oauth', 'bad') }, f.env as never)
+    assert.equal(native.headers.get('X-App-Client-Observation'), 'recorded')
+    assert.deepEqual((await statuses(native)).map(s => s.id), ['app-update-required', 'real'])
+    assert.equal(f.sqlite.prepare('SELECT version_key FROM app_client_latest WHERE user_id=2').get()?.version_key, 0)
+  } finally { f.close() }
+})
+
+test('unversioned reminder preserves continuation, empty initial/terminal arrays and reserved cursor termination', async () => {
+  const f = fixture(); const jwt = await token(); setReminder(f); contentSchema(f)
+  try {
+    for (const code of [null, 'bad']) {
+      for (const query of ['max_id=p_100', 'min_id=p_100', 'since_id=p_100', 'cursor=opaque', 'offset=20', 'offset=20x']) {
+        const response = await f.probe.request(`/api/v1/timelines/public?${query}`, { headers: headers(jwt, code) }, f.env as never)
+        assert.deepEqual(await response.json(), [{ id: 'real' }]); assert.equal(response.headers.get('Link'), '</next>; rel="next"')
+      }
+      const first = await f.probe.request('/api/v1/timelines/public?offset=0', { headers: headers(jwt, code) }, f.env as never)
+      assert.deepEqual((await statuses(first)).map(s => s.id), ['app-update-required', 'real'])
+      for (const enabled of [true, false]) {
+        setReminder(f, { enabled })
+        for (const query of ['max_id=p_1', 'max_id=app-update-required']) {
+          const before = f.statements.length
+          const response = await f.app.request(`/api/v1/timelines/public?${query}`, { headers: headers(jwt, code) }, f.env as never)
+          assert.deepEqual(await response.json(), []); assert.equal(response.headers.get('Link'), null)
+          if (query.includes('app-update-required')) assert.ok(f.statements.slice(before).every(sql => !/FROM posts/i.test(sql)))
+        }
+      }
+      setReminder(f)
+    }
+    f.sqlite.exec('DELETE FROM posts')
+    for (const code of [null, 'bad']) assert.deepEqual(await (await f.app.request('/api/v1/timelines/public', { headers: headers(jwt, code) }, f.env as never)).json(), [])
+  } finally { f.close() }
+})
+
+test('retirement block_unversioned wins for null versions even with continuation or terminal notice cursor', async () => {
+  const f = fixture(); const jwt = await token(); setPolicy(f, { block_unversioned: true, update_message: 'Retired unversioned' }); setReminder(f); f.failReminderReads()
+  try {
+    for (const code of [null, 'bad', '01', '2147483648']) {
+      for (const path of ['/api/v1/timelines/public', '/api/v1/abdl/nbw/sync-threads']) {
+        for (const query of ['', '?cursor=opaque', '?max_id=app-update-required']) {
+          const response = await f.app.request(path + query, { headers: headers(jwt, code) }, f.env as never)
+          assert.equal(response.status, 200); assert.equal(response.headers.get('Link'), null)
+          const body = await statuses(response); assert.equal(body.length, 1); assert.equal(body[0].text, 'Retired unversioned\nhttps://m.abdl-space.top/app')
+        }
+      }
+    }
+    assert.equal(f.reminderReads(), 0); assert.ok(f.statements.every(sql => !/FROM posts|NBW/i.test(sql)))
+    assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS c FROM app_client_observations WHERE version_key=0').get()?.c, 1)
+  } finally { f.close() }
+})
+
 test('reminder needs only existing site_settings, not epoch; corruption/read failures are honest and native fail-open', async () => {
   const f = fixture(false); const adminJwt = await token(1)
   const request = (method = 'GET', body?: unknown) => f.app.request('/api/admin/app-clients/reminder', { method, headers: headers(adminJwt), ...(body === undefined ? {} : { body: JSON.stringify(body) }) }, f.env as never)
   try {
     f.sqlite.exec('CREATE TABLE site_settings(key TEXT PRIMARY KEY,value TEXT,updated_at TEXT)')
     assert.deepEqual(await (await request()).json(), defaultAppClientReminder())
-    const reminder = { enabled: true, version_codes: [29], message: 'No epoch needed' }
+    const reminder = { enabled: true, version_codes: [29], include_unversioned: true, message: 'No epoch needed' }
     assert.equal((await request('PUT', reminder)).status, 200)
     assert.deepEqual(await (await request()).json(), reminder)
     const native = await f.probe.request('/api/v1/timelines/public', { headers: headers() }, f.env as never)
     assert.deepEqual((await statuses(native)).map(s => s.id), ['app-update-required', 'real'])
-    for (const value of ['broken-json', '{}', '{"enabled":true,"version_codes":[0],"message":"bad"}']) {
+    for (const value of ['broken-json', '{}', '{"enabled":true,"version_codes":[0],"message":"bad"}', ...[null, 'true', 0].map(include_unversioned => JSON.stringify({ ...reminder, include_unversioned }))]) {
       f.sqlite.prepare('UPDATE site_settings SET value=? WHERE key=?').run(value, APP_CLIENT_REMINDER_KEY)
       assert.equal((await request()).status, 503)
       const response = await f.probe.request('/api/v1/timelines/public', { headers: headers() }, f.env as never)
@@ -448,7 +577,7 @@ test('reminder needs only existing site_settings, not epoch; corruption/read fai
   } finally { f.close() }
 })
 
-test('reminder only matches strict native valid selected version, observes normally and disabling is immediate', async () => {
+test('reminder matches strict native selected version, observes normally and disabling is immediate', async () => {
   const f = fixture(); const jwt = await token(); setReminder(f)
   try {
     const response = await f.probe.request('/api/v1/timelines/public?limit=1', { headers: headers(jwt) }, f.env as never)
@@ -456,7 +585,7 @@ test('reminder only matches strict native valid selected version, observes norma
     assert.equal(response.headers.get('Link'), '</next>; rel="next"')
     assert.equal(response.headers.get('X-App-Client-Observation'), 'recorded')
     assert.equal(f.reminderReads(), 1)
-    for (const code of [null, 'bad', '01', '0', '-1', '2147483648', '28', '30']) {
+    for (const code of ['28', '30']) {
       assert.deepEqual(await (await f.probe.request('/api/v1/timelines/public', { headers: headers(jwt, code) }, f.env as never)).json(), [{ id: 'real' }])
     }
     const before = f.statements.length
@@ -492,13 +621,15 @@ test('actual SQLite public/home/geo timelines retain every real status and real 
       const url = path + (path.includes('?') ? '&' : '?') + 'limit=1'
       const original = await f.app.request(url, { headers: headers(jwt, '30') }, f.env as never)
       const real = await statuses(original)
-      const response = await f.app.request(url, { headers: headers(jwt) }, f.env as never)
-      const result = await statuses(response)
-      assert.equal(response.status, 200, path)
-      assert.equal(result[0].id, 'app-update-required'); assert.deepEqual(result.slice(1), real)
-      assert.equal(result.length, real.length + 1, 'do not trim real list to limit')
-      assert.equal(response.headers.get('Link'), original.headers.get('Link'))
-      assert.doesNotMatch(response.headers.get('Link') || '', /app-update-required/)
+      for (const code of ['29', null, 'bad']) {
+        const response = await f.app.request(url, { headers: headers(jwt, code) }, f.env as never)
+        const result = await statuses(response)
+        assert.equal(response.status, 200, path)
+        assert.equal(result[0].id, 'app-update-required'); assert.deepEqual(result.slice(1), real)
+        assert.equal(result.length, real.length + 1, 'do not trim real list to limit')
+        assert.equal(response.headers.get('Link'), original.headers.get('Link'))
+        assert.doesNotMatch(response.headers.get('Link') || '', /app-update-required/)
+      }
     }
   } finally { f.close() }
 })
@@ -509,11 +640,14 @@ test('reminder on actual public fallback never mutates shared snapshot or later 
   const before = structuredClone(snapshot)
   const env = { ...f.env, NOTICE_KV: { get: async () => snapshot, put: async () => { throw new Error('must not cache reminder') } } }
   try {
-    const response = await f.app.request('/api/v1/timelines/public', { headers: headers(jwt) }, env as never)
-    assert.deepEqual((await response.json() as unknown[]).slice(1), before)
-    assert.equal(response.headers.get('X-ABDL-Timeline-Fallback'), 'snapshot')
-    assert.deepEqual(snapshot, before)
-    for (const h of [headers(undefined, '29', 'Mozilla/5.0'), headers(jwt, '30')]) assert.deepEqual(await (await f.app.request('/api/v1/timelines/public', { headers: h }, env as never)).json(), before)
+    for (const code of ['29', null, 'bad']) {
+      const response = await f.app.request('/api/v1/timelines/public', { headers: headers(jwt, code) }, env as never)
+      const result = await statuses(response)
+      assert.equal(result[0].id, 'app-update-required'); assert.deepEqual(result.slice(1), before)
+      assert.equal(response.headers.get('X-ABDL-Timeline-Fallback'), 'snapshot')
+      assert.deepEqual(snapshot, before)
+    }
+    for (const h of [headers(undefined, null, 'Mozilla/5.0'), headers(undefined, null, 'Mozilla/5.0 (Android)'), headers(undefined, '29', null), headers(jwt, '30')]) assert.deepEqual(await (await f.app.request('/api/v1/timelines/public', { headers: h }, env as never)).json(), before)
   } finally { f.close() }
 })
 
@@ -628,14 +762,17 @@ test('actual NBW routes and alias preserve opaque real cursors and read reminder
   try {
     for (const path of ['/api/v1/timelines/nbw', '/api/v1/abdl/nbw/sync-threads']) {
       const original = await f.app.request(path, { headers: headers(jwt, '30') }, env as never)
-      const before = f.reminderReads()
-      const response = await f.app.request(path, { headers: headers(jwt) }, env as never)
-      const result = await statuses(response)
-      assert.equal(result[0].id, 'app-update-required'); assert.deepEqual(result.slice(1), await original.json())
-      assert.equal(response.headers.get('Link'), original.headers.get('Link')); assert.match(response.headers.get('Link') || '', /opaque-next/)
-      assert.equal(f.reminderReads(), before + 1)
-      const page = await f.app.request(`${path}?cursor=opaque-next`, { headers: headers(jwt) }, env as never)
-      assert.deepEqual((await statuses(page)).map(s => s.id), ['nbw_123'])
+      const real = await original.json()
+      for (const code of ['29', null, 'bad']) {
+        const before = f.reminderReads()
+        const response = await f.app.request(path, { headers: headers(jwt, code) }, env as never)
+        const result = await statuses(response)
+        assert.equal(result[0].id, 'app-update-required'); assert.deepEqual(result.slice(1), real)
+        assert.equal(response.headers.get('Link'), original.headers.get('Link')); assert.match(response.headers.get('Link') || '', /opaque-next/)
+        assert.equal(f.reminderReads(), before + 1)
+        const page = await f.app.request(`${path}?cursor=opaque-next`, { headers: headers(jwt, code) }, env as never)
+        assert.deepEqual((await statuses(page)).map(s => s.id), ['nbw_123'])
+      }
     }
   } finally { globalThis.fetch = originalFetch; f.close() }
 })
@@ -643,7 +780,7 @@ test('actual NBW routes and alias preserve opaque real cursors and read reminder
 test('reminder preserves OAuth observation/auth and existing native rate limit without DB work after 429', async () => {
   const f = fixture(); setReminder(f)
   const env = { ...f.env, NBW_API_KEY: 'local-test-only', NOTICE_KV: { get: async () => [{ id: 'real' }] } }
-  const h = { ...headers('reminder-oauth'), 'CF-Connecting-IP': '192.0.2.251' }
+  const h = { ...headers('reminder-oauth', null), 'CF-Connecting-IP': '192.0.2.251' }
   try {
     f.sqlite.exec(`INSERT INTO oauth_tokens VALUES('reminder-oauth',2,'read',${Math.floor(Date.now()/1000)+1000},0)`)
     for (let i = 0; i < 120; i++) {

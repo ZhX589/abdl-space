@@ -12,6 +12,8 @@ export interface AppClientPolicy {
 export interface AppClientReminder {
   enabled: boolean
   version_codes: number[]
+  /** Include native requests with 未上报有效版本号 (missing or malformed); defaults to true. */
+  include_unversioned: boolean
   message: string
 }
 

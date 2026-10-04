@@ -155,6 +155,6 @@ export async function appClientTimelineMiddleware(c: Context<AppType>, next: Nex
   const continuation = ['max_id', 'min_id', 'since_id', 'cursor'].some(key => !!c.req.query(key)) || (!!offset && offset !== '0')
   try {
     await next()
-    if (!continuation && reminder.enabled && versionCode !== null && reminder.version_codes.includes(versionCode)) await prependReminder(c, reminder.message)
+    if (!continuation && reminder.enabled && (versionCode === null ? reminder.include_unversioned : reminder.version_codes.includes(versionCode))) await prependReminder(c, reminder.message)
   } finally { privateHeaders(c) }
 }

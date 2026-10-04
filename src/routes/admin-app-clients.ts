@@ -32,7 +32,7 @@ appClients.get('/reminder', async c => {
 })
 appClients.put('/reminder', async c => {
   const reminder = validateAppClientReminder(await c.req.json().catch(() => null))
-  if (!reminder) return c.json({ error: 'Invalid app client reminder: exactly three fields, boolean enabled, up to 200 distinct positive int32 codes, and a plaintext message up to 2000 characters required' }, 422)
+  if (!reminder) return c.json({ error: 'Invalid app client reminder: exactly three legacy fields or four fields with boolean include_unversioned, boolean enabled, up to 200 distinct positive int32 codes, and a plaintext message up to 2000 characters required' }, 422)
   try {
     await writeAppClientReminder(c.env.abdl_space_db, reminder)
     return c.json(reminder)
