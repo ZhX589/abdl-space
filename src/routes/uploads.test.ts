@@ -278,7 +278,7 @@ test('complete rejects wrong owners, expired uploads, and failed uploads', async
 		[uploadRow({ expires_at: Math.floor(Date.now() / 1000) - 1 }), 42, 409],
 		[uploadRow({ status: 'failed' }), 42, 409],
 	] as const) {
-		const db = createDb([row])
+		const db = createDb([row], { roles: { 42: 'user', 7: 'user' } })
 		assert.equal((await complete(row.id, {}, { db, sub })).status, expected)
 	}
 })

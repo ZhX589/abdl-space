@@ -7,11 +7,9 @@ import { queryOne } from '../lib/db.ts'
 import { cacheGet, cacheSet } from '../lib/ttl-cache.ts'
 import { kvCacheGet, kvCacheSet } from '../lib/kv-cache.ts'
 import type { MastodonInstance } from './types.ts'
+import { refreshUserSession } from '../middleware/auth.ts'
 
-// 鉴权缓存：只缓存 users 行（每用户 60s），把 token 鉴权里的用户查询
-// 从「每次 1 次读」降为「每 60s 1 次」。oauth_tokens 表按需实时读取，
-// 注销/过期/scope 变更不受缓存影响。用户被删后最多 60s 内旧资料仍可见。
-const AUTH_CACHE_TTL_MS = 60_000
+// Authorization data must be read from D1 for every request, not the profile TTL cache.
 
 // 实例统计（全表 COUNT）缓存 5 分钟，避免每次拉实例信息都全表扫描。
 const INSTANCE_CACHE_TTL_MS = 300_000
@@ -41,22 +39,13 @@ export async function mastodonAuthDetails(c: { req: { header: (name: string) => 
     const { introspectToken } = await import('../lib/oauth.ts')
     const result = await introspectToken(c.env.abdl_space_db, token)
     if (result.active && result.sub) {
-      // 用户行缓存 60s：OAuth token 鉴权从「每次 2 次 D1 读」降为「每 60s 2 次」。
-      // 只缓存用户资料行；token 表读取不缓存，注销/过期/scope 变更即时生效。
-      const userCacheKey = `user:${result.sub}`
-      let user = cacheGet<{ id: number; username: string; email: string; role: string } | null>(userCacheKey)
-      if (user === undefined) {
-        user = await queryOne<{ id: number; username: string; email: string; role: string }>(
-          c.env.abdl_space_db, 'SELECT id, username, email, role FROM users WHERE id = ?', [result.sub]
-        )
-        if (user) cacheSet(userCacheKey, user, AUTH_CACHE_TTL_MS)
-      }
+      const user = await queryOne<{ id: number; username: string; email: string; role: string }>(
+        c.env.abdl_space_db, 'SELECT id, username, email, role FROM users WHERE id = ?', [result.sub]
+      )
       if (user) {
-        return {
-          user: { sub: user.id, username: user.username, email: user.email, role: user.role, iat: 0, exp: 0 },
-          tokenType: 'oauth',
-          scopes: (result.scope ?? '').split(/\s+/).filter(Boolean),
-        }
+        const scopes = (result.scope ?? '').split(/[ ,]+/).filter(Boolean)
+        const session = await refreshUserSession({ sub: user.id, username: user.username, email: user.email, role: user.role, iat: 0, exp: 0, oauth_scopes: scopes }, c.env.abdl_space_db)
+        return session ? { user: session, tokenType: 'oauth', scopes } : null
       }
     }
   } catch {
@@ -66,7 +55,8 @@ export async function mastodonAuthDetails(c: { req: { header: (name: string) => 
     const { verifyJWT } = await import('../lib/auth.ts')
     const payload = await verifyJWT(token, c.env.JWT_SECRET)
     if (payload) {
-      return { user: payload, tokenType: 'jwt', scopes: [] }
+      const user = await refreshUserSession({ ...payload, oauth_scopes: undefined, is_super_admin: undefined }, c.env.abdl_space_db)
+      return user ? { user, tokenType: 'jwt', scopes: [] } : null
     }
   } catch {
     return null

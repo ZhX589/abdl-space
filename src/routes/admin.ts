@@ -9,6 +9,8 @@ import { cacheIpBan, cacheTrackingRule, clearIpBanCache, invalidateTrackingRule 
 import { invalidateFeedCount } from '../lib/post-count-cache.ts'
 import { adminMiddleware } from '../middleware/auth.ts'
 import appClients from './admin-app-clients.ts'
+import roles from './admin-roles.ts'
+import { accountMutationDenied, adminActorPredicate, guardedBatch, isProtectedAccount, isSuperAdmin, parseUserId, transactionGuard } from '../lib/admin-security.ts'
 import { APP_CLIENT_POLICY_KEY, APP_CLIENT_REMINDER_KEY, appClientStats } from '../lib/app-clients.ts'
 
 const IMGBED_URL = 'https://img.abdl-space.top'
@@ -18,16 +20,20 @@ const IMGBED_URL = 'https://img.abdl-space.top'
  * post_comments.parent_id 是自引用且 NO ACTION，直接删父评论会触发 FK 违约，
  * 因此先断开树内父子引用，再清理评论点赞/评论图片，最后删除评论本体。
  */
-async function deleteCommentTree(db: D1Database, commentIds: number[]): Promise<void> {
+async function deleteCommentTree(db: D1Database, commentIds: number[], writes?: D1PreparedStatement[]): Promise<void> {
   if (!commentIds.length) return
   const ph = commentIds.map(() => '?').join(',')
+  const write = async (sql: string, params: unknown[]) => {
+    if (writes) writes.push(db.prepare(sql).bind(...params))
+    else await run(db, sql, params)
+  }
   // 断开树内父子引用（含指向被删评论的跨帖回复），彻底避免自引用 FK 违约
-  await run(db, `UPDATE post_comments SET parent_id = NULL WHERE parent_id IN (${ph})`, commentIds)
+  await write(`UPDATE post_comments SET parent_id = NULL WHERE parent_id IN (${ph})`, commentIds)
   // 评论点赞与评论图片
-  await run(db, `DELETE FROM likes WHERE target_type = 'comment' AND target_id IN (${ph})`, commentIds)
-  await run(db, `DELETE FROM comment_images WHERE comment_id IN (${ph})`, commentIds)
+  await write(`DELETE FROM likes WHERE target_type = 'comment' AND target_id IN (${ph})`, commentIds)
+  await write(`DELETE FROM comment_images WHERE comment_id IN (${ph})`, commentIds)
   // 删除评论本体
-  await run(db, `DELETE FROM post_comments WHERE id IN (${ph})`, commentIds)
+  await write(`DELETE FROM post_comments WHERE id IN (${ph})`, commentIds)
 }
 
 async function deleteImageFromImgbed(env: Env, imageUrl: string) {
@@ -53,6 +59,10 @@ type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
 const admin = new Hono<AppType>()
 admin.route('/app-clients', appClients)
+admin.route('/', roles)
+admin.use('/users/*', async (c, next) => { c.header('Cache-Control', 'private, no-store'); await next() })
+admin.use('/security/users/*', async (c, next) => { c.header('Cache-Control', 'private, no-store'); await next() })
+admin.use('/blocked-emails*', async (c, next) => { c.header('Cache-Control', 'private, no-store'); await next() })
 
 // ============================================================
 // 运维统计辅助 —— “按天”统一按北京时间 UTC+8 日历分桶
@@ -422,7 +432,7 @@ admin.get('/users', adminMiddleware, async (c) => {
   return c.json({
     users: rows.map(r => ({
       id: r.id, email: r.email, username: r.username, display_name: r.display_name || '',
-      role: r.role, avatar: r.avatar ?? DEFAULT_AVATAR, email_verified: r.email_verified,
+      role: r.role, is_super_admin: isSuperAdmin(r.id, r.role, r.banned), avatar: r.avatar ?? DEFAULT_AVATAR, email_verified: r.email_verified,
       created_at: r.created_at, banned: !!r.banned, has_app: !!r.has_app, qq_bound: qqBound(r.qq_bound),
       post_count: r.post_count ?? 0, comment_count: r.comment_count ?? 0, checkin_count: r.checkin_count ?? 0,
     })),
@@ -485,6 +495,7 @@ admin.get('/users/:id/detail', adminMiddleware, async (c) => {
   return c.json({
     user: {
       ...user,
+      is_super_admin: isSuperAdmin(user.id, user.role, user.banned),
       banned: !!user.banned, has_app: !!user.has_app, qq_bound: qqBound(user.qq_bound),
       avatar: user.avatar ?? DEFAULT_AVATAR,
     },
@@ -504,7 +515,8 @@ admin.get('/users/:id/detail', adminMiddleware, async (c) => {
  * DELETE /api/admin/users/:id — 删除用户
  */
 admin.delete('/users/:id', adminMiddleware, async (c) => {
-  const id = parseInt(c.req.param('id') || '')
+  const id = parseUserId(c.req.param('id') || '')
+  if (id === null) return c.json({ error: 'Invalid user id' }, 400)
   const currentUser = c.get('user')
 
   // BUG-181: Prevent admin from deleting themselves
@@ -512,10 +524,14 @@ admin.delete('/users/:id', adminMiddleware, async (c) => {
     return c.json({ error: '不能删除自己的账户' }, 400)
   }
 
-  const user = await queryOne<{ id: number }>(c.env.abdl_space_db, 'SELECT id FROM users WHERE id = ?', [id])
+  const user = await queryOne<{ id: number; role: string }>(c.env.abdl_space_db, 'SELECT id, role FROM users WHERE id = ?', [id])
   if (!user) return c.json({ error: 'User not found' }, 404)
 
+  if (isProtectedAccount(id, user.role)) return c.json({ error: '请先取消管理员身份，再管理该账户' }, 403)
   const db = c.env.abdl_space_db
+  const actorPredicate = await adminActorPredicate(db)
+  const writes: D1PreparedStatement[] = [transactionGuard(db, `EXISTS (SELECT 1 FROM users WHERE id = ? AND id <> 1 AND role = 'user') AND ${actorPredicate}`, [id, currentUser.sub])]
+  const write = async (sql: string, params: unknown[]) => { writes.push(db.prepare(sql).bind(...params)) }
 
   // 级联删除所有关联数据（按依赖顺序）
   // ---- 评论（含被删用户的评论，以及别人回复它的整棵嵌套树；parent_id 自引用 NO ACTION，须先断链）----
@@ -526,7 +542,7 @@ admin.delete('/users/:id', adminMiddleware, async (c) => {
   )
   SELECT id FROM subtree`, [id])
   const userCommentIds = userCommentTree.map(r => r.id)
-  await deleteCommentTree(db, userCommentIds)
+  await deleteCommentTree(db, userCommentIds, writes)
 
   // ---- 帖子及其关联（posts、post_images、post_shares、polls 均 CASCADE，post_views 需手工清理）----
   const userPosts = await query<{ id: number }>(db, 'SELECT id FROM posts WHERE user_id = ?', [id])
@@ -539,94 +555,100 @@ admin.delete('/users/:id', adminMiddleware, async (c) => {
       SELECT c.id FROM post_comments c JOIN subtree s ON c.parent_id = s.id
     )
     SELECT id FROM subtree`, postIds)
-    await deleteCommentTree(db, postCommentTree.map(r => r.id))
+    await deleteCommentTree(db, postCommentTree.map(r => r.id), writes)
     // 帖子图片（post_images CASCADE，但保留显式清理以同步删除图床资源）
     for (const post of userPosts) {
-      await run(db, 'DELETE FROM post_images WHERE post_id = ?', [post.id])
+      await write('DELETE FROM post_images WHERE post_id = ?', [post.id])
     }
     // 浏览记录：post_views.post_id -> posts 无 CASCADE，必须在删帖前清掉
-    await run(db, `DELETE FROM post_views WHERE post_id IN (${postIds.map(() => '?').join(',')})`, postIds)
+    await write(`DELETE FROM post_views WHERE post_id IN (${postIds.map(() => '?').join(',')})`, postIds)
   }
   // 该用户自身的浏览记录（post_views.user_id -> users 无 CASCADE）
-  await run(db, 'DELETE FROM post_views WHERE user_id = ?', [id])
+  await write('DELETE FROM post_views WHERE user_id = ?', [id])
   // 投票
-  await run(db, 'DELETE FROM polls WHERE status_id IN (SELECT id FROM posts WHERE user_id = ?)', [id])
-  await run(db, 'DELETE FROM posts WHERE user_id = ?', [id])
-  if (postIds.length > 0) await invalidateFeedCount(c.env)
+  await write('DELETE FROM polls WHERE status_id IN (SELECT id FROM posts WHERE user_id = ?)', [id])
+  await write('DELETE FROM posts WHERE user_id = ?', [id])
   // 点赞/收藏/评分/感受
-  await run(db, 'DELETE FROM likes WHERE user_id = ?', [id])
-  await run(db, 'DELETE FROM ratings WHERE user_id = ?', [id])
-  await run(db, 'DELETE FROM feelings WHERE user_id = ?', [id])
+  await write('DELETE FROM likes WHERE user_id = ?', [id])
+  await write('DELETE FROM ratings WHERE user_id = ?', [id])
+  await write('DELETE FROM feelings WHERE user_id = ?', [id])
   // 投票记录
-  await run(db, 'DELETE FROM poll_votes WHERE user_id = ?', [id])
+  await write('DELETE FROM poll_votes WHERE user_id = ?', [id])
   // 通知/消息/关注
-  await run(db, 'DELETE FROM notifications WHERE user_id = ? OR actor_id = ?', [id, id])
-  await run(db, 'DELETE FROM messages WHERE sender_id = ? OR receiver_id = ?', [id, id])
-  await run(db, 'DELETE FROM follows WHERE follower_id = ? OR following_id = ?', [id, id])
+  await write('DELETE FROM notifications WHERE user_id = ? OR actor_id = ?', [id, id])
+  await write('DELETE FROM messages WHERE sender_id = ? OR receiver_id = ?', [id, id])
+  await write('DELETE FROM follows WHERE follower_id = ? OR following_id = ?', [id, id])
   // 好友申请评论（friend_request_comments.parent_id 自引用 NO ACTION，先断链）与举报
   const friendComments = await query<{ id: number }>(db, `WITH RECURSIVE subtree(id) AS (
-    SELECT id FROM friend_request_comments WHERE user_id = ?
+    SELECT id FROM friend_request_comments WHERE user_id = ? OR request_id IN (SELECT id FROM friend_requests WHERE user_id = ?)
     UNION
     SELECT c.id FROM friend_request_comments c JOIN subtree s ON c.parent_id = s.id
   )
-  SELECT id FROM subtree`, [id])
+  SELECT id FROM subtree`, [id, id])
   const friendCommentIds = friendComments.map(r => r.id)
   if (friendCommentIds.length > 0) {
     const fph = friendCommentIds.map(() => '?').join(',')
-    await run(db, `UPDATE friend_request_comments SET parent_id = NULL WHERE parent_id IN (${fph})`, friendCommentIds)
-    await run(db, `DELETE FROM friend_request_comments WHERE id IN (${fph})`, friendCommentIds)
+    await write(`UPDATE friend_request_comments SET parent_id = NULL WHERE parent_id IN (${fph})`, friendCommentIds)
+    await write(`DELETE FROM friend_request_comments WHERE id IN (${fph})`, friendCommentIds)
   }
   // 好友申请报告（reporter/resolved NO ACTION；request_id 外键指向 friend_requests，需在删申请前先清）
-  await run(db, 'DELETE FROM friend_request_reports WHERE reporter_id = ? OR resolved_by = ?', [id, id])
+  await write('DELETE FROM friend_request_reports WHERE reporter_id = ? OR resolved_by = ? OR request_id IN (SELECT id FROM friend_requests WHERE user_id = ?)', [id, id, id])
   // 好友申请本体（friend_requests.user_id -> users CASCADE，剩下由 CASCADE 兜底）
-  await run(db, 'DELETE FROM friend_requests WHERE user_id = ?', [id])
+  await write('DELETE FROM friend_requests WHERE user_id = ?', [id])
   // 积分/经验
-  await run(db, 'DELETE FROM points WHERE user_id = ?', [id])
-  await run(db, 'DELETE FROM exp_logs WHERE user_id = ?', [id])
-  await run(db, 'DELETE FROM point_logs WHERE user_id = ?', [id])
-  await run(db, 'DELETE FROM experience WHERE user_id = ?', [id])
-  await run(db, 'DELETE FROM daily_checkins WHERE user_id = ?', [id])
+  await write('DELETE FROM points WHERE user_id = ?', [id])
+  await write('DELETE FROM exp_logs WHERE user_id = ?', [id])
+  await write('DELETE FROM point_logs WHERE user_id = ?', [id])
+  await write('DELETE FROM experience WHERE user_id = ?', [id])
+  await write('DELETE FROM daily_checkins WHERE user_id = ?', [id])
   // 用户设置/徽章
-  await run(db, 'DELETE FROM user_settings WHERE user_id = ?', [id])
-  await run(db, 'DELETE FROM user_badges WHERE user_id = ?', [id])
+  await write('DELETE FROM user_settings WHERE user_id = ?', [id])
+  await write('DELETE FROM user_badges WHERE user_id = ?', [id])
   // OAuth
-  await run(db, 'DELETE FROM oauth_tokens WHERE user_id = ?', [id])
-  await run(db, 'DELETE FROM oauth_clients WHERE owner_id = ?', [id])
-  await run(db, 'DELETE FROM oauth_codes WHERE user_id = ?', [id])
+  await write('DELETE FROM oauth_tokens WHERE user_id = ?', [id])
+  await write('DELETE FROM oauth_clients WHERE owner_id = ?', [id])
+  await write('DELETE FROM oauth_codes WHERE user_id = ?', [id])
   // API keys（仅用户级）
-  await run(db, 'DELETE FROM content_api_keys WHERE owner_id = ?', [id])
-  await run(db, 'DELETE FROM captcha_api_keys WHERE owner_id = ?', [id])
-  await run(db, 'DELETE FROM ks_channels WHERE owner_id = ?', [id])
-  await run(db, 'DELETE FROM ks_sub_keys WHERE owner_id = ?', [id])
+  await write('DELETE FROM content_api_keys WHERE owner_id = ?', [id])
+  await write('DELETE FROM captcha_api_keys WHERE owner_id = ?', [id])
+  await write('DELETE FROM ks_channels WHERE owner_id = ?', [id])
+  await write('DELETE FROM ks_sub_keys WHERE owner_id = ?', [id])
   // 举报（该用户作为举报者；resolved_by 在下方统一处理）
-  await run(db, 'DELETE FROM reports WHERE reporter_id = ?', [id])
+  await write('DELETE FROM reports WHERE reporter_id = ?', [id])
   // 邀请码/JPush/QR登录/公告互动/心跳/里程碑/Wiki评论
-  await run(db, 'DELETE FROM invite_codes WHERE creator_id = ? OR used_by = ?', [id, id])
-  await run(db, 'DELETE FROM jpush_registrations WHERE user_id = ?', [id])
-  await run(db, 'DELETE FROM qr_login_sessions WHERE user_id = ?', [id])
-  await run(db, 'DELETE FROM announcement_reactions WHERE user_id = ?', [id])
-  await run(db, 'DELETE FROM announcement_read_status WHERE user_id = ?', [id])
-  await run(db, 'DELETE FROM lan_heartbeats WHERE user_id = ?', [id])
-  await run(db, 'DELETE FROM markers WHERE user_id = ?', [id])
-  await run(db, 'DELETE FROM wiki_inline_comments WHERE author_id = ?', [id])
+  await write('DELETE FROM invite_codes WHERE creator_id = ? OR used_by = ?', [id, id])
+  await write('DELETE FROM jpush_registrations WHERE user_id = ?', [id])
+  await write('DELETE FROM qr_login_sessions WHERE user_id = ?', [id])
+  await write('DELETE FROM announcement_reactions WHERE user_id = ?', [id])
+  await write('DELETE FROM announcement_read_status WHERE user_id = ?', [id])
+  await write('DELETE FROM lan_heartbeats WHERE user_id = ?', [id])
+  await write('DELETE FROM markers WHERE user_id = ?', [id])
+  await write('DELETE FROM wiki_inline_comments WHERE author_id = ?', [id])
   // IP 追踪记录（ip_tracking_rules.user_id、ip_tracking_events.user_id、ip_bans.source_user_id
   // 均指向 users 无 CASCADE，须在删用户前清理；封禁表还引用了创建者）
-  await run(db, 'DELETE FROM ip_tracking_rules WHERE user_id = ? OR created_by = ?', [id, id])
-  invalidateTrackingRule(id)
-  await run(db, 'DELETE FROM ip_tracking_events WHERE user_id = ?', [id])
-  await run(db, 'DELETE FROM ip_bans WHERE source_user_id = ? OR created_by = ?', [id, id])
+  await write('DELETE FROM ip_tracking_rules WHERE user_id = ? OR created_by = ?', [id, id])
+  await write('DELETE FROM ip_tracking_events WHERE user_id = ?', [id])
+  await write('DELETE FROM ip_bans WHERE source_user_id = ? OR created_by = ?', [id, id])
   // 删除条件无法列出所有受影响 IP，保守清空当前 isolate 的封禁缓存。
-  clearIpBanCache()
   // Wiki 内容与条款（author_id / created_by 指向 users 且 no CASCADE，保留内容、置空归属）
-  await run(db, 'UPDATE wiki_pages SET author_id = NULL WHERE author_id = ?', [id])
-  await run(db, 'UPDATE page_versions SET author_id = NULL WHERE author_id = ?', [id])
-  await run(db, 'UPDATE terms SET created_by = NULL WHERE created_by = ?', [id])
+  await write('UPDATE wiki_pages SET author_id = NULL WHERE author_id = ?', [id])
+  await write('UPDATE page_versions SET author_id = NULL WHERE author_id = ?', [id])
+  await write('UPDATE terms SET created_by = NULL WHERE created_by = ?', [id])
   // 其他用户的举报记录中该用户作为处理人（resolved_by）的引用
-  await run(db, 'UPDATE reports SET resolved_by = NULL WHERE resolved_by = ?', [id])
+  await write('UPDATE reports SET resolved_by = NULL WHERE resolved_by = ?', [id])
   // 验证码记录
-  await run(db, 'DELETE FROM email_verifications WHERE user_id = ?', [id])
+  await write('DELETE FROM email_verifications WHERE user_id = ?', [id])
   // 最后删除用户
-  await run(db, 'DELETE FROM users WHERE id = ?', [id])
+  await write('DELETE FROM users WHERE id = ?', [id])
+  try {
+    await guardedBatch(db, writes)
+  } catch {
+    if (await accountMutationDenied(db, id, currentUser.sub)) return c.json({ error: '账户权限已变化，请刷新后重试' }, 403)
+    return c.json({ error: '删除失败，数据库清理已回滚' }, 500)
+  }
+  invalidateTrackingRule(id)
+  clearIpBanCache()
+  if (postIds.length > 0) await invalidateFeedCount(c.env)
   return c.json({ message: '已删除' })
 })
 
@@ -634,28 +656,18 @@ admin.delete('/users/:id', adminMiddleware, async (c) => {
  * POST /api/admin/users/:id/ban — 封禁/解封（toggle）
  */
 admin.post('/users/:id/ban', adminMiddleware, async (c) => {
-  const id = parseInt(c.req.param('id') || '')
-
-  const user = await queryOne<{ id: number; email: string }>(
-    c.env.abdl_space_db, 'SELECT id, email FROM users WHERE id = ?', [id]
-  )
+  const id = parseUserId(c.req.param('id') || '')
+  if (id === null) return c.json({ error: 'Invalid user id' }, 400)
+  const db = c.env.abdl_space_db
+  const user = await queryOne<{ id: number; role: string }>(db, 'SELECT id, role FROM users WHERE id = ?', [id])
   if (!user) return c.json({ error: 'User not found' }, 404)
-
-  const hasBannedColumn = await queryOne<{ cid: number }>(
-    c.env.abdl_space_db,
-    "SELECT cid FROM pragma_table_info('users') WHERE name = 'banned'"
-  )
-  if (!hasBannedColumn) {
-    await run(c.env.abdl_space_db, 'ALTER TABLE users ADD COLUMN banned INTEGER DEFAULT 0')
-  }
-
-  const current = await queryOne<{ banned: number }>(
-    c.env.abdl_space_db, 'SELECT banned FROM users WHERE id = ?', [id]
-  )
-  const newBanned = current?.banned ? 0 : 1
-  await run(c.env.abdl_space_db, 'UPDATE users SET banned = ? WHERE id = ?', [newBanned, id])
-
-  return c.json({ banned: !!newBanned })
+  if (isProtectedAccount(id, user.role)) return c.json({ error: '请先取消管理员身份，再管理该账户' }, 403)
+  const actorPredicate = await adminActorPredicate(db)
+  const changed = await queryOne<{ banned: number }>(db,
+    `UPDATE users SET banned = CASE WHEN banned = 1 THEN 0 ELSE 1 END
+     WHERE id = ? AND id <> 1 AND role = 'user' AND ${actorPredicate} RETURNING banned`, [id, c.get('user').sub])
+  if (!changed) return c.json({ error: '账户权限已变化，请刷新后重试' }, 403)
+  return c.json({ banned: !!changed.banned })
 })
 
 /**
@@ -663,40 +675,40 @@ admin.post('/users/:id/ban', adminMiddleware, async (c) => {
  * 启用定向追踪，封禁已记录的 IP；后续该账户通过任意已认证端点访问时会自动记录并封禁其 IP。
  */
 admin.post('/security/users/:id/track-and-ban', adminMiddleware, async (c) => {
-  const id = parseInt(c.req.param('id') || '')
+  const id = parseUserId(c.req.param('id') || '')
   const operator = c.get('user')
-  if (!Number.isInteger(id) || id <= 0) return c.json({ error: 'Invalid user id' }, 400)
+  if (id === null) return c.json({ error: 'Invalid user id' }, 400)
   if (id === operator.sub) return c.json({ error: '不能追踪或封禁自己的账户' }, 400)
 
   const db = c.env.abdl_space_db
-  const target = await queryOne<{ id: number }>(db, 'SELECT id FROM users WHERE id = ?', [id])
+  const target = await queryOne<{ id: number; role: string }>(db, 'SELECT id, role FROM users WHERE id = ?', [id])
   if (!target) return c.json({ error: 'User not found' }, 404)
-
+  if (isProtectedAccount(id, target.role)) return c.json({ error: '请先取消管理员身份，再管理该账户' }, 403)
+  const actorPredicate = await adminActorPredicate(db)
   const now = Math.floor(Date.now() / 1000)
-  await run(
-    db,
-    `INSERT INTO ip_tracking_rules (user_id, enabled, created_by, created_at)
+  const writes = [
+    transactionGuard(db, `EXISTS (SELECT 1 FROM users WHERE id = ? AND id <> 1 AND role = 'user') AND ${actorPredicate}`, [id, operator.sub]),
+    db.prepare(`INSERT INTO ip_tracking_rules (user_id, enabled, created_by, created_at)
      VALUES (?, 1, ?, ?)
-     ON CONFLICT(user_id) DO UPDATE SET enabled = 1, created_by = excluded.created_by, created_at = excluded.created_at`,
-    [id, operator.sub, now],
-  )
-  cacheTrackingRule(id, true)
+     ON CONFLICT(user_id) DO UPDATE SET enabled = 1, created_by = excluded.created_by, created_at = excluded.created_at`).bind(id, operator.sub, now),
+  ]
   const ips = await query<{ ip: string }>(
     db,
     'SELECT DISTINCT ip FROM ip_tracking_events WHERE user_id = ? AND ip <> ? AND ip <> ? ',
     [id, '', 'unknown'],
   )
   for (const row of ips) {
-    await run(
-      db,
-      `INSERT INTO ip_bans (ip, source_user_id, reason, created_by, created_at)
-       VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT(ip) DO NOTHING`,
-      [row.ip, id, 'Tracked account access', operator.sub, now],
-    )
-    cacheIpBan(row.ip, true)
+    writes.push(db.prepare(`INSERT INTO ip_bans (ip, source_user_id, reason, created_by, created_at)
+       VALUES (?, ?, ?, ?, ?) ON CONFLICT(ip) DO NOTHING`).bind(row.ip, id, 'Tracked account access', operator.sub, now))
   }
-
+  try {
+    await guardedBatch(db, writes)
+  } catch {
+    if (await accountMutationDenied(db, id, operator.sub)) return c.json({ error: '账户权限已变化，请刷新后重试' }, 403)
+    return c.json({ error: '追踪封禁失败，数据库操作已回滚' }, 500)
+  }
+  cacheTrackingRule(id, true)
+  for (const row of ips) cacheIpBan(row.ip, true)
   return c.json({ tracked: true, banned_ip_count: ips.length })
 })
 
@@ -1489,17 +1501,24 @@ admin.get('/blocked-emails', adminMiddleware, async (c) => {
 admin.post('/blocked-emails', adminMiddleware, async (c) => {
   const db = c.env.abdl_space_db
   const body = await c.req.json<{ email?: string; reason?: string }>().catch(() => null)
-  const email = (body?.email || '').trim().toLowerCase()
-  const reason = (body?.reason || '').trim()
+  if (!body || typeof body.email !== 'string' || (body.reason !== undefined && typeof body.reason !== 'string')) return c.json({ error: 'Invalid email or reason' }, 400)
+  const email = body.email.trim().toLowerCase()
+  const reason = (body.reason || '').trim()
   if (!BLOCKED_EMAIL_RE.test(email)) return c.json({ error: '请输入有效的邮箱地址' }, 400)
   if (reason.length > 200) return c.json({ error: '屏蔽原因长度不能超过 200 字符' }, 422)
-  const adminId = c.get('user')?.sub ?? null
-  const exists = await queryOne<{ email: string }>(
-    db, 'SELECT email FROM email_blocklist WHERE email = ?', [email]).catch(() => null)
+  const adminId = c.get('user').sub
+  const protectedEmail = await queryOne<{ id: number }>(db,
+    "SELECT id FROM users WHERE lower(trim(email)) = ? AND (id = 1 OR COALESCE(role, '') <> 'user')", [email])
+  if (protectedEmail) return c.json({ error: '请先取消管理员身份，再屏蔽该邮箱' }, 403)
+  const exists = await queryOne<{ email: string }>(db, 'SELECT email FROM email_blocklist WHERE email = ?', [email])
   if (exists) return c.json({ error: '该邮箱已在屏蔽名单中' }, 409)
-  await run(db,
-    'INSERT INTO email_blocklist (email, reason, created_by, created_at) VALUES (?, ?, ?, datetime(\'now\'))',
-    [email, reason, adminId])
+  const actorPredicate = await adminActorPredicate(db)
+  const result = await run(db,
+    `INSERT INTO email_blocklist (email, reason, created_by, created_at)
+     SELECT ?, ?, ?, datetime('now') WHERE NOT EXISTS
+       (SELECT 1 FROM users WHERE lower(trim(email)) = ? AND (id = 1 OR COALESCE(role, '') <> 'user')) AND ${actorPredicate}`,
+    [email, reason, adminId, email, adminId])
+  if (!result.meta.changes) return c.json({ error: '账户权限已变化，请刷新后重试' }, 403)
   return c.json({ ok: true, email })
 })
 

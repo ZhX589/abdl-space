@@ -109,7 +109,7 @@ curl -X POST https://api.abdl-space.top/api/auth/login \
 
 ## GET /api/auth/me
 
-获取当前登录用户的完整信息（含身体数据、邮箱等私密字段）。
+获取当前登录用户的完整信息（含身体数据、邮箱等私密字段）。2026-10-04源码新增boolean `is_super_admin`，仅当前id1/admin/未封禁为true；role继续admin/user，字段不是JWT授权声明。响应private/no-store；旧token每请求刷新当前角色，封禁/删除/过期会话拒绝。该新增后端功能未部署。
 
 - **鉴权**：需要
 
@@ -128,6 +128,7 @@ curl https://api.abdl-space.top/api/auth/me \
   "email": "newuser@example.com",
   "username": "newuser",
   "role": "user",
+  "is_super_admin": false,
   "avatar": null,
   "age": 25,
   "region": "北京",
@@ -164,4 +165,4 @@ Authorization: Bearer <token>
 | `GET /api/auth/me` | Bearer Token |
 | `PATCH /api/users/me` | Bearer Token |
 | 评分/感受/帖子提交 | Bearer Token |
-| 管理员接口 | Bearer Token + `role: "admin"` |
+| 管理员接口 | 有效会话 + 当前数据库 `role: "admin"` 且未封禁；角色管理另需唯一当前超级管理员 |

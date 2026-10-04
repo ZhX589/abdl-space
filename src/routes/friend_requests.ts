@@ -2,6 +2,7 @@ import { Hono } from 'hono'
 import type { Env, JWTPayload } from '../types/index.ts'
 import { query, queryOne, run } from '../lib/db.ts'
 import { authMiddleware, adminMiddleware } from '../middleware/auth.ts'
+import { accountMutationDenied, adminActorPredicate, guardedBatch, isProtectedAccount, parseUserId, transactionGuard } from '../lib/admin-security.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
@@ -669,15 +670,18 @@ friendRequests.get('/admin/reports', adminMiddleware, async (c) => {
 /**
  * POST /api/friend-request/admin/reports/:id/accept — 采纳举报（删除+封禁+快照+邮件通知）
  */
+friendRequests.use('/admin/reports/:id/accept', async (c, next) => { c.header('Cache-Control', 'private, no-store'); await next() })
 friendRequests.post('/admin/reports/:id/accept', adminMiddleware, async (c) => {
   const admin = c.get('user')
-  const id = parseInt(c.req.param('id') || '0')
+  const id = parseUserId(c.req.param('id') || '')
+  if (id === null) return c.json({ error: 'Invalid report id' }, 400)
   const db = c.env.abdl_space_db
 
-  const report = await queryOne<any>(
+  const report = await queryOne<{
+    request_id: number; user_id: number; role: string; title: string; reason: string; user_email: string
+  }>(
     db,
-    `SELECT frr.*, fr.user_id, fr.title, fr.status as request_status,
-            ru.email as user_email, ru.username as user_username
+    `SELECT frr.request_id, frr.reason, fr.user_id, fr.title, ru.role, ru.email as user_email
      FROM friend_request_reports frr
      JOIN friend_requests fr ON frr.request_id = fr.id
      JOIN users ru ON fr.user_id = ru.id
@@ -685,9 +689,19 @@ friendRequests.post('/admin/reports/:id/accept', adminMiddleware, async (c) => {
     [id]
   )
   if (!report) return c.json({ error: '举报不存在或已处理' }, 404)
+  if (isProtectedAccount(report.user_id, report.role)) return c.json({ error: '请先取消管理员身份，再管理该账户' }, 403)
+  const actorPredicate = await adminActorPredicate(db)
+  const writes = [transactionGuard(db, `EXISTS (
+    SELECT 1 FROM friend_request_reports frr JOIN friend_requests fr ON fr.id = frr.request_id
+    JOIN users u ON u.id = fr.user_id
+    WHERE frr.id = ? AND frr.status = 'pending' AND fr.id = ? AND u.id = ? AND u.id <> 1 AND u.role = 'user'
+  ) AND ${actorPredicate}`, [id, report.request_id, report.user_id, admin.sub])]
 
   // 获取完整交友请求数据用于快照
-  const fr = await queryOne<any>(
+  const fr = await queryOne<{
+    id: number; user_id: number; title: string; looking_for: string; description: string | null;
+    status: string; created_at: string; username: string; avatar: string | null; display_name: string | null
+  }>(
     db,
     `SELECT fr.*, u.username, u.avatar, u.display_name
      FROM friend_requests fr
@@ -695,7 +709,8 @@ friendRequests.post('/admin/reports/:id/accept', adminMiddleware, async (c) => {
      WHERE fr.id = ?`,
     [report.request_id]
   )
-  const fields = await query<any>(
+  if (!fr) return c.json({ error: '交友请求不存在' }, 404)
+  const fields = await query<Record<string, unknown>>(
     db,
     'SELECT * FROM friend_request_fields WHERE request_id = ? ORDER BY sort_order',
     [report.request_id]
@@ -714,31 +729,24 @@ friendRequests.post('/admin/reports/:id/accept', adminMiddleware, async (c) => {
       user: { username: fr.username, avatar: fr.avatar, display_name: fr.display_name },
       fields,
     }
-    await run(
-      db,
-      'INSERT INTO friend_request_snapshots (original_id, user_id, data, snapshot_type) VALUES (?, ?, ?, ?)',
-      [report.request_id, fr.user_id, JSON.stringify(snapshot), 'report_delete']
-    )
+    writes.push(db.prepare('INSERT INTO friend_request_snapshots (original_id, user_id, data, snapshot_type) VALUES (?, ?, ?, ?)')
+      .bind(report.request_id, fr.user_id, JSON.stringify(snapshot), 'report_delete'))
   }
 
-  // 删除交友请求
-  await run(db, "UPDATE friend_requests SET status = 'deleted', updated_at = datetime('now') WHERE id = ?", [report.request_id])
-
-  // 封禁用户
-  const hasBannedColumn = await queryOne<{ cid: number }>(
-    db, "SELECT cid FROM pragma_table_info('users') WHERE name = 'banned'"
+  // All effects, including the snapshot, are behind the in-transaction authority assertion.
+  writes.push(
+    db.prepare("UPDATE friend_requests SET status = 'deleted', updated_at = datetime('now') WHERE id = ?").bind(report.request_id),
+    db.prepare('UPDATE users SET banned = 1 WHERE id = ?').bind(report.user_id),
+    db.prepare("UPDATE friend_request_reports SET status = 'resolved', resolved_by = ?, resolved_at = datetime('now') WHERE id = ?").bind(admin.sub, id),
   )
-  if (!hasBannedColumn) {
-    await run(db, 'ALTER TABLE users ADD COLUMN banned INTEGER DEFAULT 0')
+  try {
+    await guardedBatch(db, writes)
+  } catch {
+    if (await accountMutationDenied(db, report.user_id, admin.sub)) return c.json({ error: '账户权限已变化，请刷新后重试' }, 403)
+    const pending = await queryOne<{ id: number }>(db, "SELECT id FROM friend_request_reports WHERE id = ? AND status = 'pending'", [id])
+    if (!pending) return c.json({ error: '举报已处理，请刷新后重试' }, 409)
+    return c.json({ error: '采纳失败，数据库操作已回滚' }, 500)
   }
-  await run(db, 'UPDATE users SET banned = 1 WHERE id = ?', [report.user_id])
-
-  // 更新举报状态
-  await run(
-    db,
-    "UPDATE friend_request_reports SET status = 'resolved', resolved_by = ?, resolved_at = datetime('now') WHERE id = ?",
-    [admin.sub, id]
-  )
 
   // 邮件通知被举报人
   c.executionCtx.waitUntil((async () => {
@@ -750,7 +758,7 @@ friendRequests.post('/admin/reports/:id/accept', adminMiddleware, async (c) => {
           '[ABDL Space] 您的交友请求已被处理',
           0,
           JSON.stringify({
-            title: report.request_title,
+            title: report.title,
             reason: report.reason,
             reply: '您的交友请求因违反社区规定已被删除，账户已被封禁。',
           }),
