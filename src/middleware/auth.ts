@@ -1,7 +1,9 @@
 import type { Context, Next } from 'hono'
+import type { D1Database } from '@cloudflare/workers-types'
 import type { Env, JWTPayload } from '../types/index.ts'
 import { verifyJWT } from '../lib/auth.ts'
 import { queryOne } from '../lib/db.ts'
+import { isSuperAdmin } from '../lib/admin-security.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
@@ -31,6 +33,7 @@ async function lookupOAuthToken(db: D1Database, token: string): Promise<JWTPaylo
     role: user.role,
     iat: 0,  // OAuth token: skip password_changed_at check
     exp: row.access_expires_at,
+    oauth_scopes: row.scopes.split(/[ ,]+/).filter(Boolean),
   }
 }
 
@@ -64,7 +67,7 @@ async function extractUserUncached(c: Context<AppType>, allowCookie = true): Pro
     const token = bearer
     // 先尝试 JWT
     const payload = await verifyJWT(token, c.env.JWT_SECRET)
-    if (payload) return payload
+    if (payload) return { ...payload, oauth_scopes: undefined, is_super_admin: undefined }
     // JWT 失败，尝试 OAuth token
     const oauthUser = await lookupOAuthToken(c.env.abdl_space_db, token)
     if (oauthUser) return oauthUser
@@ -75,7 +78,7 @@ async function extractUserUncached(c: Context<AppType>, allowCookie = true): Pro
     const match = cookieHeader.match(/(?:^|;\s*)token=([^;]+)/)
     if (match) {
       const payload = await verifyJWT(match[1], c.env.JWT_SECRET)
-      if (payload) return payload
+      if (payload) return { ...payload, oauth_scopes: undefined, is_super_admin: undefined }
       // Also try OAuth token in cookie
       const oauthUser = await lookupOAuthToken(c.env.abdl_space_db, match[1])
       if (oauthUser) return oauthUser
@@ -86,6 +89,9 @@ async function extractUserUncached(c: Context<AppType>, allowCookie = true): Pro
 
 type UserSessionState = {
   role?: string
+  username?: string
+  email?: string
+  banned?: number
   password_changed_at: string | null
   auth_invalid_before?: number | null
 }
@@ -104,15 +110,17 @@ function isMissingAuthInvalidBefore(error: unknown): boolean {
 async function queryUserSessionState(db: D1Database, userId: number, includeRole: boolean): Promise<UserSessionState | null> {
   const dbKey = db as object
   const roleField = includeRole ? 'role, ' : ''
+  // users.* includes banned when present without ALTER/PRAGMA on each request in legacy DBs.
+  const currentFields = includeRole ? ', users.*' : ''
   const support = authInvalidBeforeSupport.get(dbKey)
   if (support?.supported === false && Date.now() < support.expiresAt) {
-    return queryOne<UserSessionState>(db, `SELECT ${roleField}password_changed_at FROM users WHERE id = ?`, [userId])
+    return queryOne<UserSessionState>(db, `SELECT ${roleField}password_changed_at${currentFields} FROM users WHERE id = ?`, [userId])
   }
 
   try {
     const user = await queryOne<UserSessionState>(
       db,
-      `SELECT ${roleField}password_changed_at, auth_invalid_before FROM users WHERE id = ?`,
+      `SELECT ${roleField}password_changed_at, auth_invalid_before${currentFields} FROM users WHERE id = ?`,
       [userId]
     )
     authInvalidBeforeSupport.set(dbKey, { supported: true, expiresAt: Number.POSITIVE_INFINITY })
@@ -120,7 +128,7 @@ async function queryUserSessionState(db: D1Database, userId: number, includeRole
   } catch (error) {
     if (!isMissingAuthInvalidBefore(error)) throw error
     authInvalidBeforeSupport.set(dbKey, { supported: false, expiresAt: Date.now() + LEGACY_AUTH_SCHEMA_RETRY_MS })
-    return queryOne<UserSessionState>(db, `SELECT ${roleField}password_changed_at FROM users WHERE id = ?`, [userId])
+    return queryOne<UserSessionState>(db, `SELECT ${roleField}password_changed_at${currentFields} FROM users WHERE id = ?`, [userId])
   }
 }
 
@@ -155,6 +163,13 @@ export async function assertSessionNotStale(payload: JWTPayload, db: D1Database)
   return checkSessionStale(payload, user.password_changed_at, user.auth_invalid_before)
 }
 
+/** Resolve current role and JWT freshness without any cross-request authority cache. */
+export async function refreshUserSession(payload: JWTPayload, db: D1Database): Promise<JWTPayload | null> {
+  const current = await queryUserSessionState(db, payload.sub, true)
+  if (!current || current.banned || checkSessionStale(payload, current.password_changed_at, current.auth_invalid_before)) return null
+  return { ...payload, role: current.role ?? '', is_super_admin: isSuperAdmin(payload.sub, current.role) }
+}
+
 /**
  * JWT 认证中间件，从 Authorization: Bearer <token> 或 Cookie 提取并验证 JWT
  * 验证成功后设置 c.set('user', payload)，失败返回 401
@@ -171,13 +186,14 @@ export async function authMiddleware(c: Context<AppType>, next: Next): Promise<R
   if (!currentUser) {
     return c.json({ error: 'Session expired, please login again' }, 401)
   }
+  if (currentUser.banned) return c.json({ error: 'Account banned' }, 403)
 
   const staleError = checkSessionStale(payload, currentUser.password_changed_at, currentUser.auth_invalid_before)
   if (staleError) {
     return c.json({ error: staleError }, 401)
   }
 
-  c.set('user', { ...payload, role: currentUser.role })
+  c.set('user', { ...payload, role: currentUser.role ?? '', is_super_admin: isSuperAdmin(payload.sub, currentUser.role) })
   await next()
 }
 
@@ -195,6 +211,7 @@ export async function adminMiddleware(c: Context<AppType>, next: Next): Promise<
   if (!currentUser) {
     return c.json({ error: 'Session expired, please login again' }, 401)
   }
+  if (currentUser.banned) return c.json({ error: 'Account banned' }, 403)
 
   const staleError = checkSessionStale(payload, currentUser.password_changed_at, currentUser.auth_invalid_before)
   if (staleError) {
@@ -205,6 +222,6 @@ export async function adminMiddleware(c: Context<AppType>, next: Next): Promise<
     return c.json({ error: 'Admin access required' }, 403)
   }
 
-  c.set('user', payload)
+  c.set('user', { ...payload, role: currentUser.role, is_super_admin: isSuperAdmin(payload.sub, currentUser.role) })
   await next()
 }

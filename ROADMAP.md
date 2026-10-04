@@ -69,6 +69,21 @@
 
 验证：新增回归 **5/5**，app-clients（含既有提醒/退役）**34/34**；结合 auth/admin/NBW 的专项 **55/55**。修改前全量 **362 pass / 9 fail**，最终独立重跑 **367 pass / 9 fail**，失败集合完全相同（bootstrap 1、admin-identities Node strip-only 加载 1、QQ 4、uploads 3）。并行负载下第一次全量 366 pass / 10 fail，额外 novel-private live parsing lease 时间敏感用例独立重跑恢复，不修改无关业务/测试。`tsc --noEmit --allowImportingTsExtensions --types node` 前后均 **327** 个既有诊断，输出逐字一致，app-clients 类型/实现/测试及 admin-app-clients 无诊断；故障注入产生既有 structured observation/policy/reminder/read/write/body fail-open 日志，无本功能失败。`git diff --check` 通过；不声称全量/typecheck 全绿、生产部署或真机验收。
 
+## 唯一超级管理员与后台权限边界（2026-10-04，后端实现未部署）
+
+开发分支 `feat/super-admin-console-20261004`，接续已有后端实现。本节只记录后端；移动站与主站后台一致、后台仅深/浅色属于独立前端任务，不以本后端回归替代UI验收。2026-10-05 用户授权提交、推送并通过 PR 交付到 `main`；合并结果以 GitHub PR 状态为准，与 Worker 部署独立。本轮不执行 Worker 部署、生产 SQL、migration、平台配置或依赖变更，未触碰 `.mimosa`。
+
+| 内容 | 状态 |
+|:---|:---:|
+| 当前用户行派生唯一 `is_super_admin = id1 && roleadmin && !banned`；role保持admin/user兼容App；auth/me、管理员用户列表/detail新增boolean及private/no-store | ✅ |
+| POST `/api/admin/add`仅super、保留promoted/message；PATCH `/api/admin/users/:id/role`仅super、id1禁止降权；严格JSON/ID/body、Origin及独立有效bearer检查、OAuth admin+write scopes、写时实时权限/CAS与结构化角色变更日志 | ✅ |
+| admin/auth中间件ctx role实时刷新，Mastodon共享JWT/OAuth鉴权移除用户权限缓存并检查当前用户、封禁与JWT新鲜度；旧token降权后不得继续admin，普通会话可保留 | ✅ |
+| id1/admin/未知role禁止delete/ban/track/friend举报accept/blocked-email破坏，需super先demote；SQL内再检查目标/操作者，DB不可用不放行、无请求时ALTER | ✅ |
+| delete/track/friendaccept以批内 `SELECT CASE ... ELSE abs(-9223372036854775808)` 强制权限断言，D1 batch回滚全部写入；失败无缓存/邮件副作用；保留普通用户嵌套评论/交友举报清理及永久私密对象监控任务 | ✅ |
+| 25个新增实际路由/真实SQLite回归：权限/角色兼容/实时撤权/OAuth缓存/封禁派生/CSRF JSON、目标并发提升与操作者降权/ban、后续写失败和unsuccessful批回滚；API及既有wiki admin/auth文档同步 | ✅ |
+
+验证：从同一HEAD归档到仓库外本地重新执行基线 **367 pass / 9 fail**，最终全量 **392 pass / 9 fail**，新增25个通过项；9个既有失败名称一致（bootstrap1、admin-identities strip-only1、QQ4、uploads3），未扩大或修复无关业务。结合admin/auth/app-clients/IP/NBW专项 **79/79**。既有delete测试fixture补原子batch；uploads wrong-owner fixture补实际存在user7，以保留实时会话检查下原403测试含义。`tsc --noEmit --allowImportingTsExtensions --types node` 基线327、最终321诊断：触碰的auth文件显式D1类型/确定ctx role/准确AuthMe字段消除6个既有诊断，无新增（对比规范化路径和行号），并非全量/typecheck全绿。最新Workers类型与官方best-practices已核验，未改绑定/迁移。仅本地内存SQLite及测试验证，非生产部署、真机或最终前端验收。
+
 ## Android 3.0.0 正式版发布（2026-10-03）
 
 | 内容 | 状态 |

@@ -39,7 +39,8 @@ Authorization: Bearer <token>
 |------|------|---------|
 | 无需鉴权 | 公开接口 | 无 |
 | 需鉴权 | 登录用户可用 | 验证 JWT 有效性 |
-| 需管理员 | 仅 admin 角色 | JWT 中 `role === 'admin'` |
+| 需管理员 | 当前数据库 admin 角色 | 验证会话并实时读取 `users.role === 'admin'`，封禁账户拒绝 |
+| 需超级管理员 | 唯一 id=1 且当前为 admin、未封禁 | 由当前用户行派生；不增加 `super_admin` 数据库角色或可信 JWT claim |
 
 ### 登录规则
 
@@ -263,7 +264,7 @@ brands (独立表, 关联 diapers.brand)
 - **响应 200**：
 ```json
 {
-  "id": 1, "email": "...", "username": "...", "role": "admin",
+  "id": 1, "email": "...", "username": "...", "role": "admin", "is_super_admin": true,
   "avatar": "...", "age": 25, "region": "北京",
   "weight": 65.0, "waist": 75.0, "hip": 95.0,
   "style_preference": "日系", "bio": "...",
@@ -2021,7 +2022,9 @@ Cloudflare Turnstile 验证。
 
 ### 5.30 Admin（管理后台）
 
-所有管理接口需 `role === 'admin'`。
+除公开的 beta-mode 读取外，管理接口需当前数据库 `role === 'admin'` 且账户未封禁；授权不使用旧 JWT 角色或跨请求 OAuth 用户缓存。`authMiddleware`/`adminMiddleware` 均刷新上下文角色，降权后旧 token 可继续普通用户会话但不再拥有管理员权限。
+
+**2026-10-04 超级管理员后端源码已实现、未部署**：只有 `users.id=1 && role='admin' && !banned` 的当前账户是超级管理员；普通管理员仍可使用其他管理功能，只有超级管理员可增加/取消管理员。`role` 保持 `admin|user`，不新增数据库列、migration 或角色枚举。列表、详情和 auth/me 返回 boolean `is_super_admin`，前端不能把此显示字段当成服务端授权凭据。
 
 #### GET /api/admin/stats
 
@@ -2034,7 +2037,7 @@ Cloudflare Turnstile 验证。
 
 #### GET /api/admin/users
 
-用户列表（含 email、role、`qq_bound` 等管理字段）。JWT 会实时读取管理员角色；OAuth 需要 `read admin` scope。
+用户列表（含 email、role、boolean `is_super_admin`、`qq_bound` 等管理字段）。JWT/OAuth 均实时读取管理员角色；该既有列表接口未增加 OAuth scope 门禁（identity 等独立子模块的 scope 要求保持各自约定）。
 
 - 参数：`page` 默认 1；`limit` 默认 20、范围 1–100。两者只接受无前导零的正十进制安全整数，offset 也必须为安全整数；空值、负数、小数、尾随文字、溢出或越界返回 400（不截断/钳制）。
 - 搜索：`q` 对 username/email 做 LIKE 搜索；`role` 可省略/为空或为 `admin|user`，其他值返回 400。
@@ -2045,7 +2048,7 @@ Cloudflare Turnstile 验证。
 
 #### GET /api/admin/users/:id/detail
 
-返回 `{ "user": {...}, "counts": {...}, "badges": [...], "tracking": {...}, "trackEvents": [...], "recentPosts": [...] }`。`user.qq_bound` 与列表同源、同样为 boolean；不可用返回 500，不返回 QQ 身份标识。响应 `Cache-Control: private, no-store`。
+返回 `{ "user": {...}, "counts": {...}, "badges": [...], "tracking": {...}, "trackEvents": [...], "recentPosts": [...] }`。`user.is_super_admin` 为当前 id/role/封禁状态派生的 boolean，`user.qq_bound` 与列表同源、同样为 boolean；不可用返回 500，不返回 QQ 身份标识。响应 `Cache-Control: private, no-store`。
 
 `:id` 只接受无前导零的正十进制安全整数；非法值返回 400，用户不存在返回 404。鉴权与用户列表一致。
 
@@ -2069,13 +2072,27 @@ Cloudflare Turnstile 验证。
 
 #### DELETE /api/admin/users/:id
 
-删除用户（级联删除所有关联数据，不能删除自己）。
+删除普通用户并按既有顺序清理关联数据（包括嵌套帖子/交友评论、目标交友请求的他人举报；保留私密对象监控清理任务）。不能删除自己；id1、任何 admin 或未知角色禁止删除，须由超级管理员先取消管理员身份。全部数据库写入及当前目标/操作者权限断言放在同一 D1 batch；并发提升目标、撤销/封禁操作者或后续 SQL 失败会回滚整个清理，缓存失效仅在成功后执行。
 
 #### POST /api/admin/users/:id/ban
 
-封禁/解封（toggle）。
+封禁/解封普通用户（toggle）；id1、任何 admin 或未知角色禁止操作，须先降权。SQL 原子检查当前目标和操作者权限，不在请求中 ALTER TABLE；既有 banned 列缺失则失败关闭。
 
 - **响应 200**：`{ "banned": true }`
+
+#### POST /api/admin/security/users/:id/track-and-ban
+
+管理员追踪并封禁目标已记录 IP。只能操作非 id1 的普通用户，禁止自身/admin/未知角色目标。规则与所有 IP 写入同一带权限 guard 的原子 batch，失败不安装追踪/IP缓存。
+
+- **响应 200**：`{ "tracked": true, "banned_ip_count": 1 }`（计数为已有记录的去重 IP 数，保留既有响应语义）。
+
+#### POST /api/admin/blocked-emails
+
+请求 JSON `{ "email": "user@example.com", "reason": "可选原因" }`，邮箱归一化为 trim/lowercase。id1/admin/未知角色账户的邮箱禁止屏蔽，须先降权；INSERT 时再次检查当前角色与操作者权限，数据库查询失败不降级为“未受保护”。
+
+#### POST /api/friend-request/admin/reports/:id/accept
+
+采纳待处理交友举报。若请求作者为 id1/admin/未知角色则403，不创建快照、不修改请求/举报、不封禁、不发邮件。先降权后可处理普通用户；snapshot、请求deleted、账户ban、举报resolved及当前report/作者/操作者权限强制guard在同一D1 batch。并发变化或任意写失败均回滚，邮件只在成功后安排。所有以上账户敏感管理响应 private/no-store。
 
 #### GET /api/admin/posts
 
@@ -2172,11 +2189,22 @@ Cloudflare Turnstile 验证。
 
 #### POST /api/admin/add
 
-提升用户为管理员。
+提升普通用户为管理员，保留原成功响应。
 
-- **鉴权**：需管理员
-- **请求 body**：`{ "user_ids": [1, 2, 3] }`
-- **响应 200**：`{ "promoted": 2, "message": "2 个用户已提升为管理员" }`
+- **鉴权**：仅当前超级管理员；OAuth 另需 `admin` 和 `write` scope。
+- **请求 JSON**：`{ "user_ids": [2, 3] }`，只允许这一字段；1–100 个不重复正十进制安全整数。已是 admin 或不存在的用户不计入 promoted。
+- **响应 200**：`{ "promoted": 2, "message": "2 个用户已提升为管理员" }`；重复请求可返回 promoted=0。
+- **写入安全**：Content-Type 必须为 application/json（可含 charset），否则 415；cookie 写必须提供可信 Origin，有 Origin 时只接受主站/www/移动站/wiki及本地5173/5174，`Sec-Fetch-Site: cross-site` 拒绝。无 Origin 仅允许独立有效 bearer（无效 bearer 回退 cookie 不算）。拒绝返回 403。
+- **错误**：400 非法 JSON/参数，401 无效会话，403 非超级管理员，500 数据库失败。响应 private/no-store。
+
+#### PATCH /api/admin/users/:id/role
+
+设置目标角色；只能由当前超级管理员调用，OAuth/JSON/Origin 防护与 add 相同。
+
+- **请求 JSON**：`{ "role": "admin" }` 或 `{ "role": "user" }`，不允许附加字段。
+- **响应 200**：`{ "id": 2, "role": "user", "is_super_admin": false }`，重复设置同一角色可成功。
+- **错误**：400 非法正整数 id/JSON/角色；403 非超级管理员或尝试将 id1 降为 user；404 用户不存在；409 目标角色或操作者权限在读写之间变化；500 数据库失败。id1只能保持admin，不能降权。
+- SQL 写入时重新检查操作者当前 admin/未封禁及目标预期角色；角色变更通过结构化 `admin_role_change` 日志记录 actor/target、原/新 role、结果（不写 token/邮箱，不新增审计表）。响应 private/no-store。
 
 ---
 

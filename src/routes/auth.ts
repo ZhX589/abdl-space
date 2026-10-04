@@ -1,9 +1,10 @@
 import { Hono } from 'hono'
-import type { Env, JWTPayload, LoginRequest, LoginResponse, User } from '../types/index.ts'
+import type { AuthMeResponse, Env, JWTPayload, LoginRequest, LoginResponse, User } from '../types/index.ts'
 import { hashPassword, verifyPassword, signJWT } from '../lib/auth.ts'
 import { verifyNBWBindToken } from '../lib/nbw-bind-token.ts'
 import { queryOne, query, run } from '../lib/db.ts'
 import { authMiddleware } from '../middleware/auth.ts'
+import { isSuperAdmin } from '../lib/admin-security.ts'
 import { getNBWConfig } from '../lib/nbw.ts'
 import { sendTencentEmail } from '../lib/ses.ts'
 
@@ -606,11 +607,12 @@ auth.post('/bind-email', authMiddleware, async (c) => {
 // ============================================================
 // GET /api/auth/me — 获取当前用户完整信息
 // ============================================================
+auth.use('/me', async (c, next) => { c.header('Cache-Control', 'private, no-store'); await next() })
 auth.get('/me', authMiddleware, async (c) => {
   const payload = c.get('user')
-  const user = await queryOne<User & { is_beta_user?: number }>(
+  const user = await queryOne<Omit<AuthMeResponse, 'is_super_admin'> & { banned?: number }>(
     c.env.abdl_space_db,
-    'SELECT id, email, username, avatar, role, age, region, weight, waist, hip, style_preference, bio, email_verified, nbw_uid, nbw_username, is_beta_user, created_at FROM users WHERE id = ?',
+    'SELECT id, email, username, avatar, role, age, region, weight, waist, hip, style_preference, bio, email_verified, nbw_uid, nbw_username, is_beta_user, created_at, users.* FROM users WHERE id = ?',
     [payload.sub]
   )
   if (!user) {
@@ -629,6 +631,7 @@ auth.get('/me', authMiddleware, async (c) => {
     username: user.username,
     avatar: user.avatar ?? DEFAULT_AVATAR,
     role: user.role,
+    is_super_admin: isSuperAdmin(user.id, user.role, user.banned),
     age: user.age,
     region: user.region,
     weight: user.weight,
@@ -641,7 +644,7 @@ auth.get('/me', authMiddleware, async (c) => {
     nbw_username: user.nbw_username || null,
     is_beta_user: user.is_beta_user ? 1 : 0,
     created_at: user.created_at
-  })
+  } satisfies AuthMeResponse)
 })
 
 /**

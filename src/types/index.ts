@@ -30,6 +30,7 @@ export interface AdminUser {
   banned: boolean
   has_app: boolean
   qq_bound: boolean
+  is_super_admin: boolean
 }
 
 /** 管理员用户列表条目。 */
@@ -524,6 +525,21 @@ export interface SponsorMe {
 /** Code listing never contains a redeemable code. */
 export type SponsorCodeState = 'active' | 'disabled' | 'expired' | 'redeemed'
 
+/** Role mutation response; role remains compatible with existing clients. */
+export interface AdminRoleResponse {
+  id: number
+  role: 'admin' | 'user'
+  is_super_admin: boolean
+}
+
+/** Current authenticated user response projection (never a stored users column). */
+export type AuthMeResponse = Omit<User, 'password_hash'> & {
+  is_super_admin: boolean
+  nbw_uid: number | string | null
+  nbw_username: string | null
+  is_beta_user: number
+}
+
 /** JWT payload 结构 */
 export interface JWTPayload {
   sub: number
@@ -532,4 +548,8 @@ export interface JWTPayload {
   role: string
   iat: number
   exp: number
+  /** Derived from fresh database role; never trusted from the token. */
+  is_super_admin?: boolean
+  /** Populated only by verified OAuth lookup; never trusted from JWT claims. */
+  oauth_scopes?: string[]
 }
