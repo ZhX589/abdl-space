@@ -1,5 +1,5 @@
 import type { D1Database } from '@cloudflare/workers-types'
-import type { AppClientPolicy, AppClientStats, AppClientUsers } from '../types/app-clients.ts'
+import type { AppClientPolicy, AppClientReminder, AppClientStats, AppClientUsers } from '../types/app-clients.ts'
 import { query, queryOne, run } from './db.ts'
 
 /** Reserved JSON document; generic settings must never write this key. */
@@ -9,6 +9,45 @@ export const APP_DOWNLOAD_URL = 'https://abdl-space.top/app'
 /** Safe kill-switch defaults, returned as a fresh object on each read. */
 export function defaultAppClientPolicy(): AppClientPolicy {
   return { enabled: false, deprecated_version_codes: [], block_unversioned: false, update_message: '当前 App 版本已停止支持，请更新到最新版本后继续使用。' }
+}
+
+/** Reserved independent reminder document, protected from generic settings writes. */
+export const APP_CLIENT_REMINDER_KEY = 'app_client_reminder'
+
+/** Safe defaults when the existing site_settings table has no reminder row. */
+export function defaultAppClientReminder(): AppClientReminder {
+  return { enabled: false, version_codes: [], message: '已有新版本 App，建议更新以获得更好的体验。' }
+}
+
+/** Validate exactly three fields without coercion; blank plaintext chooses the default message. */
+export function validateAppClientReminder(input: unknown): AppClientReminder | null {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return null
+  const value = input as Record<string, unknown>
+  if (Object.keys(value).length !== 3 || Object.keys(value).some(key => !['enabled', 'version_codes', 'message'].includes(key))) return null
+  if (typeof value.enabled !== 'boolean' || typeof value.message !== 'string' || value.message.length > 2000) return null
+  const codes = value.version_codes
+  if (!Array.isArray(codes) || codes.length > 200 || codes.some(code => typeof code !== 'number' || !Number.isInteger(code) || code <= 0 || code > 2147483647) || new Set(codes).size !== codes.length) return null
+  return { enabled: value.enabled, version_codes: [...codes] as number[], message: value.message.trim() || defaultAppClientReminder().message }
+}
+
+/** Read once, uncached and independent of the measurement epoch; missing row is an available default. */
+export async function readAppClientReminder(db: D1Database): Promise<{ reminder: AppClientReminder; available: boolean }> {
+  try {
+    const row = await queryOne<{ value: string }>(db, 'SELECT value FROM site_settings WHERE key = ?', [APP_CLIENT_REMINDER_KEY])
+    if (!row) return { reminder: defaultAppClientReminder(), available: true }
+    const reminder = validateAppClientReminder(JSON.parse(row.value))
+    if (reminder) return { reminder, available: true }
+    console.error(JSON.stringify({ event: 'app_client_reminder_unavailable', reason: 'invalid_reminder' }))
+  } catch (error) {
+    console.error(JSON.stringify({ event: 'app_client_reminder_unavailable', error: String(error) }))
+  }
+  return { reminder: defaultAppClientReminder(), available: false }
+}
+
+/** Atomically upsert the validated reminder in existing site_settings; no migration or epoch required. */
+export async function writeAppClientReminder(db: D1Database, reminder: AppClientReminder): Promise<void> {
+  await run(db, `INSERT INTO site_settings(key,value,updated_at) VALUES(?,?,datetime('now'))
+    ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`, [APP_CLIENT_REMINDER_KEY, JSON.stringify(reminder)])
 }
 
 /** Only the complete native product UA is eligible; browser/header-only requests are excluded. */

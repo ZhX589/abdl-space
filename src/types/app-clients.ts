@@ -8,6 +8,13 @@ export interface AppClientPolicy {
   update_message: string
 }
 
+/** Independent, nonblocking native timeline reminder; never retires a version. */
+export interface AppClientReminder {
+  enabled: boolean
+  version_codes: number[]
+  message: string
+}
+
 /** Rolling, authenticated timeline-observation counts; unavailable counts are not measurements. */
 export interface AppClientCounts {
   observed_users: number
