@@ -9,7 +9,7 @@ import { cacheIpBan, cacheTrackingRule, clearIpBanCache, invalidateTrackingRule 
 import { invalidateFeedCount } from '../lib/post-count-cache.ts'
 import { adminMiddleware } from '../middleware/auth.ts'
 import appClients from './admin-app-clients.ts'
-import { APP_CLIENT_POLICY_KEY, appClientStats } from '../lib/app-clients.ts'
+import { APP_CLIENT_POLICY_KEY, APP_CLIENT_REMINDER_KEY, appClientStats } from '../lib/app-clients.ts'
 
 const IMGBED_URL = 'https://img.abdl-space.top'
 
@@ -1462,6 +1462,7 @@ admin.put('/settings', adminMiddleware, async (c) => {
   const key = body?.key || ''
   const value = body?.value ?? ''
   if (key === APP_CLIENT_POLICY_KEY) return c.json({ error: 'Use /api/admin/app-clients/policy to update this reserved setting' }, 422)
+  if (key === APP_CLIENT_REMINDER_KEY) return c.json({ error: 'Use /api/admin/app-clients/reminder to update this reserved setting' }, 422)
   if (!SETTINGS_KEY_RE.test(key)) return c.json({ error: 'key 仅允许小写字母/数字/下划线，长度 ≤ 64' }, 422)
   if (typeof value !== 'string' || value.length > 8000) return c.json({ error: 'value 必须为字符串且长度 ≤ 8000' }, 422)
   await run(c.env.abdl_space_db,

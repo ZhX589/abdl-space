@@ -40,6 +40,21 @@
 
 验证结果：新增 feature 回归 17/17 通过；结合 auth/admin/NBW 的 targeted 回归 27/27 通过；完整 npm test 342 pass / 9 fail，相比既有 baseline 325 pass / 9 fail，失败项未变化。保留已有无关 TypeScript 与 bootstrap paper_color 等 baseline 缺陷。
 
+## Native App 独立非阻断更新提醒（2026-10-04，后端实现未部署）
+
+分支 `feat/app-update-reminder`，基于 main `365e275`；仅修改后端及 API/路线图文档。本轮无 commit/push/deploy、无生产 SQL、无 migration、无管理员前端或 main-CDN/代理改动。
+
+| 内容 | 状态 |
+|:---|:---:|
+| 独立 `AppClientReminder` 三字段、reserved `site_settings.app_client_reminder`、GET/PUT `/api/admin/app-clients/reminder`、严格校验、空白消息使用默认、缺行安全默认与原子 upsert（不依赖观测 epoch） | ✅ |
+| 退役优先且旧四字段合约不变；严格 native UA/指定合法内部版本；真实时间线完成后仅变换 200/JSON/≤2MiB 非空数组；保留全部真实状态及真实分页/CORS/代理头 | ✅ |
+| 复用 account `-1` / status `app-update-required` guards，纯文本转义/换行/固定下载页；reserved ID 替换；no-store/Vary、失败 fail-open 日志及快照隔离 | ✅ |
+| SQLite 实际 admin/auth/public/home/geo/NBW/alias、禁用/非命中/缺版本/浏览器冒充、限流/观测/退役优先/headers/body-bound/read-failure 回归及文档 | ✅ |
+
+分页兼容约束：Android 普通分页未可靠去重稳定 synthetic ID，gap filling 还会以相同 ID 判断交集；因此仅非空无游标首载注入。含 `max_id/min_id/since_id/cursor` 或非零 offset 的续页/增量刷新保持真实数组，空页保持 `[]`；不生成 Link，不改真实 next/prev/opaque cursor。native `max_id=app-update-required` 在鉴权/退役之后返回终止空数组、不读取真实内容，即使提醒已关闭。带旧游标的刷新不新增提醒，须无游标新载；不是全页持续置顶能力或客户端真机验收。
+
+验证：提醒新增 12/12；与既有 retirement/auth/admin/NBW 合并专项 **44/44**。本轮源码基线全量 349 pass / 10 fail；最终 **362 pass / 9 fail**（新增 12 pass，另修复已触碰的旧观测测试硬编码 2026-10-03 导致随日期失效的 fixture 为相对时间，增加 1 pass/减少 1 fail）。其余 9 个失败集合未变：bootstrap 1、admin-identities Node strip-only 加载 1、QQ 4、uploads 3；不声称全量通过。带 `--allowImportingTsExtensions --types node` 的 typecheck 仍有项目既有诊断，app-clients 类型/实现/测试与 admin-app-clients 无诊断；不是生产验证。
+
 ## Android 3.0.0 正式版发布（2026-10-03）
 
 | 内容 | 状态 |

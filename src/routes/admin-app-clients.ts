@@ -1,7 +1,7 @@
 import { Hono } from 'hono'
 import type { Env, JWTPayload } from '../types/index.ts'
 import { adminMiddleware } from '../middleware/auth.ts'
-import { appClientStats, appClientUsers, parseAppVersionCode, readAppClientPolicy, validateAppClientPolicy, writeAppClientPolicy } from '../lib/app-clients.ts'
+import { appClientStats, appClientUsers, parseAppVersionCode, readAppClientPolicy, readAppClientReminder, validateAppClientPolicy, validateAppClientReminder, writeAppClientPolicy, writeAppClientReminder } from '../lib/app-clients.ts'
 
 const appClients = new Hono<{ Bindings: Env; Variables: { user: JWTPayload } }>()
 appClients.use('*', async (c, next) => {
@@ -23,6 +23,22 @@ appClients.put('/policy', async c => {
   } catch (error) {
     console.error(JSON.stringify({ event: 'app_client_policy_write_failed', error: String(error) }))
     return c.json({ error: 'App client policy unavailable' }, 503)
+  }
+})
+appClients.get('/reminder', async c => {
+  const { reminder, available } = await readAppClientReminder(c.env.abdl_space_db)
+  if (!available) return c.json({ error: 'App client reminder unavailable' }, 503)
+  return c.json(reminder)
+})
+appClients.put('/reminder', async c => {
+  const reminder = validateAppClientReminder(await c.req.json().catch(() => null))
+  if (!reminder) return c.json({ error: 'Invalid app client reminder: exactly three fields, boolean enabled, up to 200 distinct positive int32 codes, and a plaintext message up to 2000 characters required' }, 422)
+  try {
+    await writeAppClientReminder(c.env.abdl_space_db, reminder)
+    return c.json(reminder)
+  } catch (error) {
+    console.error(JSON.stringify({ event: 'app_client_reminder_write_failed', error: String(error) }))
+    return c.json({ error: 'App client reminder unavailable' }, 503)
   }
 })
 appClients.get('/stats', async c => c.json(await appClientStats(c.env.abdl_space_db)))

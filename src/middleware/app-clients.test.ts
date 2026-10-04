@@ -4,9 +4,10 @@ import { fileURLToPath, URL as NodeURL } from 'node:url'
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite'
 import test from 'node:test'
 import { Hono } from 'hono'
+import { cors } from 'hono/cors'
 import { signJWT } from '../lib/auth.ts'
-import { appClientStats, appClientUsers, defaultAppClientPolicy, isNativeAppClient, observeAppClient, parseAppVersionCode } from '../lib/app-clients.ts'
-import { appClientTimelineMiddleware, appUpdateNotice } from './app-clients.ts'
+import { APP_CLIENT_REMINDER_KEY, appClientStats, appClientUsers, defaultAppClientPolicy, defaultAppClientReminder, isNativeAppClient, observeAppClient, parseAppVersionCode } from '../lib/app-clients.ts'
+import { appClientTimelineMiddleware, appUpdateNotice, buildAppUpdateNotice } from './app-clients.ts'
 import mastodon from '../mastodon/routes.ts'
 import abdl from '../mastodon/abdl.ts'
 import admin from '../routes/admin.ts'
@@ -27,10 +28,12 @@ function fixture(migrate = true) {
   if (migrate) sqlite.exec(migration)
   const statements: string[] = []
   let failWrite = false
+  let failReminderRead = false
+  let reminderReadCount = 0
   const statement = (sql: string, params: SQLInputValue[] = []) => ({
     bind: (...next: SQLInputValue[]) => statement(sql, next),
-    async all() { statements.push(sql); return { success: true, results: sqlite.prepare(sql).all(...params) } },
-    async run() { statements.push(sql); if (failWrite && sql.includes('app_client')) throw new Error('injected write failure'); const result = sqlite.prepare(sql).run(...params); return { success: true, meta: { changes: Number(result.changes), last_row_id: Number(result.lastInsertRowid) } } },
+    async all() { statements.push(sql); if (params.includes(APP_CLIENT_REMINDER_KEY)) { reminderReadCount++; if (failReminderRead) throw new Error('injected reminder read failure') } return { success: true, results: sqlite.prepare(sql).all(...params) } },
+    async run() { statements.push(sql); if (failWrite && (sql.includes('app_client') || params.includes(APP_CLIENT_REMINDER_KEY))) throw new Error('injected write failure'); const result = sqlite.prepare(sql).run(...params); return { success: true, meta: { changes: Number(result.changes), last_row_id: Number(result.lastInsertRowid) } } },
   })
   // The in-memory adapter serializes transactions, like D1's atomic batch write path.
   let queue = Promise.resolve()
@@ -50,7 +53,8 @@ function fixture(migrate = true) {
   const probe = new Hono()
   probe.use('/api/v1/timelines/*', appClientTimelineMiddleware)
   probe.get('/api/v1/timelines/*', c => { c.header('Cache-Control', 'public,max-age=300'); c.header('Link', '</next>; rel="next"'); return c.json([{ id: 'real' }]) })
-  return { sqlite, db, env, app, probe, statements, failWrites: () => { failWrite = true }, close: () => sqlite.close() }
+  const reminderReads = () => reminderReadCount
+  return { sqlite, db, env, app, probe, statements, reminderReads, failReminderReads: () => { failReminderRead = true }, failWrites: () => { failWrite = true }, close: () => sqlite.close() }
 }
 async function token(id = 2) { return signJWT({ sub: id, username: 'alice', email: 'b@test', role: id === 1 ? 'admin' : 'user' }, secret) }
 function headers(jwt?: string, code: string | null = '29', ua: string | null = nativeUA) {
@@ -59,6 +63,23 @@ function headers(jwt?: string, code: string | null = '29', ua: string | null = n
 function setPolicy(f: ReturnType<typeof fixture>, overrides: Record<string, unknown> = {}) {
   const policy = { ...defaultAppClientPolicy(), enabled: true, deprecated_version_codes: [29], ...overrides }
   f.sqlite.prepare('UPDATE site_settings SET value=? WHERE key=?').run(JSON.stringify(policy), 'app_client_policy')
+}
+
+function setReminder(f: ReturnType<typeof fixture>, overrides: Record<string, unknown> = {}) {
+  f.sqlite.prepare('INSERT INTO site_settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
+    .run(APP_CLIENT_REMINDER_KEY, JSON.stringify({ ...defaultAppClientReminder(), enabled: true, version_codes: [29], ...overrides }))
+}
+function contentSchema(f: ReturnType<typeof fixture>) {
+  f.sqlite.exec(`ALTER TABLE users ADD COLUMN avatar TEXT; ALTER TABLE users ADD COLUMN bio TEXT; ALTER TABLE users ADD COLUMN created_at TEXT;
+    UPDATE users SET created_at='2026-09-01T00:00:00Z';
+    CREATE TABLE posts(id INTEGER PRIMARY KEY,user_id INTEGER,content TEXT,created_at TEXT,in_reply_to_id INTEGER,repost_id INTEGER,mental_crisis INTEGER DEFAULT 0,geo_province TEXT,shares_count INTEGER DEFAULT 0,views_count INTEGER DEFAULT 0);
+    CREATE TABLE post_comments(id INTEGER PRIMARY KEY,post_id INTEGER);
+    CREATE TABLE post_images(post_id INTEGER,image_url TEXT,is_nsfw INTEGER,alt_text TEXT,blurhash TEXT,preview_url TEXT,storage_provider TEXT,sort_order INTEGER);
+    CREATE TABLE likes(user_id INTEGER,target_type TEXT,target_id INTEGER);
+    CREATE TABLE follows(follower_id INTEGER,following_id INTEGER);
+    CREATE TABLE user_badges(user_id INTEGER,badge_key TEXT,displayed INTEGER,unlocked_at TEXT);
+    CREATE TABLE badges(key TEXT,name TEXT,color TEXT);
+    INSERT INTO posts(id,user_id,content,created_at) VALUES(101,2,'real newest','2026-10-03T12:00:00Z'),(100,3,'real older','2026-10-02T12:00:00Z');`)
 }
 
 test('native classifier is anchored and version parser is strict positive int32', () => {
@@ -139,15 +160,18 @@ test('concurrent duplicate requests shared IP upgrades downgrades exact pairs an
   try {
     await Promise.all(Array.from({ length: 12 }, () => f.probe.request('/api/v1/timelines/public', { headers: headers(jwt) }, f.env as never)))
     await f.probe.request('/api/v1/timelines/public', { headers: headers(other) }, f.env as never)
-    await observeAppClient(f.db as never, 2, 30, '2026-10-03T10:00:00.000Z')
-    await observeAppClient(f.db as never, 2, 28, '2026-10-03T11:00:00.000Z')
-    await observeAppClient(f.db as never, 2, 30, '2026-10-02T10:00:00.000Z')
-    await observeAppClient(f.db as never, 2, null, '2026-10-03T12:00:00.000Z')
-    const stats = await appClientStats(f.db as never, Date.parse('2026-10-03T20:00:00Z'))
+    // Stay newer than the real-clock middleware observations, independent of the calendar day.
+    const base = Date.now() + 86400000
+    const at = (hours: number) => new Date(base + hours * 3600000).toISOString()
+    await observeAppClient(f.db as never, 2, 30, at(0))
+    await observeAppClient(f.db as never, 2, 28, at(1))
+    await observeAppClient(f.db as never, 2, 30, at(-24))
+    await observeAppClient(f.db as never, 2, null, at(2))
+    const stats = await appClientStats(f.db as never, base + 10 * 3600000)
     assert.equal(stats.totals.observed_users, 2); assert.equal(stats.totals.versioned_users, 2); assert.equal(stats.totals.unversioned_users, 1)
     assert.equal(stats.versions.reduce((sum, row) => sum + row.latest_users, 0), 2)
     assert.equal(stats.versions.find(row => row.version_code === null)?.latest_users, 1)
-    assert.equal((await appClientUsers(f.db as never, 30, 1, 20, '')).users[0].last_seen_at, '2026-10-03T10:00:00.000Z')
+    assert.equal((await appClientUsers(f.db as never, 30, 1, 20, '')).users[0].last_seen_at, at(0))
     assert.equal((await appClientUsers(f.db as never, 'all', 1, 20, 'ali')).users[0].version_code, null)
     assert.equal((await appClientUsers(f.db as never, 'all', 2, 1, '')).pagination.total, 2)
     assert.equal((await appClientUsers(f.db as never, 'all', 1, 20, '%')).pagination.total, 0)
@@ -366,4 +390,271 @@ test('blocked native requests do not bypass existing timeline rate limits or tri
     assert.equal(aliasLimited.status,429); assert.equal(aliasLimited.headers.get('Cache-Control'),'private, no-store')
     assert.equal(f.statements.length,before)
   } finally {f.close()}
+})
+
+test('reminder admin GET/PUT auth, strict validation, default blank message and reserved setting', async () => {
+  const f = fixture(); const adminJwt = await token(1); const userJwt = await token()
+  const request = (method = 'GET', body?: unknown, access = adminJwt) => f.app.request('/api/admin/app-clients/reminder', { method, headers: { Authorization: `Bearer ${access}`, 'Content-Type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }, f.env as never)
+  try {
+    for (const method of ['GET', 'PUT']) {
+      assert.equal((await request(method, method === 'PUT' ? defaultAppClientReminder() : undefined, '')).status, 401)
+      assert.equal((await request(method, method === 'PUT' ? defaultAppClientReminder() : undefined, userJwt)).status, 403)
+    }
+    const initial = await request(); assert.equal(initial.status, 200); assert.equal(initial.headers.get('Cache-Control'), 'private, no-store')
+    assert.deepEqual(await initial.json(), defaultAppClientReminder())
+    assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS c FROM site_settings WHERE key=?').get(APP_CLIENT_REMINDER_KEY)?.c, 0, 'GET never creates a row')
+    const valid = { enabled: true, version_codes: [1, 29, 2147483647], message: 'custom' }
+    for (const body of [null, [], {}, { ...valid, enabled: 1 }, { ...valid, enabled: 'true' }, { ...valid, version_codes: null }, { ...valid, version_codes: [0] }, { ...valid, version_codes: [-1] }, { ...valid, version_codes: [1.2] }, { ...valid, version_codes: ['29'] }, { ...valid, version_codes: [2147483648] }, { ...valid, version_codes: [29, 29] }, { ...valid, version_codes: Array.from({ length: 201 }, (_, i) => i + 1) }, { ...valid, message: null }, { ...valid, message: 'x'.repeat(2001) }, { ...valid, block_unversioned: true }, { enabled: true, version_codes: [29] }]) {
+      assert.equal((await request('PUT', body)).status, 422, JSON.stringify(body))
+      assert.deepEqual(await (await request()).json(), defaultAppClientReminder())
+    }
+    const malformed = await f.app.request('/api/admin/app-clients/reminder', { method: 'PUT', headers: headers(adminJwt), body: '{' }, f.env as never)
+    assert.equal(malformed.status, 422)
+    assert.deepEqual(await (await request('PUT', { ...valid, message: '  ' })).json(), { ...valid, message: defaultAppClientReminder().message })
+    assert.deepEqual(await (await request('PUT', { ...valid, message: ' custom\nline ' })).json(), { ...valid, message: 'custom\nline' })
+    const max = { ...valid, version_codes: Array.from({ length: 200 }, (_, i) => i + 1), message: 'x'.repeat(2000) }
+    assert.equal((await request('PUT', max)).status, 200)
+    assert.equal((await f.app.request('/api/admin/settings', { method: 'PUT', headers: headers(adminJwt), body: JSON.stringify({ key: APP_CLIENT_REMINDER_KEY, value: '{}' }) }, f.env as never)).status, 422)
+    assert.deepEqual(await (await f.app.request('/api/admin/app-clients/policy', { headers: headers(adminJwt) }, f.env as never)).json(), defaultAppClientPolicy())
+    f.failWrites(); assert.equal((await request('PUT', valid)).status, 503)
+    assert.deepEqual(await (await request()).json(), max)
+    f.sqlite.exec("UPDATE users SET role='user' WHERE id=1")
+    assert.equal((await request()).status, 403, 'fresh database role, not JWT role')
+  } finally { f.close() }
+})
+
+test('reminder needs only existing site_settings, not epoch; corruption/read failures are honest and native fail-open', async () => {
+  const f = fixture(false); const adminJwt = await token(1)
+  const request = (method = 'GET', body?: unknown) => f.app.request('/api/admin/app-clients/reminder', { method, headers: headers(adminJwt), ...(body === undefined ? {} : { body: JSON.stringify(body) }) }, f.env as never)
+  try {
+    f.sqlite.exec('CREATE TABLE site_settings(key TEXT PRIMARY KEY,value TEXT,updated_at TEXT)')
+    assert.deepEqual(await (await request()).json(), defaultAppClientReminder())
+    const reminder = { enabled: true, version_codes: [29], message: 'No epoch needed' }
+    assert.equal((await request('PUT', reminder)).status, 200)
+    assert.deepEqual(await (await request()).json(), reminder)
+    const native = await f.probe.request('/api/v1/timelines/public', { headers: headers() }, f.env as never)
+    assert.deepEqual((await statuses(native)).map(s => s.id), ['app-update-required', 'real'])
+    for (const value of ['broken-json', '{}', '{"enabled":true,"version_codes":[0],"message":"bad"}']) {
+      f.sqlite.prepare('UPDATE site_settings SET value=? WHERE key=?').run(value, APP_CLIENT_REMINDER_KEY)
+      assert.equal((await request()).status, 503)
+      const response = await f.probe.request('/api/v1/timelines/public', { headers: headers() }, f.env as never)
+      assert.deepEqual(await response.json(), [{ id: 'real' }]); assert.equal(response.headers.get('X-App-Client-Reminder'), 'unavailable')
+    }
+    setReminder(f); f.failReminderReads()
+    assert.equal((await request()).status, 503)
+    assert.deepEqual(await (await f.probe.request('/api/v1/timelines/public', { headers: headers() }, f.env as never)).json(), [{ id: 'real' }])
+    f.sqlite.exec('DROP TABLE site_settings')
+    assert.equal((await request('PUT', reminder)).status, 503)
+  } finally { f.close() }
+})
+
+test('reminder only matches strict native valid selected version, observes normally and disabling is immediate', async () => {
+  const f = fixture(); const jwt = await token(); setReminder(f)
+  try {
+    const response = await f.probe.request('/api/v1/timelines/public?limit=1', { headers: headers(jwt) }, f.env as never)
+    assert.deepEqual((await statuses(response)).map(s => s.id), ['app-update-required', 'real'])
+    assert.equal(response.headers.get('Link'), '</next>; rel="next"')
+    assert.equal(response.headers.get('X-App-Client-Observation'), 'recorded')
+    assert.equal(f.reminderReads(), 1)
+    for (const code of [null, 'bad', '01', '0', '-1', '2147483648', '28', '30']) {
+      assert.deepEqual(await (await f.probe.request('/api/v1/timelines/public', { headers: headers(jwt, code) }, f.env as never)).json(), [{ id: 'real' }])
+    }
+    const before = f.statements.length
+    for (const ua of [null, 'Mozilla/5.0 (Android)', 'Mozilla/5.0 MastodonAndroid/3.0.0', 'MastodonAndroid/3.0.0 browser']) {
+      assert.deepEqual(await (await f.probe.request('/api/v1/timelines/public', { headers: headers(jwt, '29', ua) }, f.env as never)).json(), [{ id: 'real' }])
+    }
+    assert.equal(f.statements.length, before)
+    setReminder(f, { enabled: false })
+    assert.deepEqual(await (await f.probe.request('/api/v1/timelines/public', { headers: headers(jwt) }, f.env as never)).json(), [{ id: 'real' }])
+    assert.equal((await appClientStats(f.db as never)).totals.observed_users, 1)
+    assert.equal((await f.app.request('/api/v1/timelines/home', { headers: headers() }, f.env as never)).status, 401)
+  } finally { f.close() }
+})
+
+test('retirement wins exactly one old notice and does not read reminder or real timeline content', async () => {
+  const f = fixture(); const jwt = await token(); setPolicy(f, { update_message: 'Retired' }); setReminder(f, { message: 'Reminder' }); f.failReminderReads()
+  try {
+    for (const path of ['/api/v1/timelines/public', '/api/v1/abdl/nbw/sync-threads']) {
+      const response = await f.app.request(`${path}?max_id=100&limit=1`, { headers: headers(jwt) }, f.env as never)
+      const body = await statuses(response); assert.equal(body.length, 1); assert.equal(body[0].text, 'Retired\nhttps://abdl-space.top/app')
+      assert.equal(response.headers.get('Link'), null); assert.equal(response.headers.get('X-App-Client-Reminder'), null)
+    }
+    assert.equal(f.reminderReads(), 0)
+    assert.ok(f.statements.every(sql => !/FROM posts|NBW/i.test(sql)))
+  } finally { f.close() }
+})
+
+test('actual SQLite public/home/geo timelines retain every real status and real pagination cursor', async () => {
+  const f = fixture(); const jwt = await token(); contentSchema(f); setReminder(f)
+  f.sqlite.exec("UPDATE posts SET geo_province='test'")
+  try {
+    for (const path of ['/api/v1/timelines/public', '/api/v1/timelines/home', '/api/v1/timelines/geo?province=test']) {
+      const url = path + (path.includes('?') ? '&' : '?') + 'limit=1'
+      const original = await f.app.request(url, { headers: headers(jwt, '30') }, f.env as never)
+      const real = await statuses(original)
+      const response = await f.app.request(url, { headers: headers(jwt) }, f.env as never)
+      const result = await statuses(response)
+      assert.equal(response.status, 200, path)
+      assert.equal(result[0].id, 'app-update-required'); assert.deepEqual(result.slice(1), real)
+      assert.equal(result.length, real.length + 1, 'do not trim real list to limit')
+      assert.equal(response.headers.get('Link'), original.headers.get('Link'))
+      assert.doesNotMatch(response.headers.get('Link') || '', /app-update-required/)
+    }
+  } finally { f.close() }
+})
+
+test('reminder on actual public fallback never mutates shared snapshot or later browser/nonmatching responses', async () => {
+  const f = fixture(); const jwt = await token(); setReminder(f)
+  const snapshot = [{ id: 'cached-real', content: '<p>real</p>', account: { id: '2' } }]
+  const before = structuredClone(snapshot)
+  const env = { ...f.env, NOTICE_KV: { get: async () => snapshot, put: async () => { throw new Error('must not cache reminder') } } }
+  try {
+    const response = await f.app.request('/api/v1/timelines/public', { headers: headers(jwt) }, env as never)
+    assert.deepEqual((await response.json() as unknown[]).slice(1), before)
+    assert.equal(response.headers.get('X-ABDL-Timeline-Fallback'), 'snapshot')
+    assert.deepEqual(snapshot, before)
+    for (const h of [headers(undefined, '29', 'Mozilla/5.0'), headers(jwt, '30')]) assert.deepEqual(await (await f.app.request('/api/v1/timelines/public', { headers: h }, env as never)).json(), before)
+  } finally { f.close() }
+})
+
+test('reminder plaintext escapes every HTML delimiter, preserves newline and uses fixed reserved identity/link', () => {
+  const status = buildAppUpdateNotice('&<>"\'\r\nnext\nlast')
+  assert.match(status.content, /&amp;&lt;&gt;&quot;&#39;<br>next<br>last/)
+  assert.equal(status.account.id, '-1'); assert.equal(status.id, 'app-update-required')
+  assert.equal(status.url, 'https://abdl-space.top/app'); assert.deepEqual(status.media_attachments, [])
+  assert.equal(status.text, '&<>"\'\r\nnext\nlast\nhttps://abdl-space.top/app')
+})
+
+test('bounded transform preserves CORS/proxy/pagination/status headers, removes invalid body validators and replaces only reserved IDs', async () => {
+  const f = fixture(); setReminder(f)
+  const app = new Hono()
+  const originals = [{ id: 'real1', content: 'unchanged', nested: { value: true } }, { id: 'app-update-required', content: 'old' }, { id: 'real2' }, { id: 'app-update-required' }]
+  app.use('*', cors({ origin: 'https://abdl-space.top', exposeHeaders: ['Link', 'X-Next-Cursor'] }))
+  app.use('*', appClientTimelineMiddleware)
+  app.get('*', c => { c.header('Vary', 'Accept-Encoding'); return c.body(JSON.stringify(originals), 200, {
+    'Content-Type': 'application/json; charset=utf-8', 'Content-Length': '123', ETag: 'old', 'Content-MD5': 'old', 'Content-Digest': 'old', Digest: 'old', 'Last-Modified': 'old',
+    Link: '</real?max_id=real2>; rel="next", </real?min_id=real1>; rel="prev"', 'X-Next-Cursor': 'opaque-real-cursor', 'X-Proxy-Trace': 'retained',
+  }) })
+  try {
+    const response = await app.request('/api/v1/timelines/public', { headers: { ...headers(), Origin: 'https://abdl-space.top' } }, f.env as never)
+    const result = await statuses(response)
+    assert.deepEqual(result.map(s => s.id), ['app-update-required', 'real1', 'real2'])
+    assert.deepEqual(result.slice(1), [originals[0], originals[2]])
+    assert.equal(originals.length, 4); assert.equal(originals[1].content, 'old')
+    for (const key of ['Content-Length', 'ETag', 'Content-MD5', 'Content-Digest', 'Digest', 'Last-Modified']) assert.equal(response.headers.get(key), null, key)
+    assert.equal(response.headers.get('X-Next-Cursor'), 'opaque-real-cursor'); assert.equal(response.headers.get('X-Proxy-Trace'), 'retained')
+    assert.equal(response.headers.get('Link'), '</real?max_id=real2>; rel="next", </real?min_id=real1>; rel="prev"')
+    assert.equal(response.headers.get('Access-Control-Allow-Origin'), 'https://abdl-space.top')
+    assert.match(response.headers.get('Access-Control-Expose-Headers') || '', /Link/)
+    assert.equal(response.headers.get('Cache-Control'), 'private, no-store')
+    for (const key of ['Accept-Encoding', 'Origin', 'User-Agent', 'X-App-Version-Code', 'Authorization']) assert.match(response.headers.get('Vary') || '', new RegExp(key))
+    assert.equal(f.reminderReads(), 1)
+    const before = f.statements.length
+    const preflight = await app.request('/api/v1/timelines/public', { method: 'OPTIONS', headers: { ...headers(), Origin: 'https://abdl-space.top', 'Access-Control-Request-Method': 'GET' } }, f.env as never)
+    assert.equal(preflight.status, 204); assert.equal(f.statements.length, before)
+  } finally { f.close() }
+})
+
+test('response transform never changes errors, objects, non-JSON, 204, malformed, encoded, oversized or failing bodies', async () => {
+  const f = fixture(); setReminder(f)
+  const maximum = 2 * 1024 * 1024
+  const cases = [
+    { status: 200, text: '{}', type: 'application/json' },
+    { status: 400, text: '[{"id":"real"}]', type: 'application/json' },
+    { status: 503, text: '{"error":"unavailable"}', type: 'application/json' },
+    { status: 204, text: null, type: 'application/json' },
+    { status: 200, text: '[{"id":"real"}]', type: 'text/plain' },
+    { status: 200, text: '[broken', type: 'application/json' },
+    { status: 200, text: '[]', type: 'application/json' },
+    { status: 200, text: '[{"id":"real"}]', type: 'application/json', extra: { 'Content-Encoding': 'gzip' } },
+    { status: 200, text: '[{"id":"real"}]', type: 'application/json', extra: { 'Content-Length': String(maximum + 1) } },
+    { status: 200, text: JSON.stringify([{ id: 'large', text: '中'.repeat(maximum / 2) }]), type: 'application/json' },
+  ]
+  try {
+    for (const item of cases) {
+      const app = new Hono(); app.use('*', appClientTimelineMiddleware)
+      app.get('*', () => new Response(item.text, { status: item.status, headers: { 'Content-Type': item.type, ETag: 'retain', ...item.extra } }))
+      const response = await app.request('/api/v1/timelines/public', { headers: headers() }, f.env as never)
+      assert.equal(response.status, item.status); assert.equal(await response.text(), item.text || '')
+      assert.equal(response.headers.get('ETag'), 'retain'); assert.equal(response.headers.get('Cache-Control'), 'private, no-store')
+    }
+    // A valid body exactly at the byte limit still transforms; byte count, not Content-Length, bounds reads.
+    const exact = '[{"id":"boundary"}]' + ' '.repeat(maximum - '[{"id":"boundary"}]'.length)
+    const boundary = new Hono(); boundary.use('*', appClientTimelineMiddleware); boundary.get('*', () => new Response(exact, { headers: { 'Content-Type': 'application/json' } }))
+    const result = await boundary.request('/api/v1/timelines/public', { headers: headers() }, f.env as never)
+    assert.deepEqual((await statuses(result)).map(s => s.id), ['app-update-required', 'boundary'])
+    const invalidUTF = new Hono(); invalidUTF.use('*', appClientTimelineMiddleware)
+    invalidUTF.get('*', () => new Response(new Uint8Array([91, 255, 93]), { headers: { 'Content-Type': 'application/json', ETag: 'retain' } }))
+    const bad = await invalidUTF.request('/api/v1/timelines/public', { headers: headers() }, f.env as never)
+    assert.deepEqual(new Uint8Array(await bad.arrayBuffer()), new Uint8Array([91, 255, 93])); assert.equal(bad.headers.get('ETag'), 'retain')
+    const failed = new Hono(); failed.use('*', appClientTimelineMiddleware)
+    failed.get('*', () => new Response(new ReadableStream({ start(controller) { controller.error(new Error('body failure')) } }), { headers: { 'Content-Type': 'application/json', ETag: 'retain' } }))
+    const errored = await failed.request('/api/v1/timelines/public', { headers: headers() }, f.env as never)
+    assert.equal(errored.status, 200); assert.equal(errored.headers.get('ETag'), 'retain')
+    await assert.rejects(errored.text(), /body failure/)
+  } finally { f.close() }
+})
+
+test('initial-only reminder leaves legacy pagination/gap refresh untouched and reserved max cursor terminates without queries', async () => {
+  const f = fixture(); setReminder(f); const jwt = await token()
+  try {
+    for (const query of ['max_id=p_100', 'min_id=p_100', 'since_id=p_100', 'cursor=opaque', 'offset=20', 'offset=20x']) {
+      const response = await f.probe.request(`/api/v1/timelines/public?${query}`, { headers: headers(jwt) }, f.env as never)
+      assert.deepEqual(await response.json(), [{ id: 'real' }], query)
+      assert.equal(response.headers.get('Link'), '</next>; rel="next"')
+    }
+    assert.equal((await statuses(await f.probe.request('/api/v1/timelines/public?offset=0', { headers: headers(jwt) }, f.env as never)))[0].id, 'app-update-required')
+    contentSchema(f)
+    for (const query of ['max_id=p_1', 'max_id=app-update-required']) {
+      const start = f.statements.length
+      const response = await f.app.request(`/api/v1/timelines/public?${query}`, { headers: headers(jwt) }, f.env as never)
+      assert.deepEqual(await response.json(), []); assert.equal(response.headers.get('Link'), null)
+      if (query.includes('app-update-required')) assert.ok(f.statements.slice(start).every(sql => !/FROM posts/i.test(sql)))
+    }
+    setReminder(f, { enabled: false })
+    assert.deepEqual(await (await f.app.request('/api/v1/timelines/public?max_id=app-update-required', { headers: headers(jwt) }, f.env as never)).json(), [])
+    setPolicy(f)
+    assert.equal((await statuses(await f.app.request('/api/v1/timelines/public?max_id=app-update-required', { headers: headers(jwt) }, f.env as never)))[0].id, 'app-update-required')
+  } finally { f.close() }
+})
+
+test('actual NBW routes and alias preserve opaque real cursors and read reminder once per native request', async () => {
+  const f = fixture(); setReminder(f); const jwt = await token()
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async () => Response.json({ code: 200, data: { has_more: true, next_cursor: 'opaque-next', list: [{ tid: 123, authorid: 12, author: 'NBW', subject: 'real upstream', dateline: 1700000000 }] } })
+  const env = { ...f.env, NBW_API_KEY: 'local-test-only' }
+  try {
+    for (const path of ['/api/v1/timelines/nbw', '/api/v1/abdl/nbw/sync-threads']) {
+      const original = await f.app.request(path, { headers: headers(jwt, '30') }, env as never)
+      const before = f.reminderReads()
+      const response = await f.app.request(path, { headers: headers(jwt) }, env as never)
+      const result = await statuses(response)
+      assert.equal(result[0].id, 'app-update-required'); assert.deepEqual(result.slice(1), await original.json())
+      assert.equal(response.headers.get('Link'), original.headers.get('Link')); assert.match(response.headers.get('Link') || '', /opaque-next/)
+      assert.equal(f.reminderReads(), before + 1)
+      const page = await f.app.request(`${path}?cursor=opaque-next`, { headers: headers(jwt) }, env as never)
+      assert.deepEqual((await statuses(page)).map(s => s.id), ['nbw_123'])
+    }
+  } finally { globalThis.fetch = originalFetch; f.close() }
+})
+
+test('reminder preserves OAuth observation/auth and existing native rate limit without DB work after 429', async () => {
+  const f = fixture(); setReminder(f)
+  const env = { ...f.env, NBW_API_KEY: 'local-test-only', NOTICE_KV: { get: async () => [{ id: 'real' }] } }
+  const h = { ...headers('reminder-oauth'), 'CF-Connecting-IP': '192.0.2.251' }
+  try {
+    f.sqlite.exec(`INSERT INTO oauth_tokens VALUES('reminder-oauth',2,'read',${Math.floor(Date.now()/1000)+1000},0)`)
+    for (let i = 0; i < 120; i++) {
+      const response = await f.app.request('/api/v1/timelines/public', { headers: h }, env as never)
+      assert.equal(response.status, 200); assert.equal(response.headers.get('X-App-Client-Observation'), 'recorded')
+      assert.deepEqual((await statuses(response)).map(s => s.id), ['app-update-required', 'real'])
+    }
+    const before = f.statements.length
+    const limited = await f.app.request('/api/v1/timelines/public', { headers: h }, env as never)
+    assert.equal(limited.status, 429); assert.equal(f.statements.length, before)
+    assert.equal(limited.headers.get('Cache-Control'), 'private, no-store')
+    const alias = await f.app.request('/api/v1/abdl/nbw/sync-threads', { headers: h }, env as never)
+    assert.equal(alias.status, 429); assert.equal(f.statements.length, before)
+    assert.equal((await appClientStats(f.db as never)).totals.observed_users, 1)
+  } finally { f.close() }
 })

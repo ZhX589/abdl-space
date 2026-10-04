@@ -2901,6 +2901,33 @@ The gate runs before timeline D1 content queries, cache/snapshot fallback and NB
 
 **Every classified native GET timeline response**, including allowed, fallback and error responses, is `private, no-store` with `Vary: User-Agent, X-App-Version-Code, Authorization` (preserving other Vary fields). Forward these headers through all proxies and bypass any pre-existing native timeline cache lookup; a cache hit before the Worker would skip both fresh policy evaluation and observation. Policy read/migration failure fails open with safe defaults, structured `app_client_policy_unavailable` logs and `X-App-Client-Policy: unavailable`. Synthetic notices never enter content/snapshot caches.
 
+### `GET /api/admin/app-clients/reminder` / `PUT /api/admin/app-clients/reminder`
+
+Independent **nonblocking** reminder, not the retirement policy. Backend implementation on `feat/app-update-reminder` from main `365e275`; **not deployed** in this change. Existing four-field retirement `/policy` contract and statistics remain unchanged.
+
+Successful GET/PUT is exactly `AppClientReminder`:
+
+```json
+{
+  "enabled": false,
+  "version_codes": [],
+  "message": "已有新版本 App，建议更新以获得更好的体验。"
+}
+```
+
+- Existing fresh administrator authorization and `Cache-Control: private, no-store` apply to GET/PUT and auth errors. PUT requires exactly these three fields; rejects missing/unknown fields, coerced types, non-boolean enabled, duplicate codes, or noninteger/out-of-range codes with `422`. Codes are positive int32 `1..2147483647`, at most 200 unique entries.
+- Message must be a string of at most 2000 characters before trimming. It is treated only as plaintext, trimmed on save; empty/whitespace selects the default above. HTML delimiters including quotes are escaped and line breaks rendered as `<br>`. The only generated download link remains fixed to **https://abdl-space.top/app**.
+- A validated document is atomically upserted to separate reserved `site_settings.app_client_reminder`. Generic `PUT /api/admin/settings` rejects this key. **No migration or production SQL is needed**: existing `site_settings` suffices, missing row GET returns available safe defaults without writing a row, and save creates it. Reminder read/save does not depend on migration 0070's measurement epoch.
+- A corrupt row or read failure returns admin `503 {"error":"App client reminder unavailable"}`; save infrastructure failure also returns 503, never false success. Native delivery fails open to the real response with structured `app_client_reminder_unavailable` logs and `X-App-Client-Reminder: unavailable`. Body read/JSON/UTF-8 failure logs `app_client_reminder_response_unavailable` and leaves the original response intact.
+
+After required authentication, rate limiting and unchanged account observation, **retirement is evaluated first**. A retirement match still returns exactly its existing single blocking notice and never reads the reminder. Otherwise the reminder is read once per eligible native request. Only the same anchored native UA plus a valid explicitly selected `X-App-Version-Code` can receive the nonblocking notice; missing/malformed versions and browser/header-only requests cannot match. Disabling the reminder applies immediately without disabling observation or changing retirement.
+
+**Pagination compatibility exception:** prepend the notice only to nonempty successful initial-load/no-cursor arrays. Continuation and gap/incremental-refresh requests carrying nonempty `max_id`, `min_id`, `since_id`, `cursor`, or nonempty `offset` other than `0` are left unchanged. Empty arrays (including terminal pages and initially empty feeds) stay empty. Legacy native ordinary paging does not deduplicate the stable notice ID, and gap filling intersects IDs; injecting on every page could duplicate notices or suppress real posts. Cursor-based refreshes therefore do not introduce a new notice; a fresh no-cursor load is required. Native `max_id=app-update-required` returns terminal `[]` with no Link before real content access, even after reminder disable; required auth and retirement still take precedence.
+
+For eligible initial pages on `/api/v1/timelines/*` and `/api/v1/abdl/nbw/sync-threads`, injection occurs **after** the real handler completes, and only for HTTP **200**, `application/json`, bare arrays whose original cloned body is at most **2 MiB**. It does not transform error statuses, objects, 204, non-JSON, encoded, malformed, unreadable or oversized bodies. All real statuses and their order/fields are preserved, including when the requested limit is already full (result can be real count + 1). A preexisting reserved `app-update-required` entry is replaced rather than duplicated; no real status is discarded. ID/account remain `app-update-required`/`-1`, protected by the existing synthetic-entity read/mutation guards.
+
+Real `Link` (next **and** prev), custom pagination/CORS/proxy headers and HTTP status are retained exactly; the reminder does not generate pagination links or turn its ID into a real cursor. Content-Length, ETag and other body validators (Content-MD5/Content-Digest/Digest/Last-Modified) are removed only after a successful rewrite. Native private/no-store and Vary remain. Parsing a bounded response clone never mutates the cached real payload, public snapshot or shared timeline data; no proxy/main-CDN code changes are part of this backend feature. Existing proxy forwarding/cache-bypass requirements still apply.
+
 ### `GET /api/admin/app-clients/stats`
 
 ```json
