@@ -5,7 +5,7 @@ import { query, queryOne, run } from './db.ts'
 /** Reserved JSON document; generic settings must never write this key. */
 export const APP_CLIENT_POLICY_KEY = 'app_client_policy'
 /** Verified existing public download page; never supplied by an administrator or client. */
-export const APP_DOWNLOAD_URL = 'https://abdl-space.top/app'
+export const APP_DOWNLOAD_URL = 'https://m.abdl-space.top/app'
 /** Safe kill-switch defaults, returned as a fresh object on each read. */
 export function defaultAppClientPolicy(): AppClientPolicy {
   return { enabled: false, deprecated_version_codes: [], block_unversioned: false, update_message: '当前 App 版本已停止支持，请更新到最新版本后继续使用。' }

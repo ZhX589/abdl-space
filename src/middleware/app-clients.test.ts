@@ -100,7 +100,7 @@ test('all actual timelines and NBW alias gate before queries/cache/upstream and 
       assert.match(response.headers.get('Vary') || '', /User-Agent/)
       assert.equal(response.headers.get('X-App-Client-Observation'), 'recorded')
       const list = await statuses(response); assert.equal(list.length, 1); assert.equal(list[0].id, 'app-update-required')
-      assert.equal(list[0].account.id, '-1'); assert.match(list[0].content, /https:\/\/abdl-space.top\/app/)
+      assert.equal(list[0].account.id, '-1'); assert.match(list[0].content, /href="https:\/\/m\.abdl-space\.top\/app"/)
       assert.deepEqual(list[0].media_attachments, []); assert.equal(list[0].visibility, 'public')
     }
     assert.equal(f.sqlite.prepare('SELECT COUNT(*) AS c FROM app_client_observations').get()?.c, 1)
@@ -476,7 +476,7 @@ test('retirement wins exactly one old notice and does not read reminder or real 
   try {
     for (const path of ['/api/v1/timelines/public', '/api/v1/abdl/nbw/sync-threads']) {
       const response = await f.app.request(`${path}?max_id=100&limit=1`, { headers: headers(jwt) }, f.env as never)
-      const body = await statuses(response); assert.equal(body.length, 1); assert.equal(body[0].text, 'Retired\nhttps://abdl-space.top/app')
+      const body = await statuses(response); assert.equal(body.length, 1); assert.equal(body[0].text, 'Retired\nhttps://m.abdl-space.top/app')
       assert.equal(response.headers.get('Link'), null); assert.equal(response.headers.get('X-App-Client-Reminder'), null)
     }
     assert.equal(f.reminderReads(), 0)
@@ -521,8 +521,10 @@ test('reminder plaintext escapes every HTML delimiter, preserves newline and use
   const status = buildAppUpdateNotice('&<>"\'\r\nnext\nlast')
   assert.match(status.content, /&amp;&lt;&gt;&quot;&#39;<br>next<br>last/)
   assert.equal(status.account.id, '-1'); assert.equal(status.id, 'app-update-required')
-  assert.equal(status.url, 'https://abdl-space.top/app'); assert.deepEqual(status.media_attachments, [])
-  assert.equal(status.text, '&<>"\'\r\nnext\nlast\nhttps://abdl-space.top/app')
+  assert.equal(status.url, 'https://m.abdl-space.top/app'); assert.deepEqual(status.media_attachments, [])
+  assert.match(status.content, /href="https:\/\/m\.abdl-space\.top\/app"/)
+  assert.equal(status.account.url, 'https://m.abdl-space.top/app')
+  assert.equal(status.text, '&<>"\'\r\nnext\nlast\nhttps://m.abdl-space.top/app')
 })
 
 test('bounded transform preserves CORS/proxy/pagination/status headers, removes invalid body validators and replaces only reserved IDs', async () => {
