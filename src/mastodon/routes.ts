@@ -25,8 +25,8 @@ import { ALBUM_POST_FALLBACK, geoFromPost, attachDisplayedBadges, hydrateAlbumPo
 import { isNativeAppClient } from '../lib/app-clients.ts'
 import { bestEffortImportAlbumHistory } from '../lib/album-history.ts'
 import { getLastStatusProvinces } from './last-province.ts'
-import { nbwS2SRequest } from '../lib/nbw.ts'
-import { handleNBWTimeline, buildNBWTimelineParams } from './nbw-timeline.ts'
+import { NBWUnavailableError, nbwS2SRequest } from '../lib/nbw.ts'
+import { handleNBWTimeline, buildNBWTimelineParams, parseNBWSyncData, logNBWTimelineUnavailable } from './nbw-timeline.ts'
 import { mergeAllTimelinePage } from './all-timeline.ts'
 import { fetchFriendRequestPosts } from './friend-timeline.ts'
 import { computeHeat, computeHeatFromRow, isWithin24h, VIEW_DEDUP_WINDOW_SECONDS } from './heat.ts'
@@ -2015,16 +2015,22 @@ async function fetchAbdlPosts(c: Context<{ Bindings: Env }>, limit: number, maxI
   return out
 }
 
-async function fetchNBWPosts(c: Context<{ Bindings: Env }>, limit: number, cursor: string): Promise<{ statuses: MastodonStatus[]; nextCursor: string; hasMore: boolean }> {
+async function fetchNBWPosts(c: Context<{ Bindings: Env }>, limit: number, cursor: string): Promise<{ statuses: MastodonStatus[]; nextCursor: string; hasMore: boolean; unavailable?: boolean }> {
   if (!c.env.NBW_API_KEY) return { statuses: [], nextCursor: '', hasMore: false }
   const { params } = buildNBWTimelineParams({ limit: String(limit), cursor })
-  const result = await nbwS2SRequest(c.env, 'get_sync_threads', params)
-  if (result.code !== 200) return { statuses: [], nextCursor: '', hasMore: false }
-  const data = (result.data || {}) as { has_more?: boolean; next_cursor?: string; list?: Array<Parameters<typeof toStatusFromNBW>[0]> }
-  return {
-    statuses: (data.list || []).map(toStatusFromNBW),
-    nextCursor: data.next_cursor || '',
-    hasMore: !!data.has_more,
+  try {
+    const result = await nbwS2SRequest(c.env, 'get_sync_threads', params, { timeoutMs: 5000, maxBytes: 2 * 1024 * 1024 })
+    if (result.code !== 200) throw new NBWUnavailableError('api')
+    const data = parseNBWSyncData(result.data)
+    return {
+      statuses: data.list.map(toStatusFromNBW),
+      nextCursor: data.next_cursor || '',
+      hasMore: !!data.has_more,
+    }
+  } catch (error) {
+    // NBW alone is optional. Local DB/auth/friend failures still reject the merged request.
+    logNBWTimelineUnavailable(error, 'all')
+    return { statuses: [], nextCursor: cursor, hasMore: false, unavailable: true }
   }
 }
 
@@ -2085,7 +2091,7 @@ mastodon.get('/timelines/all', async (c) => {
       // ABDL Space 本站帖子
       abdlMaxId === -1 ? Promise.resolve([]) : fetchAbdlPosts(c, limit, abdlMaxId),
       // NBW 同步帖子
-      nbwCursor === '!' ? Promise.resolve({ statuses: [], nextCursor: '', hasMore: false }) : fetchNBWPosts(c, limit, nbwCursor),
+      nbwCursor === '!' ? Promise.resolve({ statuses: [], nextCursor: '', hasMore: false, unavailable: false }) : fetchNBWPosts(c, limit, nbwCursor),
       // 交友宇宙（交友请求作为帖子渲染）
       friendMaxId === -1 ? Promise.resolve([]) : fetchFriendRequestPosts(c, limit, friendMaxId),
     ])
@@ -2100,7 +2106,14 @@ mastodon.get('/timelines/all', async (c) => {
       friendMaxId,
       nbwResult.hasMore,
       nbwResult.nextCursor,
+      nbwResult.unavailable,
     )
+    if (nbwResult.unavailable) {
+      c.header('X-ABDL-Timeline-Degraded', 'nbw')
+      c.header('Cache-Control', 'private, no-store')
+      // An unavailable-only page must not masquerade as the native client's terminal empty array.
+      if (page.statuses.length === 0) return c.json({ error: 'NBW 服务暂时不可用', code: 'nbw_unavailable' }, 503)
+    }
     if (page.hasMore) {
       const nextCursor = btoa(JSON.stringify({ a: page.nextAbdlMaxId, n: page.nextNBWCursor, f: page.nextFriendMaxId }))
       const query = new URLSearchParams({ limit: String(limit), max_id: nextCursor })
@@ -2109,9 +2122,9 @@ mastodon.get('/timelines/all', async (c) => {
 
     await attachDisplayedBadges(c.env.abdl_space_db, page.statuses)
     return c.json(page.statuses)
-  } catch (e) {
-    console.error('GET /timelines/all failed:', e)
-    return c.json({ error: 'Internal Server Error', detail: String(e) }, 500)
+  } catch {
+    console.error(JSON.stringify({ event: 'all_timeline_unavailable', source: 'local' }))
+    return c.json({ error: 'Internal Server Error' }, 500)
   }
 })
 

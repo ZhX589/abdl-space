@@ -8,24 +8,101 @@ import type { Env } from '../types/index.ts'
 
 const NBW_BASE_URL = 'https://www.newbabyworld.top/api/abdl-space/api.php'
 
-/**
- * NBW S2S API 请求封装
- * 所有参数通过 query string 传递，鉴权通过 X-ABDL-API-Key header
- */
+type NBWUnavailableReason = 'http' | 'invalid_json' | 'invalid_response' | 'response_limit' | 'network' | 'timeout' | 'api'
+
+/** Sanitized upstream failure: never retain response bodies, request parameters or credentials. */
+export class NBWUnavailableError extends Error {
+  readonly reason: NBWUnavailableReason
+  readonly upstreamStatus: number | null
+
+  constructor(reason: NBWUnavailableReason, upstreamStatus: number | null = null) {
+    super('NBW service unavailable')
+    this.name = 'NBWUnavailableError'
+    this.reason = reason
+    this.upstreamStatus = upstreamStatus
+  }
+}
+
+async function boundedNBWJson(response: Response, maxBytes: number): Promise<unknown> {
+  if (Number(response.headers.get('Content-Length')) > maxBytes) {
+    void response.body?.cancel().catch(() => {})
+    throw new NBWUnavailableError('response_limit', response.status)
+  }
+  const reader = response.body?.getReader()
+  if (!reader) throw new NBWUnavailableError('invalid_json', response.status)
+  const decoder = new TextDecoder('utf-8', { fatal: true })
+  let bytes = 0
+  let text = ''
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      bytes += value.byteLength
+      if (bytes > maxBytes) throw new NBWUnavailableError('response_limit', response.status)
+      text += decoder.decode(value, { stream: true })
+    }
+    return JSON.parse(text + decoder.decode())
+  } finally {
+    void reader.cancel().catch(() => {})
+    reader.releaseLock()
+  }
+}
+
+/** NBW S2S API: fixed HTTPS origin, no redirects, optional deadline/body cap for timeline reads only. */
 export async function nbwS2SRequest(
   env: Env,
   action: string,
-  params?: Record<string, string>
+  params?: Record<string, string>,
+  options: { timeoutMs?: number; maxBytes?: number } = {},
 ): Promise<{ code: number; msg: string; data: unknown }> {
   const query = new URLSearchParams({ action, ...params } as Record<string, string>)
-  const res = await fetch(`${NBW_BASE_URL}?${query}`, {
-    method: 'GET',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-ABDL-API-Key': env.NBW_API_KEY || '',
-    },
-  })
-  return res.json()
+  const controller = new AbortController()
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const request = async () => {
+    const res = await fetch(`${NBW_BASE_URL}?${query}`, {
+      method: 'GET',
+      redirect: 'manual',
+      ...(options.timeoutMs === undefined ? {} : { signal: controller.signal }),
+      headers: {
+        'Content-Type': 'application/json',
+        'X-ABDL-API-Key': env.NBW_API_KEY || '',
+      },
+    })
+    // Preserve valid 4xx API business errors, but never parse gateway HTML/text or follow redirects.
+    if (res.redirected || (res.url && new URL(res.url).origin !== new URL(NBW_BASE_URL).origin)
+      || (!res.ok && (res.status < 400 || res.status >= 500))) {
+      void res.body?.cancel().catch(() => {})
+      throw new NBWUnavailableError('http', res.status)
+    }
+    let value: unknown
+    try { value = options.maxBytes === undefined ? await res.json() : await boundedNBWJson(res, options.maxBytes) } catch (error) {
+      if (error instanceof NBWUnavailableError) throw error
+      throw new NBWUnavailableError(controller.signal.aborted ? 'timeout' : 'invalid_json', res.status)
+    }
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new NBWUnavailableError('invalid_response', res.status)
+    const result = value as Record<string, unknown>
+    if (typeof result.code !== 'number' || !Number.isInteger(result.code)
+      || (result.msg !== undefined && typeof result.msg !== 'string') || (!res.ok && result.code === 200)) {
+      throw new NBWUnavailableError('invalid_response', res.status)
+    }
+    return { code: result.code, msg: typeof result.msg === 'string' ? result.msg : '', data: result.data ?? null }
+  }
+  try {
+    if (options.timeoutMs === undefined) return await request()
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        controller.abort()
+        reject(new NBWUnavailableError('timeout'))
+      }, options.timeoutMs)
+    })
+    return await Promise.race([request(), deadline])
+  } catch (error) {
+    if (error instanceof NBWUnavailableError) throw error
+    throw new NBWUnavailableError(controller.signal.aborted ? 'timeout' : 'network')
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+    if (options.timeoutMs !== undefined) controller.abort()
+  }
 }
 
 /**
