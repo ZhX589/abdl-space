@@ -11,9 +11,9 @@
 - 前端 Wiki 页面已拆分到独立仓库
 - A 站点（朋友的功能站）通过 API 获取数据并提交评分、感受、帖子等
 
-## 宝宝相册（2026-10-05，生产数据库已迁移，后端 main 自动部署待核验）
+## 宝宝相册（2026-10-05，后端 main 已合并并自动部署，App 未正式发布）
 
-功能实现来自后端与 Android 的 `feat/baby-albums`；网页保留标准文字提示，不新增网页相册界面。2026-10-05 用户授权仅后端提交并通过 PR 合入 `main`、推送触发 Workers Builds。本轮已先执行生产增量 migration 0071，PR/main/build 状态以 [生产交付记录](docs/baby-albums-production-2026-10-05.md) 为准；未手动部署 Worker，Android/网页不提交或发布，未更新 latest。接口见 [宝宝相册 API](docs/baby-albums-api.md)。
+功能实现来自后端与 Android 的 `feat/baby-albums`；网页保留标准文字提示，不新增网页相册界面。2026-10-05 用户授权仅后端提交并通过 PR 合入 `main`、推送触发 Workers Builds。本轮先执行生产增量 migration 0071，再通过 PR #18 squash 合入 main `92a15f3`，Workers Builds成功并100%启用版本 `374248ab-063d-4871-9b06-a27ed9a9b087`；线上相册401/no-store、容量权益200、原时间线200均已核验。详见 [生产交付记录](docs/baby-albums-production-2026-10-05.md)。未手动部署 Worker，Android/网页不提交或发布，未更新 latest。接口见 [宝宝相册 API](docs/baby-albums-api.md)。
 
 | 内容 | 状态 |
 |:---|:---:|
@@ -24,7 +24,7 @@
 | 新帖与历史图分批可重试私有复制、明确归属/固定 COS host/实际字节尺寸、540预览及 VP8L/VP8、先预占后复制 | ✅ 本地实现 |
 | 秒级自定义时间/默认上传时间；免费预览续签、删除照片恢复容量；Android个人主页Tab、上传/详情/选择页、液态入口、原查看器评论/键盘避让 | ✅ 本地实现与专项验证；Android综合101/101、debug APK构建通过 |
 | 生产增量0071与容量视图（874名当前用户，未批量导入/创建相册） | ✅ 已执行并只读核验 |
-| 后端 PR/main 推送与 Workers Builds 自动部署 | ⏳ 本轮交付中，以生产记录及远端状态为准 |
+| 后端 PR/main 推送与 Workers Builds 自动部署、直连/主站代理鉴权和旧时间线核验 | ✅ PR #18/main92a15f3，生产Worker版本669已启用 |
 | 真实 COS/双账号额度闭环、真机主题/评论视觉及正式 App 发布 | ⏳ 未执行 |
 
 后端验证：未修改源码快照基线 **392 pass / 9 fail**；最终全量 **438 pass / 9 fail**，新增46项通过，失败集合仍为既有 bootstrap1、admin-identities strip-only1、QQ4、uploads3。一次并行负载重跑出现既有 novel-authoring 72h 时间边界失败，独立及完整重跑均恢复，未修改该业务。`tsc --allowImportingTsExtensions --types node` 基线321、最终317个既有诊断，按文件与诊断码对比无新增；不是全量类型检查通过。相册 scoped ESLint、`git diff --check` 和 Worker dry-run 打包通过，未执行部署。
