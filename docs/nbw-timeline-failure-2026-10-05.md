@@ -27,7 +27,19 @@
 - 后端全量450通过/9个既有失败；修复前438通过/9失败，新增12个通过，失败集合未变。
 - 相册权限/导入/卡片46/46通过。
 - scoped ESLint、diff检查与Worker dry-run通过。
-- 生产行为仍以发布后的实际核验为准；本文件记录本地修复，不声称已经部署。
+- 2026-10-05 已通过 [PR #20](https://github.com/ZhX589/abdl-space/pull/20) 合入 main `8104a40151ef56054fa35516f6d761e5592e515f`；生产自动部署及下方只读核验已完成。
+
+## 生产部署与核验
+
+- main 合并时间：`2026-10-05T09:27:23Z`（北京时间17:27:23）。
+- Workers Builds成功：`630e5acf-fb01-4a1b-84e9-cedce16a465d`，检查完成 `2026-10-05T09:27:49Z`。
+- Active deployment `b112b1de-07cb-4c6a-a372-67827639850a`，创建于 `2026-10-05T09:27:43.864966Z`；版本 `bd35b25f-4003-4748-8fac-73ea834c7bf1`，100%流量。
+- API直连与主站代理分别核验原生code32：all首载20条200；all首载40条200（本站39、交友1）；40条续页200（本站35、交友5），前后页ID无重复。
+- 响应保持 `private, no-store` 和Link，均标记 `X-ABDL-Timeline-Degraded: nbw`。普通公开时间线20条200；相册quota未登录401/no-store。
+- 专属NBW仍502安全JSON `{error: NBW 服务暂时不可用, code: nbw_unavailable}`，无内部detail；没有关闭TLS校验或伪造上游恢复。
+- 一次客户端只读核验遭临时SSL EOF，原证书校验下重试成功；没有修改网络/TLS配置。
+- Android源码独立 [PR #5](https://github.com/ZYongX09/ABDL-Space-APP/pull/5) 合入main `32738ebd`，不进develop、不发布正式APK/latest。
+- 遗留后端仓库Cloudflare Pages检查仍失败，Workers Builds与active部署明确成功，本轮未改Pages配置。
 
 ## 边界
 
