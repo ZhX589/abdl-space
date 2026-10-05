@@ -521,6 +521,7 @@ export interface SponsorQuota { limit: number; used: number; remaining: number; 
 /** Private sponsor center state. */
 export interface SponsorMe {
   sponsor: SponsorIdentity; quota: SponsorQuota; notice_required: boolean; config_version: number; claimed_benefit_ids: string[]
+  album_quota?: import('./albums.ts').StorageQuota | null
 }
 /** Code listing never contains a redeemable code. */
 export type SponsorCodeState = 'active' | 'disabled' | 'expired' | 'redeemed'

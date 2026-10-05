@@ -21,7 +21,9 @@ import { syncPostToNBW } from '../lib/nbw-sync.ts'
 import { dispatchStatusNotifications } from '../lib/status-notify.ts'
 import { resolveGeoFromClient, resolveProvinceFromIP } from '../lib/post-geo.ts'
 import { resolveProvinceFromBaiduIpCached } from '../lib/baidu-ip.ts'
-import { geoFromPost, attachDisplayedBadges } from './converter.ts'
+import { ALBUM_POST_FALLBACK, geoFromPost, attachDisplayedBadges, hydrateAlbumPostResponse, stripCachedAlbumPostUpdates } from './converter.ts'
+import { isNativeAppClient } from '../lib/app-clients.ts'
+import { bestEffortImportAlbumHistory } from '../lib/album-history.ts'
 import { getLastStatusProvinces } from './last-province.ts'
 import { nbwS2SRequest } from '../lib/nbw.ts'
 import { handleNBWTimeline, buildNBWTimelineParams } from './nbw-timeline.ts'
@@ -81,6 +83,12 @@ function buildLinkHeader(
 }
 
 const mastodon = new Hono<AppType>()
+
+// Hydrate after every route/cache/notice transformation, never storing signed album payloads in snapshots.
+mastodon.use('*', async (c, next) => {
+  await next()
+  c.res = await hydrateAlbumPostResponse(c.env, c.res, isNativeAppClient(c.req.header('User-Agent')))
+})
 
 mastodon.use('/timelines/*', appClientCacheMiddleware)
 mastodon.use('/abdl/nbw/sync-threads', appClientCacheMiddleware)
@@ -1152,6 +1160,9 @@ mastodon.post('/statuses', async (c) => {
     return c.json({ error: 'Failed to attach media to status' }, 500)
   }
 
+  // Separate private copies are best-effort background work; public post assets are never reclassified.
+  if (resolvedMedia.length) c.executionCtx.waitUntil(bestEffortImportAlbumHistory(c.env, user.sub, { postId, limit: 4 }))
+
   // Fetch the created post with all fields
   const post = await queryOne<Record<string, unknown>>(
     c.env.abdl_space_db,
@@ -1857,6 +1868,7 @@ mastodon.get('/timelines/public', async (c) => {
     // D1 配额/故障：降级返回最近成功快照（匿名化公开数据），而不是给首页 500。
     const snapshot = await kvCacheGet<Record<string, unknown>[]>(c.env.NOTICE_KV, PUBLIC_TIMELINE_SNAPSHOT_KEY)
     if (snapshot) {
+      stripCachedAlbumPostUpdates(snapshot)
       c.header('X-ABDL-Timeline-Fallback', 'snapshot')
       return c.json(snapshot)
     }
@@ -1932,7 +1944,8 @@ mastodon.get('/timelines/public', async (c) => {
     const now = Date.now()
     if (gated === undefined || now - gated >= PUBLIC_TIMELINE_SNAPSHOT_WRITE_GATE_MS) {
       cacheSet(gateKey, now, PUBLIC_TIMELINE_SNAPSHOT_WRITE_GATE_MS)
-      const snapshotBody = publicStatuses.map(s => ({ ...s, favourited: false, bookmarked: false }))
+      const snapshotBody = structuredClone(publicStatuses).map(s => ({ ...s, favourited: false, bookmarked: false }))
+      stripCachedAlbumPostUpdates(snapshotBody)
       await kvCacheSet(c.env.NOTICE_KV, PUBLIC_TIMELINE_SNAPSHOT_KEY, snapshotBody, PUBLIC_TIMELINE_SNAPSHOT_TTL_SEC)
     }
   }
@@ -3576,9 +3589,10 @@ mastodon.put('/statuses/:id', async (c) => {
   if (!resolved || resolved.kind !== 'post') return c.json({ error: 'Record not found' }, 404)
 
   // Check ownership
-  const post = await queryOne<{ user_id: number; has_nsfw: number }>(c.env.abdl_space_db, 'SELECT user_id, has_nsfw FROM posts WHERE id = ?', [resolved.realId])
+  const post = await queryOne<{ user_id: number; has_nsfw: number; content: string }>(c.env.abdl_space_db, 'SELECT user_id, has_nsfw, content FROM posts WHERE id = ?', [resolved.realId])
   if (!post) return c.json({ error: 'Record not found' }, 404)
   if (post.user_id !== user.sub && user.role !== 'admin') return c.json({ error: 'Forbidden' }, 403)
+  if (post.content === ALBUM_POST_FALLBACK) return c.json({ error: '相册更新请通过相册操作，不能作为普通帖子编辑', code: 'use_album_endpoint' }, 409)
 
   let body: {
     status?: string; media_ids?: string[]; sensitive?: boolean; mental_crisis?: boolean; visibility?: string;
@@ -3624,6 +3638,7 @@ mastodon.put('/statuses/:id', async (c) => {
   if (resolvedMedia !== undefined) {
     await run(c.env.abdl_space_db, 'DELETE FROM post_images WHERE post_id = ?', [resolved.realId])
     await insertStatusMedia(c.env.abdl_space_db, resolved.realId, resolvedMedia, body.sensitive === undefined ? post.has_nsfw : body.sensitive ? 1 : 0)
+    if (resolvedMedia.length) c.executionCtx.waitUntil(bestEffortImportAlbumHistory(c.env, post.user_id, { postId: resolved.realId, limit: 4 }))
   }
 
   // Handle poll update

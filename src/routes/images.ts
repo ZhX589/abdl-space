@@ -2,7 +2,7 @@ import { Hono } from 'hono'
 import type { Env, JWTPayload } from '../types/index.ts'
 import { authMiddleware } from '../middleware/auth.ts'
 import { inspectMediaImageDimensions } from '../lib/media-preview.ts'
-import { deleteCompletedUpload, getCompletedUploadReference, uploadLegacyObject } from '../lib/upload-consumer.ts'
+import { assertUploadUnreferenced, deleteCompletedUpload, getCompletedUploadReference, uploadLegacyObject, UploadInUseError } from '../lib/upload-consumer.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
@@ -77,6 +77,14 @@ images.post('/delete', authMiddleware, async (c) => {
     return c.json({ error: '无效的图片上传' }, 400)
   }
 
+  try {
+    await assertUploadUnreferenced(c.env.abdl_space_db, upload)
+  } catch (error) {
+    return error instanceof UploadInUseError
+      ? c.json({ error: '图片仍被内容引用，不能删除', code: 'upload_in_use' }, 409)
+      : c.json({ error: '无法确认图片引用状态', code: 'upload_unavailable' }, 503)
+  }
+
   if (upload.storage_provider === 'cos') {
     try {
       await deleteCompletedUpload({
@@ -87,12 +95,15 @@ images.post('/delete', authMiddleware, async (c) => {
         cos: { secretId: c.env.COS_SECRET_ID, secretKey: c.env.COS_SECRET_KEY, bucket: c.env.COS_BUCKET, region: c.env.COS_REGION },
       })
       return c.json({ message: '已删除' })
-    } catch {
-      return c.json({ error: '删除失败' }, 500)
+    } catch (error) {
+      return error instanceof UploadInUseError
+        ? c.json({ error: '图片仍被内容引用，不能删除', code: 'upload_in_use' }, 409)
+        : c.json({ error: '删除失败' }, 500)
     }
   }
 
   const url = upload.public_url
+  if (new URL(url).origin !== IMGBED_URL) return c.json({ error: '无效的图片存储来源' }, 400)
 
   // 从完整 URL 提取文件路径
   let src = url

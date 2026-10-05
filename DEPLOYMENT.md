@@ -6,11 +6,17 @@
 
 安装包已通过既有 R2 桶 `abdl-space-img` 发布到 https://r2.abdl-space.top/apk/ABDL-Space-3.0.0-31.apk，完整回下载哈希验证后写入 latest 元数据与14条日志。首次图床 multipart 上传因上游返回HTML失败，未写版本；成功路径为R2上传及既有JSON版本接口。此次不部署新的Worker代码，不改鉴权或退役策略。分支、签名、测试失败边界及恢复旧metadata方法见 [正式版发布记录](docs/app-release-3.0.0-31-2026-10-03.md)。
 
+## 宝宝相册（0071，2026-10-05 数据库已迁移，后端自动部署交付中）
+
+`feat/baby-albums` 包含独立私有 COS 相册与原子容量账本。现有库先核对赞助者 0062 前置表，再仅审查并应用 `migrations/0071_baby_albums.sql`，随后部署后端，最后发布支持相册的新 App。不要在现有生产库重放完整 schema 或批量 apply 历史迁移。公开相册帖子对网页/旧 App 仍为兼容文字；相册名称、描述和签名预览每次按实时可见性读取。
+
+2026-10-05 用户授权后端合入 main 并触发自动部署；已核验前置表、保存 D1 恢复点并执行生产 migration 0071，等待 PR/main 与 Workers Builds 结果。没有运行本地 Worker 部署、批量 COS 历史复制、APK 发布或 latest 更新。状态及恢复点见 [生产交付记录](docs/baby-albums-production-2026-10-05.md)。容量在取消后仅于实际清理成功时释放；有效历史赞助者若缺少真实方案快照，保守回退周档 5 GiB。历史导入只处理可证明所有权的托管文件，不保证外部/他人链接全量迁移。详细接口、真实双账号/COS/真机验收与发布边界见 [宝宝相册说明](docs/baby-albums-api.md)。
+
 ## 1. 部署架构概述
 
 | 组件 | 域名 | 平台 | 触发方式 |
 |:---|:---|:---|:---|
-| 后端 (API) | `api.abdl-space.top` | Cloudflare Workers | 手动 `wrangler deploy` |
+| 后端 (API) | `api.abdl-space.top` | Cloudflare Workers | 已关联 main 的 Workers Builds；手动 `wrangler deploy` 仅用于另行授权场景 |
 | D1 数据库 | — | Cloudflare D1 | 手动 `wrangler d1 execute --remote` |
 | 环境变量 / 密钥 | — | Cloudflare Workers Secrets | 手动 `wrangler secret put` |
 

@@ -36,6 +36,10 @@ export interface MastodonAccount {
   source?: { note: string; fields: { name: string; value: string; verified_at: string | null }[]; privacy: string; sensitive: boolean; language: string }
 }
 
+import type { AlbumPostUpdate } from '../types/albums.ts'
+/** Shared native album metadata DTO; standard Mastodon fields remain compatible. */
+export type { AlbumPostUpdate } from '../types/albums.ts'
+
 export interface MastodonStatus {
   id: string
   created_at: string
@@ -74,6 +78,7 @@ export interface MastodonStatus {
   text?: string | null
   edited_at?: string | null
   quote?: MastodonStatusQuote | null
+  album_update?: AlbumPostUpdate
 }
 
 export interface MastodonStatusQuote {
