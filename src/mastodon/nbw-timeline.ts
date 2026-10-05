@@ -1,6 +1,6 @@
 import type { Env } from '../types/index.ts'
 import type { Context } from 'hono'
-import { nbwS2SRequest } from '../lib/nbw.ts'
+import { NBWUnavailableError, nbwS2SRequest } from '../lib/nbw.ts'
 import { toStatusFromNBW } from './converter.ts'
 
 type NBWSyncThread = {
@@ -23,7 +23,39 @@ type NBWSyncThread = {
 type NBWSyncData = {
   has_more?: boolean
   next_cursor?: string
-  list?: NBWSyncThread[]
+  list: NBWSyncThread[]
+}
+
+/** Reject malformed upstream timeline data before conversion can break a whole native Status array. */
+export function parseNBWSyncData(value: unknown): NBWSyncData {
+  const invalid = () => new NBWUnavailableError('invalid_response')
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw invalid()
+  const data = value as Record<string, unknown>
+  if (!Array.isArray(data.list) || (data.has_more !== undefined && typeof data.has_more !== 'boolean')
+    || (data.next_cursor !== undefined && typeof data.next_cursor !== 'string')) throw invalid()
+  for (const item of data.list) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) throw invalid()
+    const thread = item as Record<string, unknown>
+    if (!['number', 'string'].includes(typeof thread.tid) || !Number.isSafeInteger(Number(thread.tid)) || Number(thread.tid) <= 0) throw invalid()
+    for (const key of ['forum_name', 'subject', 'abstract', 'author', 'avatar']) {
+      if (thread[key] != null && typeof thread[key] !== 'string') throw invalid()
+    }
+    if (thread.image_list != null) {
+      if (!Array.isArray(thread.image_list)) throw invalid()
+      for (const image of thread.image_list) {
+        if (typeof image === 'string') continue
+        if (!image || typeof image !== 'object' || Array.isArray(image) || typeof image.url !== 'string') throw invalid()
+      }
+    }
+  }
+  return data as NBWSyncData
+}
+
+/** Log only the failing source and bounded failure metadata, never upstream content or credentials. */
+export function logNBWTimelineUnavailable(error: unknown, timeline: 'all' | 'nbw'): void {
+  console.warn(JSON.stringify({ event: 'nbw_timeline_unavailable', source: 'nbw', timeline,
+    reason: error instanceof NBWUnavailableError ? error.reason : 'invalid_response',
+    upstream_status: error instanceof NBWUnavailableError ? error.upstreamStatus : null }))
 }
 
 export type NBWTimelineParams = {
@@ -92,7 +124,7 @@ export async function handleNBWTimeline(
     return c.json({ error: 'NBW API 未配置' }, 503)
   }
 
-  const { limit, fid, orderby, cursor, params } = buildNBWTimelineParams({
+  const { limit, fid, orderby, params } = buildNBWTimelineParams({
     limit: c.req.query('limit'),
     perpage: c.req.query('perpage'),
     max_id: c.req.query('max_id'),
@@ -102,14 +134,14 @@ export async function handleNBWTimeline(
   })
 
   try {
-    const result = await nbwS2SRequest(c.env, 'get_sync_threads', params)
+    const result = await nbwS2SRequest(c.env, 'get_sync_threads', params, { timeoutMs: 5000, maxBytes: 2 * 1024 * 1024 })
     if (result.code !== 200) {
       const status = result.code === 401 || result.code === 403 ? result.code as 401 | 403 : 502
       return c.json({ error: result.msg || 'NBW 请求失败', code: result.code }, status)
     }
 
-    const data = (result.data || {}) as NBWSyncData
-    const statuses = (data.list || []).map((t) => toStatusFromNBW(t))
+    const data = parseNBWSyncData(result.data)
+    const statuses = data.list.map((t) => toStatusFromNBW(t))
 
     const nextLink = data.has_more
       ? buildNBWTimelineNextLink(basePath, data.next_cursor, limit, fid, orderby)
@@ -117,8 +149,8 @@ export async function handleNBWTimeline(
     if (nextLink) c.header('Link', nextLink)
 
     return c.json(statuses)
-  } catch (e) {
-    console.error('NBW timeline failed:', e)
-    return c.json({ error: 'NBW 服务请求失败' }, 502)
+  } catch (error) {
+    logNBWTimelineUnavailable(error, 'nbw')
+    return c.json({ error: 'NBW 服务暂时不可用', code: 'nbw_unavailable' }, 502)
   }
 }

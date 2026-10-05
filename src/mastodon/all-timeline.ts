@@ -12,6 +12,7 @@ export function mergeAllTimelinePage<T extends TimelineStatus>(
   currentFriendMaxId: number | undefined,
   nbwHasMore: boolean,
   nextNBWCursor: string,
+  nbwUnavailable = false,
 ): { statuses: T[]; nextAbdlMaxId: number; nextNBWCursor: string; nextFriendMaxId: number; hasMore: boolean } {
   const statuses = [...abdlStatuses, ...nbwStatuses, ...friendStatuses]
     .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
@@ -35,7 +36,10 @@ export function mergeAllTimelinePage<T extends TimelineStatus>(
   }
 
   let nextCursor: string
-  if (returnedNBW.length < nbwStatuses.length) {
+  if (nbwUnavailable) {
+    // A transient failure cannot consume or exhaust an opaque upstream cursor.
+    nextCursor = currentNBWCursor
+  } else if (returnedNBW.length < nbwStatuses.length) {
     if (lastNBW) {
       const tid = lastNBW.id.replace(/^nbw_/, '')
       nextCursor = `${Math.floor(new Date(lastNBW.created_at).getTime() / 1000)}_${tid}`
@@ -64,6 +68,7 @@ export function mergeAllTimelinePage<T extends TimelineStatus>(
     nextAbdlMaxId,
     nextNBWCursor: nextCursor,
     nextFriendMaxId,
-    hasMore: nextAbdlMaxId !== -1 || nextCursor !== EXHAUSTED_NBW_CURSOR || nextFriendMaxId !== -1,
+    // Do not create an endless/empty continuation page solely to retry an unavailable source.
+    hasMore: nextAbdlMaxId !== -1 || (!nbwUnavailable && nextCursor !== EXHAUSTED_NBW_CURSOR) || nextFriendMaxId !== -1,
   }
 }
