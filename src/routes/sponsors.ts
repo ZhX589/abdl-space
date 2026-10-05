@@ -4,6 +4,7 @@ import { bodyLimit } from 'hono/body-limit'
 import type { SponsorAppType } from '../lib/sponsors.ts'
 import { authorizeSponsorOriginal, claimSponsorBenefit, getSponsorConfig, getSponsorMe, redeemSponsorCode, setSponsorColor, sponsorAuthMiddleware, sponsorErrorResponse, SponsorError } from '../lib/sponsors.ts'
 import type { SponsorPlan } from '../types/index.ts'
+import { getAlbumStorageQuota } from '../lib/albums.ts'
 
 const sponsors = new Hono<SponsorAppType>()
 sponsors.use('*', cors({ origin: origin => ['https://abdl-space.top', 'https://www.abdl-space.top', 'https://m.abdl-space.top', 'https://wiki.abdl-space.top', 'https://abdl-space-mobile.pages.dev', 'http://localhost:5173', 'http://localhost:5174'].includes(origin) ? origin : '', credentials: true, allowHeaders: ['Content-Type', 'Authorization'], allowMethods: ['GET', 'POST', 'PUT', 'OPTIONS'] }))
@@ -13,10 +14,22 @@ sponsors.get('/catalog', async c => {
   const config = await getSponsorConfig(c.env)
   const plans = await c.env.abdl_space_db.prepare('SELECT plan_json FROM sponsor_plans WHERE enabled=1 ORDER BY sort_order,id').all<{ plan_json: string }>()
   c.header('Cache-Control', 'no-store')
-  return c.json({ config, plans: plans.results.map(row => JSON.parse(row.plan_json) as SponsorPlan) })
+  const benefit = { id: 'album_storage', title: '宝宝相册存储与无损上传', description: '免费 3 GiB；周/月/季/年/永久赞助分别为 5/10/20/50/100 GiB。有效赞助者可上传无损原图，过期不会删除已有照片。额度由当前实际赞助方案派生。', status: 'automatic' as const, action: 'none' as const, sort_order: 25 }
+  return c.json({ config: { ...config, benefits: [...config.benefits.filter(item => item.id !== benefit.id), benefit].sort((a, b) => a.sort_order - b.sort_order) }, plans: plans.results.map(row => JSON.parse(row.plan_json) as SponsorPlan) })
 })
 sponsors.use('*', sponsorAuthMiddleware)
-sponsors.get('/me', async c => c.json(await getSponsorMe(c.env, c.get('user').sub)))
+sponsors.get('/me', async c => {
+  const userId = c.get('user').sub
+  const me = await getSponsorMe(c.env, userId)
+  try {
+    const available = await c.env.abdl_space_db.prepare("SELECT name FROM sqlite_master WHERE type='view' AND name='album_storage_entitlements'").first<{ name: string }>()
+    if (!available) return c.json(me) // Old deployments/fixtures keep the existing sponsor response.
+    return c.json({ ...me, album_quota: await getAlbumStorageQuota(c.env, userId) })
+  } catch {
+    console.warn(JSON.stringify({ event: 'sponsor_album_quota_unavailable' }))
+    return c.json({ ...me, album_quota: null }) // Never invent zero usage/free entitlement on a failed read.
+  }
+})
 sponsors.post('/redeem', async c => c.json({ ...await redeemSponsorCode(c.env, c.get('user').sub, await requestBody(c.req.raw)), message: '兑换成功，赞助者身份已更新' }))
 sponsors.put('/color', async c => c.json(await setSponsorColor(c.env, c.get('user').sub, await requestBody(c.req.raw))))
 sponsors.post('/claims', async c => c.json(await claimSponsorBenefit(c.env, c.get('user').sub, await requestBody(c.req.raw))))

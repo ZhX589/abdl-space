@@ -66,6 +66,7 @@ import { sponsorAccountProjectionMiddleware } from './lib/sponsors.ts'
 import babyVerification from './routes/baby-verification.ts'
 import adminBabyVerification from './routes/admin-baby-verification.ts'
 import qq from './routes/qq.ts'
+import albums from './routes/albums.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
@@ -275,6 +276,7 @@ app.route('/api/v1/novels/store', novelStore)
 // 赞助者用户接口与 v1 路由同级（/api/v1/sponsors/*）
 app.route('/api/v1/sponsors', sponsors)
 app.route('/api/v1/baby-verification', babyVerification)
+app.route('/api/v1/albums', albums)
 app.route('/api/admin/baby-verification', adminBabyVerification)
 // 库存管理挂载在核心 /api/admin/sponsors 之前，避免核心路由的中间件先匹配。
 app.route('/api/admin/sponsors/stock', adminSponsorStock)

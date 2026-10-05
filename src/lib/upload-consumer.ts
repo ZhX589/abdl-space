@@ -1,4 +1,5 @@
-import { queryOne, run } from './db.ts'
+import type { D1Database } from '@cloudflare/workers-types'
+import { query, queryOne, run } from './db.ts'
 import { buildMediaObjectKey, validateMediaUpload, type MediaUploadPurpose } from './media-upload.ts'
 import { buildCosObjectUrl, deleteObjectFromCos, putObjectToCos } from './tencent-cos.ts'
 import type { Env } from '../types/index.ts'
@@ -130,6 +131,31 @@ export async function uploadLegacyObject(
 	}
 }
 
+/** A bound public asset cannot be deleted through the standalone image upload endpoint. */
+export class UploadInUseError extends Error {
+  constructor() { super('Upload is still referenced'); this.name = 'UploadInUseError' }
+}
+
+/** Fail closed on unknown reference state; album copies never reference these public media keys. */
+export async function assertUploadUnreferenced(db: D1Database, upload: CompletedUpload): Promise<void> {
+  const urls = [upload.public_url]
+  for (const table of ['post_images', 'comment_images']) {
+    const row = await queryOne<{ count: number }>(db, `SELECT count(*) AS count FROM ${table} WHERE image_url=?`, urls)
+    if (row?.count) throw new UploadInUseError()
+    // Older databases may not have preview columns, but missing tables/read failures must not authorize deletion.
+    const columns = await query<{ name: string }>(db, `PRAGMA table_info(${table})`)
+    if (columns.some(column => column.name === 'preview_url')) {
+      const preview = await queryOne<{ count: number }>(db, `SELECT count(*) AS count FROM ${table} WHERE preview_url=?`, urls)
+      if (preview?.count) throw new UploadInUseError()
+    }
+  }
+  const linked = await queryOne<{ count: number }>(db,
+    'SELECT count(*) AS count FROM media_uploads WHERE id!=? AND (preview_upload_id=? OR preview_object_key=? OR preview_url=?)',
+    [upload.id, upload.id, upload.object_key, upload.public_url])
+  if (linked?.count) throw new UploadInUseError()
+}
+
+/** Delete only unbound owned public COS uploads; imported private album copies are separate objects. */
 export async function deleteCompletedUpload(options: {
 	db: D1Database
 	id: string
@@ -139,6 +165,8 @@ export async function deleteCompletedUpload(options: {
 }): Promise<void> {
 	const upload = await getCompletedUpload(options.db, options.id, options.userId, options.purpose)
 	if (upload.storage_provider !== 'cos') throw new Error('Upload is not stored in COS')
+  if (upload.object_key.startsWith('albums/')) throw new UploadInUseError()
+  await assertUploadUnreferenced(options.db, upload)
 	await deleteObjectFromCos({
 		...options.cos,
 		objectKey: upload.object_key,

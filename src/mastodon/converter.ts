@@ -3,7 +3,9 @@
  * All conversion functions are pure — no DB calls.
  */
 
-import type { MastodonAccount, MastodonStatus, MastodonMediaAttachment, MastodonNotification, MastodonPoll, MastodonStatusQuote } from './types.ts'
+import type { AlbumPostUpdate, MastodonAccount, MastodonStatus, MastodonMediaAttachment, MastodonNotification, MastodonPoll, MastodonStatusQuote } from './types.ts'
+import type { Env } from '../types/index.ts'
+import { createCosGetAuthorization } from '../lib/tencent-cos.ts'
 import { toMastoId } from './shared.ts'
 import { query } from '../lib/db.ts'
 import { buildMediaPreviewUrl } from '../lib/media-preview.ts'
@@ -11,6 +13,8 @@ import { buildMediaPreviewUrl } from '../lib/media-preview.ts'
 const INSTANCE_DOMAIN = 'abdl-space.top'
 const DEFAULT_AVATAR = 'https://img.abdl-space.top/file/system/1781439303787_play_store_512.png'
 const DEFAULT_HEADER = 'https://img.abdl-space.top/file/system/1781439303787_play_store_512.png'
+/** Required fallback for all channels, including native clients which receive extra card metadata. */
+export const ALBUM_POST_FALLBACK = '【宝宝相册】当前渠道不支持查看此内容，请下载最新版ABDL Space APP查看详情'
 
 /** Convert date string to ISO 8601 format for Moshidon compatibility */
 export function toISOString(dateStr: string): string {
@@ -135,13 +139,20 @@ export function toStatus(post: {
   geo_district?: string | null
   poll?: MastodonPoll | null
   linkCard?: MastodonPreviewCard | null
+  album_update?: AlbumPostUpdate | null
+  album_visibility?: string | null
+  is_album_update?: boolean
 }, account: MastodonAccount, opts?: {
   favourited?: boolean
   reblogged?: boolean
+  bookmarked?: boolean
   reblog?: MastodonStatus
 }): MastodonStatus {
-  const contentHtml = formatContent(post.content)
-  const images = post.images || []
+  const isAlbumUpdate = post.is_album_update === true || post.album_update != null || post.content === ALBUM_POST_FALLBACK
+  const content = isAlbumUpdate ? ALBUM_POST_FALLBACK : post.content
+  const contentHtml = formatContent(content)
+  const images = isAlbumUpdate ? [] : post.images || []
+  const albumUpdate = post.album_visibility === 'public' && post.album_update ? post.album_update : undefined
 
   return {
     id: toMastoId('post', post.id),
@@ -174,9 +185,10 @@ export function toStatus(post: {
     account,
     media_attachments: images.map((img, i) => toMediaAttachment(i, img.image_url, img.alt_text, undefined, img.blurhash, img.preview_url, img.storage_provider)),
     mentions: [],
-    tags: extractTags(post.content),
+    tags: isAlbumUpdate ? [] : extractTags(content),
     emojis: [],
-    card: post.linkCard ?? (post.diaper_id ? {
+    ...(albumUpdate ? { album_update: albumUpdate } : {}),
+    card: isAlbumUpdate ? null : post.linkCard ?? (post.diaper_id ? {
       url: `https://abdl-space.top/diaper/${post.diaper_id}`,
       title: `纸尿裤 #${post.diaper_id}`,
       description: '查看纸尿裤详情',
@@ -192,7 +204,7 @@ export function toStatus(post: {
       embed_url: '',
       blurhash: null,
     } : null),
-    poll: post.poll ?? null,
+    poll: isAlbumUpdate ? null : post.poll ?? null,
     edited_at: post.edited_at || null,
   }
 }
@@ -872,5 +884,177 @@ export async function attachDisplayedBadges<T extends { account: MastodonAccount
         if (badge) a.badge = badge
       }
     }
+  }
+}
+
+interface AlbumPostRow {
+  post_id: number
+  owner_id: number
+  visibility: string
+  album_id: string
+  album_name: string | null
+  description: string | null
+  photo_count: number
+  preview_key: string | null
+  width: number | null
+  height: number | null
+  deleted_at: number | null
+}
+
+type AlbumPostEnv = Pick<Env, 'abdl_space_db' | 'COS_SECRET_ID' | 'COS_SECRET_KEY' | 'COS_BUCKET' | 'COS_REGION'>
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+function albumFallback(status: Record<string, unknown>): void {
+  status.content = formatContent(ALBUM_POST_FALLBACK)
+  status.media_attachments = []
+  status.card = null
+  status.poll = null
+  status.tags = []
+  status.spoiler_text = ''
+  if ('text' in status) status.text = ALBUM_POST_FALLBACK
+}
+
+/** Remove dynamic album payloads before caching or returning a snapshot, regardless of response size. */
+export function stripCachedAlbumPostUpdates(payload: unknown): void {
+  const pending: unknown[] = [payload]
+  const seen = new Set<object>()
+  while (pending.length) {
+    const value = pending.pop()
+    if (!value || typeof value !== 'object' || seen.has(value)) continue
+    seen.add(value)
+    if (Array.isArray(value)) { for (const child of value) pending.push(child); continue }
+    if (!isRecord(value)) continue
+    const cached = 'album_update' in value
+    delete value.album_update
+    if (isRecord(value.account) && Array.isArray(value.media_attachments) && typeof value.content === 'string'
+      && (cached || value.content === formatContent(ALBUM_POST_FALLBACK))) albumFallback(value)
+    for (const child of Object.values(value)) pending.push(child)
+  }
+}
+
+/** Refresh nested status album cards from live visibility, never trusting cached response metadata.
+ * The bounded response middleware calls this for profile, timelines, detail, search and notifications.
+ * Missing migration/read/signing failures omit cards and log unavailability without breaking old fixtures.
+ */
+export async function hydrateAlbumPostUpdates(env: AlbumPostEnv, payload: unknown, native: boolean): Promise<boolean> {
+  const statuses = new Map<number, Record<string, unknown>[]>()
+  const pending: unknown[] = [payload]
+  const seen = new Set<object>()
+  const changed = { value: false }
+  while (pending.length) {
+    const value = pending.pop()
+    if (!value || typeof value !== 'object' || seen.has(value)) continue
+    seen.add(value)
+    if (Array.isArray(value)) { for (const child of value) pending.push(child); continue }
+    if (!isRecord(value)) continue
+    for (const child of Object.values(value)) pending.push(child)
+    if (!isRecord(value.account) || typeof value.content !== 'string' || !Array.isArray(value.media_attachments)) continue
+    if ('album_update' in value || value.content === formatContent(ALBUM_POST_FALLBACK)) {
+      delete value.album_update
+      albumFallback(value)
+      changed.value = true
+    }
+    const match = typeof value.id === 'string' ? /^p_([1-9][0-9]*)$/.exec(value.id) : null
+    const id = match ? Number(match[1]) : 0
+    if (!Number.isSafeInteger(id) || id <= 0 || (!statuses.has(id) && statuses.size >= 500)) continue
+    statuses.set(id, [...statuses.get(id) ?? [], value])
+  }
+  const ids = [...statuses.keys()]
+  if (!ids.length) return changed.value
+  const signedCovers = new Map<number, { key: string; url: string }>()
+  try {
+    for (let offset = 0; offset < ids.length; offset += 80) {
+      const chunk = ids.slice(offset, offset + 80)
+      const rows = await query<AlbumPostRow>(env.abdl_space_db, `SELECT b.post_id, a.owner_id, a.visibility, a.id AS album_id,
+        CASE WHEN a.visibility='public' THEN a.name END AS album_name,
+        CASE WHEN a.visibility='public' THEN b.description END AS description,
+        (SELECT count(*) FROM album_photos active WHERE active.batch_id=b.id AND active.deleted_at IS NULL) AS photo_count,
+        CASE WHEN a.visibility='public' THEN p.preview_key END AS preview_key,
+        CASE WHEN a.visibility='public' THEN p.width END AS width,
+        CASE WHEN a.visibility='public' THEN p.height END AS height,
+        a.deleted_at AS deleted_at
+        FROM album_batches b JOIN albums a ON a.id=b.album_id AND a.owner_id=b.owner_id
+        LEFT JOIN album_photos p ON p.id=(SELECT cover.id FROM album_photos cover
+          WHERE cover.batch_id=b.id AND cover.owner_id=a.owner_id AND cover.deleted_at IS NULL ORDER BY cover.sort_order, cover.id LIMIT 1)
+        WHERE b.status='published' AND b.post_id IN (${chunk.map(() => '?').join(',')})`, chunk)
+      for (const row of rows) {
+        const targets = statuses.get(row.post_id) ?? []
+        for (const status of targets) { delete status.album_update; albumFallback(status) }
+        changed.value = true
+        if (!native || row.visibility !== 'public' || row.deleted_at !== null || !row.preview_key || !row.album_name || row.photo_count < 1) continue
+        // An album key is never a public URL and must remain in the server-owned owner's namespace.
+        if (!row.preview_key.startsWith(`albums/${row.owner_id}/`)) continue
+        const authorization = await createCosGetAuthorization({
+          secretId: env.COS_SECRET_ID, secretKey: env.COS_SECRET_KEY, bucket: env.COS_BUCKET, region: env.COS_REGION,
+          objectKey: row.preview_key, contentType: 'application/octet-stream', expiresInSeconds: 60,
+        })
+        signedCovers.set(row.post_id, { key: row.preview_key, url: authorization.url })
+      }
+    }
+    // Signing is asynchronous. Re-read current public state AFTER every signature, not cached titles/ACL.
+    const signedIds = [...signedCovers.keys()]
+    for (let offset = 0; offset < signedIds.length; offset += 80) {
+      const chunk = signedIds.slice(offset, offset + 80)
+      const current = await query<AlbumPostRow>(env.abdl_space_db, `SELECT b.post_id,a.owner_id,a.visibility,a.id AS album_id,
+        a.name AS album_name,b.description,
+        (SELECT count(*) FROM album_photos active WHERE active.batch_id=b.id AND active.deleted_at IS NULL) AS photo_count,
+        p.preview_key,p.width,p.height,a.deleted_at
+        FROM album_batches b JOIN albums a ON a.id=b.album_id AND a.owner_id=b.owner_id
+        JOIN album_photos p ON p.id=(SELECT cover.id FROM album_photos cover WHERE cover.batch_id=b.id
+          AND cover.owner_id=a.owner_id AND cover.deleted_at IS NULL ORDER BY cover.sort_order,cover.id LIMIT 1)
+        WHERE b.status='published' AND a.visibility='public' AND a.deleted_at IS NULL
+        AND b.post_id IN (${chunk.map(() => '?').join(',')})`, chunk)
+      for (const row of current) {
+        const cover = signedCovers.get(row.post_id)
+        if (!cover || cover.key !== row.preview_key || !row.album_name || row.photo_count < 1) continue
+        const metadata: AlbumPostUpdate = { album_id: row.album_id, album_name: row.album_name, description: row.description ?? '',
+          photo_count: row.photo_count, cover_url: cover.url, width: row.width ?? 0, height: row.height ?? 0 }
+        for (const status of statuses.get(row.post_id) ?? []) {
+          if (isRecord(status.account) && Number(status.account.id) === row.owner_id) status.album_update = metadata
+        }
+      }
+    }
+  } catch {
+    // Previously attached cards must not survive partial failure or an unavailable migration.
+    for (const targets of statuses.values()) for (const status of targets) delete status.album_update
+    console.warn(JSON.stringify({ event: 'album_post_metadata_unavailable' }))
+  }
+  return changed.value
+}
+
+/** Bounded final-response hydration leaves pagination/CORS headers and unrelated JSON intact. */
+export async function hydrateAlbumPostResponse(env: AlbumPostEnv, response: Response, native: boolean): Promise<Response> {
+  if (!response.ok || !response.headers.get('Content-Type')?.includes('application/json') || !response.body) return response
+  const maxBytes = 2 * 1024 * 1024
+  if (Number(response.headers.get('Content-Length')) > maxBytes) return response
+  const reader = response.clone().body!.getReader()
+  const chunks: Uint8Array[] = []
+  const size = { bytes: 0 }
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      size.bytes += value.byteLength
+      if (size.bytes > maxBytes) { void reader.cancel().catch(() => {}); return response }
+      chunks.push(value)
+    }
+    const bytes = new Uint8Array(size.bytes)
+    const position = { offset: 0 }
+    for (const chunk of chunks) { bytes.set(chunk, position.offset); position.offset += chunk.byteLength }
+    const payload: unknown = JSON.parse(new TextDecoder().decode(bytes))
+    if (!await hydrateAlbumPostUpdates(env, payload, native)) return response
+    const headers = new Headers(response.headers)
+    headers.delete('Content-Length')
+    headers.delete('ETag')
+    headers.set('Cache-Control', 'private, no-store')
+    return new Response(JSON.stringify(payload), { status: response.status, statusText: response.statusText, headers })
+  } catch {
+    console.warn(JSON.stringify({ event: 'album_post_response_unavailable' }))
+    return response
+  } finally {
+    reader.releaseLock()
   }
 }

@@ -7,29 +7,8 @@ import { rateLimit } from '../lib/rate-limit.ts'
 import { syncPostToNBW } from '../lib/nbw-sync.ts'
 import { sendJPushNotification } from '../lib/jpush.ts'
 import { cacheFeedCount, cacheFeedCountInMemory, getFeedCountFromKv, getFeedCountFromMemory, invalidateFeedCount } from '../lib/post-count-cache.ts'
-
-const IMGBED_URL = 'https://img.abdl-space.top'
-
-/** 从图床删除图片 */
-async function deleteImageFromImgbed(env: Env, imageUrl: string) {
-  const deleteKey = env.IMGBED_DELETE_KEY
-  if (!deleteKey) return
-  let src = imageUrl
-  try {
-    const parsed = new URL(imageUrl)
-    src = parsed.pathname // 保留 /file/ 前缀
-  } catch {
-    // 如果不是完整 URL，确保有 /file/ 前缀
-    if (!imageUrl.startsWith('/file/')) src = `/file/${imageUrl}`
-  }
-  try {
-    await fetch(`${IMGBED_URL}/api/manage/delete`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${deleteKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ src }),
-    })
-  } catch {}
-}
+import { bestEffortImportAlbumHistory } from '../lib/album-history.ts'
+import { ALBUM_POST_FALLBACK } from '../mastodon/converter.ts'
 
 
 // 批量安全查询评论图片（comment_images 表可能缺列/缺表，失败时降级为空）
@@ -566,6 +545,8 @@ posts.post('/', authMiddleware, async (c) => {
     }
   }
 
+  if (images?.length) c.executionCtx.waitUntil(bestEffortImportAlbumHistory(c.env, user.sub, { postId, limit: 4 }))
+
   // 更新帖子的 has_nsfw 标记
   if (postHasNsfw) {
     await run(c.env.abdl_space_db, 'UPDATE posts SET has_nsfw = 1 WHERE id = ?', [postId])
@@ -641,26 +622,9 @@ posts.delete('/:id', authMiddleware, async (c) => {
   const totalExpDeduct = expLogs.reduce((sum, log) => sum + Math.abs(log.amount), 0)
   const totalPointDeduct = pointLogs.reduce((sum, log) => sum + Math.abs(log.amount), 0)
 
-  // 删除帖子图片
-  const postImages = await query<{ image_url: string }>(
-    c.env.abdl_space_db, 'SELECT image_url FROM post_images WHERE post_id = ?', [id]
-  )
-  for (const img of postImages) {
-    await deleteImageFromImgbed(c.env, img.image_url)
-  }
-
-  // 删除评论图片（评论本身由 DB CASCADE 触发删除）
-  const commentRows = await query<{ id: number }>(
-    c.env.abdl_space_db, 'SELECT id FROM post_comments WHERE post_id = ?', [id]
-  )
-  for (const cmt of commentRows) {
-    const cmtImages = await query<{ image_url: string }>(
-      c.env.abdl_space_db, 'SELECT image_url FROM comment_images WHERE comment_id = ?', [cmt.id]
-    )
-    for (const img of cmtImages) {
-      await deleteImageFromImgbed(c.env, img.image_url)
-    }
-  }
+  // Removing a post unlinks rows only. URLs can be copied/foreign/shared, so never delete
+  // their storage by path here. Owned unreferenced uploads use the explicit image-delete API;
+  // imported album objects are independent private copies with no cascading source FK.
 
   // 清除转发引用，避免 FK 约束失败
   await run(c.env.abdl_space_db, 'UPDATE posts SET repost_id = NULL WHERE repost_id = ?', [id])
@@ -727,13 +691,7 @@ posts.delete('/:postId/comments/:commentId', authMiddleware, async (c) => {
   const totalExpDeduct = expLogs.reduce((sum, log) => sum + Math.abs(log.amount), 0)
   const totalPointDeduct = pointLogs.reduce((sum, log) => sum + Math.abs(log.amount), 0)
 
-  // 删除评论图片
-  const cmtImages = await query<{ image_url: string }>(
-    c.env.abdl_space_db, 'SELECT image_url FROM comment_images WHERE comment_id = ?', [commentId]
-  )
-  for (const img of cmtImages) {
-    await deleteImageFromImgbed(c.env, img.image_url)
-  }
+  // Comment deletion unlinks references, never remotely deletes arbitrary/shared asset URLs.
 
   // 扣回经验/积分
   const batchOps = [
@@ -773,13 +731,14 @@ posts.patch('/:id', authMiddleware, async (c) => {
   const id = parseInt(c.req.param('id') || '')
   const body = await c.req.json<{ content: string }>()
 
-  const post = await queryOne<{ id: number; user_id: number }>(
-    c.env.abdl_space_db, 'SELECT id, user_id FROM posts WHERE id = ?', [id]
+  const post = await queryOne<{ id: number; user_id: number; content: string }>(
+    c.env.abdl_space_db, 'SELECT id, user_id, content FROM posts WHERE id = ?', [id]
   )
   if (!post) return c.json({ error: 'Post not found' }, 404)
   if (user.role !== 'admin' && post.user_id !== user.sub) {
     return c.json({ error: 'Not authorized' }, 403)
   }
+  if (post.content === ALBUM_POST_FALLBACK) return c.json({ error: '相册更新请通过相册操作，不能作为普通帖子编辑', code: 'use_album_endpoint' }, 409)
 
   if (!body.content || !body.content.trim() || body.content.length > 5000) {
     return c.json({ error: 'Content must be 1-5000 characters' }, 400)

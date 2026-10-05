@@ -1165,3 +1165,512 @@ CREATE TABLE IF NOT EXISTS site_settings (
 );
 INSERT OR IGNORE INTO site_settings(key, value) VALUES ('app_client_policy',
   '{"enabled":false,"deprecated_version_codes":[],"block_unversioned":false,"update_message":"当前 App 版本已停止支持，请更新到最新版本后继续使用。"}');
+
+-- Sponsor core prerequisites for standalone album schema (migration 0062)
+-- Standalone/replay-safe sponsor core. Never modifies users.role.
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE IF NOT EXISTS sponsor_settings (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  version INTEGER NOT NULL CHECK (version > 0),
+  config_json TEXT NOT NULL CHECK (json_valid(config_json))
+);
+CREATE TABLE IF NOT EXISTS sponsor_plans (
+  id TEXT PRIMARY KEY NOT NULL,
+  version INTEGER NOT NULL CHECK (version > 0),
+  enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+  sort_order INTEGER NOT NULL,
+  plan_json TEXT NOT NULL CHECK (json_valid(plan_json))
+);
+CREATE INDEX IF NOT EXISTS sponsor_plans_enabled ON sponsor_plans(enabled, sort_order, id);
+CREATE TABLE IF NOT EXISTS sponsor_memberships (
+  user_id INTEGER PRIMARY KEY REFERENCES users(id),
+  permanent INTEGER NOT NULL DEFAULT 0 CHECK (permanent IN (0, 1)),
+  expires_at INTEGER,
+  plan_name TEXT,
+  color_key TEXT,
+  updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE TABLE IF NOT EXISTS sponsor_code_batches (
+  id TEXT PRIMARY KEY NOT NULL,
+  operation_id TEXT NOT NULL UNIQUE,
+  request_hash TEXT NOT NULL,
+  plan_id TEXT NOT NULL REFERENCES sponsor_plans(id),
+  count INTEGER NOT NULL CHECK (count BETWEEN 1 AND 200),
+  source TEXT NOT NULL CHECK (source IN ('admin', 'afdian')),
+  actor_id TEXT,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE TABLE IF NOT EXISTS sponsor_codes (
+  id TEXT PRIMARY KEY NOT NULL,
+  batch_id TEXT NOT NULL REFERENCES sponsor_code_batches(id),
+  plan_id TEXT NOT NULL REFERENCES sponsor_plans(id),
+  snapshot_json TEXT NOT NULL CHECK (json_valid(snapshot_json)),
+  code_hash TEXT NOT NULL UNIQUE,
+  masked_code TEXT NOT NULL,
+  encrypted_code TEXT NOT NULL,
+  disabled INTEGER NOT NULL DEFAULT 0 CHECK (disabled IN (0, 1)),
+  expires_at INTEGER,
+  redeemed_at INTEGER,
+  redeemed_by INTEGER REFERENCES users(id),
+  operation_id TEXT UNIQUE,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE INDEX IF NOT EXISTS sponsor_codes_batch ON sponsor_codes(batch_id, id);
+CREATE INDEX IF NOT EXISTS sponsor_codes_filter ON sponsor_codes(plan_id, disabled, redeemed_at, expires_at);
+CREATE INDEX IF NOT EXISTS sponsor_codes_redeemer ON sponsor_codes(redeemed_by, redeemed_at);
+CREATE TABLE IF NOT EXISTS sponsor_daily_usage (
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  day_key TEXT NOT NULL,
+  used INTEGER NOT NULL DEFAULT 0 CHECK (used >= 0),
+  bonus INTEGER NOT NULL DEFAULT 0 CHECK (bonus BETWEEN -100000 AND 100000),
+  PRIMARY KEY (user_id, day_key)
+);
+CREATE TABLE IF NOT EXISTS sponsor_notice_acks (
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  notice_version INTEGER NOT NULL,
+  acknowledged_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  PRIMARY KEY (user_id, notice_version)
+);
+CREATE TABLE IF NOT EXISTS sponsor_claims (
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  benefit_id TEXT NOT NULL,
+  operation_id TEXT NOT NULL UNIQUE,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  PRIMARY KEY (user_id, benefit_id)
+);
+CREATE TABLE IF NOT EXISTS sponsor_operations (
+  id TEXT PRIMARY KEY NOT NULL,
+  operation_id TEXT NOT NULL,
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  actor_id TEXT,
+  kind TEXT NOT NULL CHECK (kind IN ('redeem','grant','revoke','quota','claim','original','color')),
+  request_hash TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  code_id TEXT REFERENCES sponsor_codes(id),
+  plan_json TEXT,
+  benefit_id TEXT,
+  color_key TEXT,
+  media_key TEXT,
+  notice_version INTEGER,
+  adjustment INTEGER,
+  day_key TEXT NOT NULL DEFAULT (date('now', '+8 hours')),
+  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  result_json TEXT
+);
+CREATE INDEX IF NOT EXISTS sponsor_operations_user_history ON sponsor_operations(user_id, kind, created_at DESC);
+CREATE INDEX IF NOT EXISTS sponsor_operations_day ON sponsor_operations(day_key, kind);
+CREATE TABLE IF NOT EXISTS sponsor_redemptions (
+  id TEXT PRIMARY KEY NOT NULL REFERENCES sponsor_operations(id),
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  plan_name TEXT NOT NULL,
+  redeemed_at INTEGER NOT NULL,
+  expires_at INTEGER,
+  permanent INTEGER NOT NULL CHECK (permanent IN (0,1))
+);
+CREATE INDEX IF NOT EXISTS sponsor_redemptions_user ON sponsor_redemptions(user_id, redeemed_at DESC, id);
+CREATE TABLE IF NOT EXISTS sponsor_audit (
+  id TEXT PRIMARY KEY NOT NULL,
+  actor_id TEXT,
+  user_id TEXT,
+  action TEXT NOT NULL,
+  reason TEXT NOT NULL CHECK (length(reason) BETWEEN 1 AND 500),
+  created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE INDEX IF NOT EXISTS sponsor_audit_recent ON sponsor_audit(created_at DESC, id);
+CREATE TABLE IF NOT EXISTS sponsor_rate_limits (
+  bucket TEXT PRIMARY KEY NOT NULL,
+  window_start INTEGER NOT NULL,
+  count INTEGER NOT NULL CHECK (count >= 0)
+);
+
+INSERT OR IGNORE INTO sponsor_settings(id, version, config_json) VALUES (1, 1, '{"enabled":false,"version":1,"center_title":"赞助者中心","free_daily_limit":3,"sponsor_daily_limit":25,"timezone":"Asia/Shanghai","notice_version":1,"notice_title":"查看原图须知","notice_body":"原图存储与传输会产生运营成本，赞助将帮助分担这些费用。普通用户每天可查看 {x} 张原图，赞助者每天可查看 {y} 张，今日剩余 {a} 张，{reset} 重置。确认继续后扣减本次查看额度，重复查看同一原图也按次计入。","exhausted_title":"今日原图额度已用完","exhausted_body":"普通用户每天可查看 {x} 张原图，将于 {reset} 重置。","sponsor_exhausted_body":"赞助者每天可查看 {y} 张原图，将于 {reset} 重置。","purchase_title":"赞助须知","purchase_steps":["请选择适合自己的赞助方案，理性赞助。","前往爱发电完成支付后，获取兑换码并返回赞助者中心兑换。","从购买页面返回不代表支付或兑换成功，请以赞助者中心显示为准。"],"minimum_read_seconds":5,"default_color_key":"blue","colors":[{"key":"blue","name":"宝宝蓝","light":"#4E7394","dark":"#B9D9F0","permanent_only":false},{"key":"pink","name":"宝宝粉","light":"#A15E7C","dark":"#F2BED4","permanent_only":false},{"key":"gold","name":"金色","light":"#795500","dark":"#F6D778","permanent_only":true}],"benefits":[{"id":"original","title":"更多原图额度","description":"身份有效期间自动提升每日原图额度。","status":"automatic","action":"original","sort_order":10},{"id":"color","title":"用户名颜色","description":"普通赞助者可选择宝宝蓝或宝宝粉，永久赞助者使用专属金色。","status":"available","action":"color","sort_order":20},{"id":"lottery","title":"赞助者抽奖","description":"敬请期待，当前尚未开放。","status":"coming_soon","action":"none","sort_order":30},{"id":"more","title":"更多权益","description":"更多赞助者权益正在筹备。","status":"coming_soon","action":"none","sort_order":40}]}');
+
+-- Prices, durations and purchase mappings exist only in this backend seed.
+INSERT OR IGNORE INTO sponsor_plans(id,version,enabled,sort_order,plan_json)
+SELECT id,1,1,sort_order,json_object('id',id,'version',1,'name',name,'description',description,'price_minor',price,'currency','CNY','duration_unit',unit,'duration_count',duration,'purchase_url',
+'https://ifdian.net/order/create?product_type=1&plan_id=6d5249c2adcf11f1b96d52540025c377&sku=%5B%7B%22sku_id%22%3A%22'||sku||'%22,%22count%22%3A1%7D%5D&viokrz_ex=0',
+'afdian_plan_id','6d5249c2adcf11f1b96d52540025c377','afdian_sku_id',sku,'enabled',json('true'),'sort_order',sort_order)
+FROM (
+  SELECT 'week' id,'周赞助者' name,'7 天赞助者身份' description,190 price,'day' unit,7 duration,10 sort_order,'6d5b2998adcf11f1982752540025c377' sku
+  UNION ALL SELECT 'month','月赞助者','1 个自然月赞助者身份',590,'month',1,20,'6d62f682adcf11f1b25152540025c377'
+  UNION ALL SELECT 'quarter','季赞助者','3 个自然月赞助者身份',1490,'month',3,30,'6d6ae388adcf11f18ab552540025c377'
+  UNION ALL SELECT 'year','年赞助者','12 个自然月赞助者身份',4990,'month',12,40,'6d72faf0adcf11f186ae52540025c377'
+  UNION ALL SELECT 'permanent','永久赞助者','永久赞助者身份',9900,'permanent',0,50,'6d7a8dd8adcf11f18eea52540025c377'
+);
+
+-- The view is evaluated inside mutation transactions, including the response snapshot.
+-- Refresh derived rules on replay without overwriting settings, memberships or history.
+DROP VIEW IF EXISTS sponsor_me_json;
+DROP VIEW IF EXISTS sponsor_user_state;
+CREATE VIEW sponsor_user_state AS
+SELECT u.id AS user_id,
+  CASE WHEN m.permanent=1 OR m.expires_at>unixepoch() THEN 1 ELSE 0 END AS active,
+  COALESCE(m.permanent,0) AS permanent, m.expires_at, m.plan_name,
+  CASE WHEN m.permanent=1 THEN
+    (SELECT json_extract(value,'$.key') FROM json_each(s.config_json,'$.colors') WHERE json_extract(value,'$.permanent_only')=1 ORDER BY CAST(key AS INTEGER) LIMIT 1)
+    WHEN m.expires_at>unixepoch() THEN COALESCE(
+      (SELECT json_extract(value,'$.key') FROM json_each(s.config_json,'$.colors') WHERE json_extract(value,'$.key')=m.color_key AND json_extract(value,'$.permanent_only')=0),
+      json_extract(s.config_json,'$.default_color_key')) END AS color_key,
+  s.config_json, s.version AS config_version,
+  date('now','+8 hours') AS day_key,
+  unixepoch(date('now','+8 hours','+1 day'),'-8 hours') AS resets_at,
+  COALESCE(d.used,0) AS used,
+  MAX(0,CASE WHEN m.permanent=1 OR m.expires_at>unixepoch() THEN json_extract(s.config_json,'$.sponsor_daily_limit') ELSE json_extract(s.config_json,'$.free_daily_limit') END+COALESCE(d.bonus,0)) AS quota_limit
+FROM users u CROSS JOIN sponsor_settings s
+LEFT JOIN sponsor_memberships m ON m.user_id=u.id
+LEFT JOIN sponsor_daily_usage d ON d.user_id=u.id AND d.day_key=date('now','+8 hours')
+WHERE s.id=1;
+CREATE VIEW IF NOT EXISTS sponsor_me_json AS
+SELECT v.user_id, json_object(
+  'sponsor',json_object('active',json(CASE WHEN active=1 THEN 'true' ELSE 'false' END),'permanent',json(CASE WHEN permanent=1 THEN 'true' ELSE 'false' END),
+  'expires_at',CASE WHEN permanent=1 THEN NULL ELSE expires_at END,'plan_name',plan_name,
+  'color_key',(SELECT json_extract(value,'$.key') FROM json_each(config_json,'$.colors') WHERE json_extract(value,'$.key')=color_key AND active=1 AND (permanent=1 OR json_extract(value,'$.permanent_only')=0)),
+  'color_light',(SELECT json_extract(value,'$.light') FROM json_each(config_json,'$.colors') WHERE json_extract(value,'$.key')=color_key AND active=1 AND (permanent=1 OR json_extract(value,'$.permanent_only')=0)),
+  'color_dark',(SELECT json_extract(value,'$.dark') FROM json_each(config_json,'$.colors') WHERE json_extract(value,'$.key')=color_key AND active=1 AND (permanent=1 OR json_extract(value,'$.permanent_only')=0))),
+  'quota',json_object('limit',quota_limit,'used',used,'remaining',MAX(0,quota_limit-used),'resets_at',resets_at,'day_key',day_key),
+  'notice_required',json(CASE WHEN active=0 AND NOT EXISTS(SELECT 1 FROM sponsor_notice_acks a WHERE a.user_id=v.user_id AND a.notice_version=json_extract(config_json,'$.notice_version')) THEN 'true' ELSE 'false' END),
+  'config_version',config_version,
+  'claimed_benefit_ids',json((SELECT json_group_array(benefit_id) FROM (SELECT benefit_id FROM sponsor_claims WHERE user_id=v.user_id ORDER BY benefit_id)))
+) AS result_json FROM sponsor_user_state v;
+
+DROP TRIGGER IF EXISTS sponsor_operation_validate;
+CREATE TRIGGER sponsor_operation_validate BEFORE INSERT ON sponsor_operations
+WHEN NOT EXISTS (SELECT 1 FROM sponsor_operations WHERE id=NEW.id)
+BEGIN
+  SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM sponsor_settings WHERE id=1) THEN RAISE(ABORT,'sponsors_unavailable') END;
+  SELECT CASE WHEN NEW.kind NOT IN ('revoke','quota') AND (SELECT json_extract(config_json,'$.enabled') FROM sponsor_settings WHERE id=1)!=1 THEN RAISE(ABORT,'sponsors_disabled') END;
+  SELECT CASE WHEN NEW.day_key!=date('now','+8 hours') OR ABS(NEW.created_at-unixepoch())>60 THEN RAISE(ABORT,'operation_expired') END;
+  SELECT CASE WHEN NEW.kind IN ('redeem','grant') AND EXISTS(SELECT 1 FROM sponsor_memberships WHERE user_id=NEW.user_id AND permanent=1) THEN RAISE(ABORT,'already_permanent') END;
+  SELECT CASE WHEN NEW.kind='redeem' AND NOT EXISTS(SELECT 1 FROM sponsor_codes WHERE id=NEW.code_id AND disabled=0 AND redeemed_at IS NULL AND (expires_at IS NULL OR expires_at>unixepoch()) AND snapshot_json=NEW.plan_json) THEN RAISE(ABORT,'code_unavailable') END;
+  SELECT CASE WHEN NEW.kind='grant' AND NOT EXISTS(SELECT 1 FROM sponsor_plans WHERE id=json_extract(NEW.plan_json,'$.id') AND enabled=1 AND plan_json=NEW.plan_json) THEN RAISE(ABORT,'plan_changed') END;
+  SELECT CASE WHEN NEW.kind IN ('color','claim') AND NOT EXISTS(SELECT 1 FROM sponsor_user_state WHERE user_id=NEW.user_id AND active=1) THEN RAISE(ABORT,'sponsor_required') END;
+  SELECT CASE WHEN NEW.kind='color' AND NOT EXISTS(SELECT 1 FROM sponsor_user_state v,json_each(v.config_json,'$.colors') c WHERE user_id=NEW.user_id AND json_extract(c.value,'$.key')=NEW.color_key AND json_extract(c.value,'$.permanent_only')=permanent AND (permanent=0 OR NEW.color_key=v.color_key)) THEN RAISE(ABORT,'invalid_color') END;
+  SELECT CASE WHEN NEW.kind='claim' AND NOT EXISTS(SELECT 1 FROM sponsor_settings s,json_each(s.config_json,'$.benefits') b WHERE json_extract(b.value,'$.id')=NEW.benefit_id AND json_extract(b.value,'$.status')='available' AND json_extract(b.value,'$.action')='claim') THEN RAISE(ABORT,'benefit_unavailable') END;
+  SELECT CASE WHEN NEW.kind='original' AND EXISTS(SELECT 1 FROM sponsor_user_state v WHERE user_id=NEW.user_id AND active=0 AND NOT EXISTS(SELECT 1 FROM sponsor_notice_acks a WHERE a.user_id=NEW.user_id AND a.notice_version=json_extract(v.config_json,'$.notice_version')) AND (NEW.notice_version IS NULL OR NEW.notice_version!=json_extract(v.config_json,'$.notice_version'))) THEN RAISE(ABORT,'notice_required') END;
+  SELECT CASE WHEN NEW.kind='original' AND EXISTS(SELECT 1 FROM sponsor_user_state WHERE user_id=NEW.user_id AND used>=quota_limit) THEN RAISE(ABORT,'quota_exhausted') END;
+  SELECT CASE WHEN NEW.kind='quota' AND (NEW.adjustment IS NULL OR ABS(NEW.adjustment)>100000 OR ABS(COALESCE((SELECT bonus FROM sponsor_daily_usage WHERE user_id=NEW.user_id AND day_key=NEW.day_key),0)+NEW.adjustment)>100000) THEN RAISE(ABORT,'invalid_adjustment') END;
+END;
+
+CREATE TRIGGER IF NOT EXISTS sponsor_operation_apply AFTER INSERT ON sponsor_operations
+BEGIN
+  INSERT INTO sponsor_memberships(user_id) VALUES(NEW.user_id) ON CONFLICT(user_id) DO NOTHING;
+  -- Read the latest expiry under SQLite's write transaction. Calendar months clamp to
+  -- the target month's last day in Asia/Shanghai, retaining the time of day.
+  UPDATE sponsor_memberships SET
+    expires_at=CASE WHEN json_extract(NEW.plan_json,'$.duration_unit')='permanent' THEN NULL ELSE (
+      WITH base AS (SELECT MAX(COALESCE(expires_at,0),NEW.created_at) AS ts),
+      duration AS (SELECT json_extract(NEW.plan_json,'$.duration_count') AS n),
+      target AS (SELECT datetime(ts,'unixepoch','+8 hours') AS local, date(ts,'unixepoch','+8 hours','start of month','+'||n||' months') AS month_start FROM base,duration)
+      SELECT CASE WHEN json_extract(NEW.plan_json,'$.duration_unit')='day' THEN ts+n*86400 ELSE
+        unixepoch(month_start,'+'||(MIN(CAST(strftime('%d',local) AS INTEGER),CAST(strftime('%d',month_start,'+1 month','-1 day') AS INTEGER))-1)||' days',strftime('%H hours',local),strftime('%M minutes',local),strftime('%S seconds',local),'-8 hours') END
+      FROM base,duration,target
+    ) END,
+    permanent=CASE WHEN json_extract(NEW.plan_json,'$.duration_unit')='permanent' THEN 1 ELSE 0 END,
+    plan_name=json_extract(NEW.plan_json,'$.name'),updated_at=NEW.created_at
+    WHERE user_id=NEW.user_id AND NEW.kind IN ('redeem','grant');
+  UPDATE sponsor_codes SET redeemed_at=NEW.created_at,redeemed_by=NEW.user_id,operation_id=NEW.id WHERE id=NEW.code_id AND NEW.kind='redeem';
+  INSERT INTO sponsor_redemptions(id,user_id,plan_name,redeemed_at,expires_at,permanent)
+    SELECT NEW.id,user_id,plan_name,NEW.created_at,expires_at,permanent FROM sponsor_memberships WHERE user_id=NEW.user_id AND NEW.kind IN ('redeem','grant');
+  UPDATE sponsor_memberships SET permanent=0,expires_at=NULL,plan_name=NULL,color_key=NULL,updated_at=NEW.created_at WHERE user_id=NEW.user_id AND NEW.kind='revoke';
+  UPDATE sponsor_memberships SET color_key=NEW.color_key,updated_at=NEW.created_at WHERE user_id=NEW.user_id AND NEW.kind='color';
+  INSERT INTO sponsor_claims(user_id,benefit_id,operation_id) SELECT NEW.user_id,NEW.benefit_id,NEW.id WHERE NEW.kind='claim' ON CONFLICT(user_id,benefit_id) DO NOTHING;
+  INSERT INTO sponsor_daily_usage(user_id,day_key,used,bonus)
+    SELECT NEW.user_id,NEW.day_key,
+      CASE WHEN NEW.kind='original' THEN 1 ELSE 0 END,
+      CASE WHEN NEW.kind='quota' THEN COALESCE(NEW.adjustment,0) ELSE 0 END
+    WHERE NEW.kind IN ('original','quota')
+    ON CONFLICT(user_id,day_key) DO UPDATE SET used=used+excluded.used,bonus=bonus+excluded.bonus;
+  INSERT INTO sponsor_notice_acks(user_id,notice_version)
+    SELECT NEW.user_id,json_extract(config_json,'$.notice_version') FROM sponsor_user_state WHERE user_id=NEW.user_id AND active=0 AND NEW.kind='original'
+    ON CONFLICT(user_id,notice_version) DO NOTHING;
+  INSERT INTO sponsor_audit(id,actor_id,user_id,action,reason) VALUES(NEW.id,NEW.actor_id,CAST(NEW.user_id AS TEXT),NEW.kind,NEW.reason);
+  UPDATE sponsor_operations SET result_json=(SELECT result_json FROM sponsor_me_json WHERE user_id=NEW.user_id) WHERE id=NEW.id;
+END;
+
+-- Baby albums isolated private storage (migration 0071)
+-- Isolated private album storage; never changes media_uploads or existing post assets.
+-- Replay-safe and also included verbatim in the fresh-database schema tail.
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE IF NOT EXISTS albums (
+  id TEXT PRIMARY KEY NOT NULL,
+  owner_id INTEGER NOT NULL REFERENCES users(id),
+  name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 80),
+  visibility TEXT NOT NULL CHECK(visibility IN ('public','private','shared')),
+  is_default INTEGER NOT NULL DEFAULT 0 CHECK(is_default IN (0,1)),
+  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  deleted_at INTEGER,
+  UNIQUE(id,owner_id),
+  CHECK(is_default=0 OR (name='宝宝相册' AND visibility='private' AND deleted_at IS NULL))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS albums_one_default ON albums(owner_id) WHERE is_default=1;
+CREATE INDEX IF NOT EXISTS albums_owner_list ON albums(owner_id,deleted_at,created_at DESC,id);
+CREATE TABLE IF NOT EXISTS album_storage (
+  user_id INTEGER PRIMARY KEY REFERENCES users(id),
+  used_bytes INTEGER NOT NULL DEFAULT 0 CHECK(used_bytes>=0),
+  reserved_bytes INTEGER NOT NULL DEFAULT 0 CHECK(reserved_bytes>=0)
+);
+CREATE TABLE IF NOT EXISTS album_members (
+  album_id TEXT NOT NULL REFERENCES albums(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  PRIMARY KEY(album_id,user_id)
+);
+CREATE TABLE IF NOT EXISTS album_invites (
+  album_id TEXT PRIMARY KEY REFERENCES albums(id) ON DELETE CASCADE,
+  token_hash TEXT NOT NULL UNIQUE CHECK(length(token_hash)=64),
+  expires_at INTEGER NOT NULL,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE TABLE IF NOT EXISTS album_batches (
+  id TEXT PRIMARY KEY NOT NULL,
+  album_id TEXT NOT NULL,
+  owner_id INTEGER NOT NULL,
+  operation_id TEXT NOT NULL,
+  request_hash TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '' CHECK(length(description)<=3000),
+  captured_at INTEGER,
+  quality TEXT NOT NULL CHECK(quality IN ('hd','original')),
+  photo_count INTEGER NOT NULL CHECK(photo_count BETWEEN 1 AND 20),
+  reserved_bytes INTEGER NOT NULL CHECK(reserved_bytes>0),
+  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','published','cancelled')),
+  post_id INTEGER REFERENCES posts(id) ON DELETE SET NULL,
+  source_post_image_id INTEGER,
+  source_upload_id TEXT,
+  uploaded_at INTEGER,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  expires_at INTEGER NOT NULL,
+  published_at INTEGER,
+  UNIQUE(owner_id,operation_id),
+  UNIQUE(id,album_id,owner_id),
+  FOREIGN KEY(album_id,owner_id) REFERENCES albums(id,owner_id)
+);
+CREATE INDEX IF NOT EXISTS album_batches_owner_pending ON album_batches(owner_id,status,expires_at);
+CREATE UNIQUE INDEX IF NOT EXISTS album_history_active_reservation ON album_batches(source_post_image_id) WHERE source_post_image_id IS NOT NULL AND status!='cancelled';
+CREATE TABLE IF NOT EXISTS album_uploads (
+  id TEXT PRIMARY KEY NOT NULL,
+  batch_id TEXT NOT NULL,
+  album_id TEXT NOT NULL,
+  owner_id INTEGER NOT NULL,
+  photo_id TEXT NOT NULL,
+  client_id TEXT NOT NULL CHECK(length(client_id) BETWEEN 1 AND 80),
+  sort_order INTEGER NOT NULL DEFAULT 0 CHECK(sort_order BETWEEN 0 AND 19),
+  kind TEXT NOT NULL CHECK(kind IN ('preview','hd','original')),
+  object_key TEXT NOT NULL UNIQUE,
+  mime_type TEXT NOT NULL CHECK(mime_type IN ('image/jpeg','image/png','image/webp','image/gif','image/heic','image/heif')),
+  declared_size INTEGER NOT NULL CHECK(declared_size>0),
+  content_md5 TEXT NOT NULL,
+  width INTEGER NOT NULL CHECK(width BETWEEN 1 AND 100000),
+  height INTEGER NOT NULL CHECK(height BETWEEN 1 AND 100000),
+  variant_width INTEGER CHECK(variant_width BETWEEN 1 AND 100000),
+  variant_height INTEGER CHECK(variant_height BETWEEN 1 AND 100000),
+  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','complete')),
+  verified_size INTEGER,
+  expires_at INTEGER NOT NULL,
+  completed_at INTEGER,
+  UNIQUE(batch_id,client_id,kind),
+  UNIQUE(photo_id,kind),
+  FOREIGN KEY(batch_id,album_id,owner_id) REFERENCES album_batches(id,album_id,owner_id),
+  CHECK((kind='preview' AND declared_size<=2097152 AND mime_type IN ('image/jpeg','image/webp') AND (variant_width IS NULL OR variant_width<=540) AND (variant_height IS NULL OR variant_height<=540))
+     OR (kind='hd' AND declared_size<=10485760 AND mime_type IN ('image/jpeg','image/png','image/webp','image/gif'))
+     OR (kind='original' AND declared_size<20971520)),
+  CHECK(status!='complete' OR verified_size=declared_size),
+  CHECK(object_key GLOB 'albums/'||owner_id||'/*' AND instr(object_key,'..')=0)
+);
+CREATE INDEX IF NOT EXISTS album_uploads_batch ON album_uploads(batch_id,photo_id,kind);
+CREATE TABLE IF NOT EXISTS album_photos (
+  id TEXT PRIMARY KEY NOT NULL,
+  album_id TEXT NOT NULL,
+  batch_id TEXT NOT NULL,
+  owner_id INTEGER NOT NULL,
+  client_id TEXT NOT NULL,
+  sort_order INTEGER NOT NULL DEFAULT 0 CHECK(sort_order BETWEEN 0 AND 19),
+  description TEXT NOT NULL DEFAULT '' CHECK(length(description)<=3000),
+  captured_at INTEGER,
+  uploaded_at INTEGER NOT NULL,
+  width INTEGER NOT NULL,
+  height INTEGER NOT NULL,
+  preview_key TEXT NOT NULL UNIQUE,
+  hd_key TEXT NOT NULL UNIQUE,
+  original_key TEXT UNIQUE,
+  preview_bytes INTEGER NOT NULL CHECK(preview_bytes>0),
+  hd_bytes INTEGER NOT NULL CHECK(hd_bytes>0),
+  original_bytes INTEGER NOT NULL DEFAULT 0 CHECK(original_bytes>=0),
+  source_post_image_id INTEGER UNIQUE,
+  source_upload_id TEXT,
+  deleted_at INTEGER,
+  FOREIGN KEY(batch_id,album_id,owner_id) REFERENCES album_batches(id,album_id,owner_id),
+  CHECK(preview_key!=hd_key AND (original_key IS NULL OR (original_key!=preview_key AND original_key!=hd_key))),
+  CHECK((original_key IS NULL AND original_bytes=0) OR (original_key IS NOT NULL AND original_bytes>0))
+);
+CREATE INDEX IF NOT EXISTS album_photos_sort ON album_photos(album_id,deleted_at,coalesce(captured_at,uploaded_at) DESC,uploaded_at DESC,id DESC);
+CREATE TABLE IF NOT EXISTS album_likes (
+  photo_id TEXT NOT NULL REFERENCES album_photos(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  PRIMARY KEY(photo_id,user_id)
+);
+CREATE TABLE IF NOT EXISTS album_comments (
+  id TEXT PRIMARY KEY NOT NULL,
+  photo_id TEXT NOT NULL REFERENCES album_photos(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  operation_id TEXT NOT NULL,
+  request_hash TEXT NOT NULL,
+  content TEXT NOT NULL CHECK(length(content) BETWEEN 1 AND 2000),
+  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  deleted_at INTEGER,
+  UNIQUE(user_id,operation_id)
+);
+CREATE INDEX IF NOT EXISTS album_comments_photo ON album_comments(photo_id,deleted_at,created_at,id);
+-- No source FK: deleting the old post must not delete a private imported copy or retry evidence.
+CREATE TABLE IF NOT EXISTS album_history_attempts (
+  owner_id INTEGER NOT NULL,
+  source_post_image_id INTEGER NOT NULL,
+  outcome TEXT NOT NULL CHECK(outcome IN ('skipped','retry')),
+  reason TEXT NOT NULL,
+  retry_at INTEGER NOT NULL,
+  attempted_at INTEGER NOT NULL,
+  PRIMARY KEY(owner_id,source_post_image_id)
+);
+CREATE TABLE IF NOT EXISTS album_rate_limits (
+  bucket TEXT PRIMARY KEY NOT NULL,
+  window_start INTEGER NOT NULL,
+  count INTEGER NOT NULL CHECK(count>=0)
+);
+CREATE TABLE IF NOT EXISTS album_transaction_guards (id INTEGER PRIMARY KEY CHECK(id=1));
+-- Bytes are released only after a successful fixed-host COS DELETE (including 404).
+CREATE TABLE IF NOT EXISTS album_object_cleanup (
+  object_key TEXT PRIMARY KEY NOT NULL,
+  owner_id INTEGER NOT NULL REFERENCES users(id),
+  bytes INTEGER NOT NULL CHECK(bytes>0),
+  charge_bucket TEXT NOT NULL CHECK(charge_bucket IN ('used','reserved')),
+  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','cleaned')),
+  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  cleaned_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS album_cleanup_pending ON album_object_cleanup(owner_id,status,created_at);
+
+-- Latest ACTUAL grant/redeem snapshot, never user badges, client plan names, catalog edits
+-- or the total accumulated expiry. Active legacy memberships without a snapshot use WEEK
+-- (5 GiB), a conservative fallback; inactive memberships always return FREE (3 GiB).
+CREATE VIEW IF NOT EXISTS album_storage_entitlements AS
+WITH latest AS (
+  SELECT u.id AS user_id,m.permanent,m.expires_at,
+    (SELECT o.plan_json FROM sponsor_operations o WHERE o.user_id=u.id AND o.kind IN ('grant','redeem') AND json_valid(o.plan_json)
+      ORDER BY o.created_at DESC,o.rowid DESC LIMIT 1) AS plan_json
+  FROM users u LEFT JOIN sponsor_memberships m ON m.user_id=u.id
+), tiers AS (
+  SELECT user_id,CASE WHEN permanent=1 OR expires_at>unixepoch() THEN 1 ELSE 0 END AS sponsor_active,
+    CASE WHEN permanent=1 THEN 'permanent'
+      WHEN coalesce(expires_at,0)<=unixepoch() THEN 'free'
+      WHEN (json_extract(plan_json,'$.duration_unit')='month' AND json_extract(plan_json,'$.duration_count')>=12)
+        OR (json_extract(plan_json,'$.duration_unit')='day' AND json_extract(plan_json,'$.duration_count')>=365) THEN 'year'
+      WHEN (json_extract(plan_json,'$.duration_unit')='month' AND json_extract(plan_json,'$.duration_count')>=3)
+        OR (json_extract(plan_json,'$.duration_unit')='day' AND json_extract(plan_json,'$.duration_count')>=90) THEN 'quarter'
+      WHEN (json_extract(plan_json,'$.duration_unit')='month' AND json_extract(plan_json,'$.duration_count')>=1)
+        OR (json_extract(plan_json,'$.duration_unit')='day' AND json_extract(plan_json,'$.duration_count')>=30) THEN 'month'
+      ELSE 'week' END AS tier FROM latest
+)
+SELECT t.user_id,t.tier,t.sponsor_active,
+  (CASE tier WHEN 'permanent' THEN 100 WHEN 'year' THEN 50 WHEN 'quarter' THEN 20 WHEN 'month' THEN 10 WHEN 'week' THEN 5 ELSE 3 END)*1073741824 AS limit_bytes,
+  coalesce(s.used_bytes,0) AS used_bytes,coalesce(s.reserved_bytes,0) AS reserved_bytes
+FROM tiers t LEFT JOIN album_storage s ON s.user_id=t.user_id;
+
+CREATE TRIGGER IF NOT EXISTS album_default_immutable BEFORE UPDATE ON albums
+WHEN OLD.is_default=1 AND (NEW.is_default!=1 OR NEW.owner_id!=OLD.owner_id OR NEW.name!='宝宝相册' OR NEW.visibility!='private' OR NEW.deleted_at IS NOT NULL)
+BEGIN SELECT RAISE(ABORT,'default_album_immutable'); END;
+CREATE TRIGGER IF NOT EXISTS album_owner_immutable BEFORE UPDATE OF owner_id,is_default ON albums
+WHEN NEW.owner_id!=OLD.owner_id OR NEW.is_default!=OLD.is_default
+BEGIN SELECT RAISE(ABORT,'album_owner_immutable'); END;
+CREATE TRIGGER IF NOT EXISTS album_default_no_delete BEFORE DELETE ON albums WHEN OLD.is_default=1
+BEGIN SELECT RAISE(ABORT,'default_album_immutable'); END;
+CREATE TRIGGER IF NOT EXISTS album_batch_reserve_validate BEFORE INSERT ON album_batches
+WHEN NOT EXISTS(SELECT 1 FROM album_batches WHERE owner_id=NEW.owner_id AND operation_id=NEW.operation_id)
+BEGIN
+  SELECT CASE WHEN NEW.status!='pending' THEN RAISE(ABORT,'album_batch_invalid') END;
+  SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM albums a JOIN users u ON u.id=a.owner_id WHERE a.id=NEW.album_id AND a.owner_id=NEW.owner_id AND a.deleted_at IS NULL) THEN RAISE(ABORT,'album_forbidden') END;
+  SELECT CASE WHEN NEW.expires_at<=unixepoch() THEN RAISE(ABORT,'album_batch_expired') END;
+  SELECT CASE WHEN (SELECT count(*) FROM album_batches WHERE owner_id=NEW.owner_id AND status='pending' AND expires_at>unixepoch())>=5 THEN RAISE(ABORT,'album_pending_limit') END;
+  SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM album_storage_entitlements WHERE user_id=NEW.owner_id AND used_bytes+reserved_bytes+NEW.reserved_bytes<=limit_bytes) THEN RAISE(ABORT,'album_storage_full') END;
+  SELECT CASE WHEN NEW.quality='original' AND NOT EXISTS(SELECT 1 FROM album_storage_entitlements WHERE user_id=NEW.owner_id AND sponsor_active=1) THEN RAISE(ABORT,'album_sponsor_required') END;
+END;
+CREATE TRIGGER IF NOT EXISTS album_batch_reserve_apply AFTER INSERT ON album_batches
+BEGIN
+  INSERT INTO album_storage(user_id,reserved_bytes) VALUES(NEW.owner_id,NEW.reserved_bytes)
+    ON CONFLICT(user_id) DO UPDATE SET reserved_bytes=reserved_bytes+NEW.reserved_bytes;
+END;
+CREATE TRIGGER IF NOT EXISTS album_upload_insert_validate BEFORE INSERT ON album_uploads
+BEGIN
+  SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM album_batches WHERE id=NEW.batch_id AND album_id=NEW.album_id AND owner_id=NEW.owner_id AND status='pending' AND expires_at>unixepoch()) THEN RAISE(ABORT,'album_batch_expired') END;
+  SELECT CASE WHEN NEW.kind='original' AND NOT EXISTS(SELECT 1 FROM album_batches WHERE id=NEW.batch_id AND quality='original') THEN RAISE(ABORT,'album_batch_invalid') END;
+END;
+CREATE TRIGGER IF NOT EXISTS album_upload_complete_validate BEFORE UPDATE OF status ON album_uploads
+WHEN NEW.status='complete' AND OLD.status!='complete'
+BEGIN
+  SELECT CASE WHEN NEW.verified_size IS NULL OR NEW.verified_size!=OLD.declared_size THEN RAISE(ABORT,'album_upload_mismatch') END;
+  SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM album_batches b JOIN albums a ON a.id=b.album_id AND a.owner_id=b.owner_id WHERE b.id=OLD.batch_id AND b.owner_id=OLD.owner_id AND b.status='pending' AND b.expires_at>unixepoch() AND a.deleted_at IS NULL AND OLD.expires_at>unixepoch()) THEN RAISE(ABORT,'album_batch_expired') END;
+  SELECT CASE WHEN EXISTS(SELECT 1 FROM album_batches WHERE id=OLD.batch_id AND quality='original') AND NOT EXISTS(SELECT 1 FROM album_storage_entitlements WHERE user_id=OLD.owner_id AND sponsor_active=1) THEN RAISE(ABORT,'album_sponsor_required') END;
+  SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM album_storage_entitlements WHERE user_id=OLD.owner_id AND used_bytes+reserved_bytes<=limit_bytes) THEN RAISE(ABORT,'album_storage_full') END;
+END;
+CREATE TRIGGER IF NOT EXISTS album_batch_publish_validate BEFORE UPDATE OF status ON album_batches
+WHEN NEW.status='published' AND OLD.status!='published'
+BEGIN
+  SELECT CASE WHEN OLD.status!='pending' OR OLD.expires_at<=unixepoch() THEN RAISE(ABORT,'album_batch_expired') END;
+  SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM albums WHERE id=OLD.album_id AND owner_id=OLD.owner_id AND deleted_at IS NULL) THEN RAISE(ABORT,'album_forbidden') END;
+  SELECT CASE WHEN OLD.quality='original' AND NOT EXISTS(SELECT 1 FROM album_storage_entitlements WHERE user_id=OLD.owner_id AND sponsor_active=1) THEN RAISE(ABORT,'album_sponsor_required') END;
+  SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM album_storage_entitlements WHERE user_id=OLD.owner_id AND used_bytes+reserved_bytes<=limit_bytes AND reserved_bytes>=OLD.reserved_bytes) THEN RAISE(ABORT,'album_storage_full') END;
+  SELECT CASE WHEN (SELECT count(*) FROM album_uploads WHERE batch_id=OLD.id)!=(OLD.photo_count*CASE OLD.quality WHEN 'original' THEN 3 ELSE 2 END)
+    OR (SELECT count(DISTINCT photo_id) FROM album_uploads WHERE batch_id=OLD.id)!=OLD.photo_count
+    OR EXISTS(SELECT 1 FROM album_uploads WHERE batch_id=OLD.id AND (status!='complete' OR verified_size IS NULL OR verified_size!=declared_size))
+    OR (SELECT sum(verified_size) FROM album_uploads WHERE batch_id=OLD.id)!=OLD.reserved_bytes
+    OR EXISTS(SELECT 1 FROM album_uploads WHERE batch_id=OLD.id GROUP BY photo_id HAVING count(DISTINCT client_id)!=1 OR count(DISTINCT width)!=1 OR count(DISTINCT height)!=1 OR count(DISTINCT kind)!=(CASE OLD.quality WHEN 'original' THEN 3 ELSE 2 END))
+    THEN RAISE(ABORT,'album_batch_incomplete') END;
+END;
+CREATE TRIGGER IF NOT EXISTS album_batch_publish_apply AFTER UPDATE OF status ON album_batches
+WHEN NEW.status='published' AND OLD.status='pending'
+BEGIN
+  INSERT INTO album_photos(id,album_id,batch_id,owner_id,client_id,sort_order,description,captured_at,uploaded_at,width,height,preview_key,hd_key,original_key,preview_bytes,hd_bytes,original_bytes,source_post_image_id,source_upload_id)
+    SELECT photo_id,NEW.album_id,NEW.id,NEW.owner_id,min(client_id),min(sort_order),NEW.description,NEW.captured_at,coalesce(NEW.uploaded_at,unixepoch()),min(width),min(height),
+      max(CASE kind WHEN 'preview' THEN object_key END),max(CASE kind WHEN 'hd' THEN object_key END),max(CASE kind WHEN 'original' THEN object_key END),
+      sum(CASE kind WHEN 'preview' THEN verified_size ELSE 0 END),sum(CASE kind WHEN 'hd' THEN verified_size ELSE 0 END),sum(CASE kind WHEN 'original' THEN verified_size ELSE 0 END),NEW.source_post_image_id,NEW.source_upload_id
+    FROM album_uploads WHERE batch_id=NEW.id GROUP BY photo_id;
+  UPDATE album_storage SET used_bytes=used_bytes+NEW.reserved_bytes,reserved_bytes=reserved_bytes-NEW.reserved_bytes WHERE user_id=NEW.owner_id;
+  -- Public publication is an ORDINARY fallback post. Never insert post_images or metadata content.
+  INSERT INTO posts(user_id,content,visibility)
+    SELECT NEW.owner_id,'【宝宝相册】当前渠道不支持查看此内容，请下载最新版ABDL Space APP查看详情','public'
+      FROM albums WHERE id=NEW.album_id AND visibility='public' AND deleted_at IS NULL;
+  UPDATE album_batches SET post_id=CASE WHEN (SELECT visibility FROM albums WHERE id=NEW.album_id)='public' THEN last_insert_rowid() ELSE NULL END,published_at=unixepoch() WHERE id=NEW.id;
+END;
+CREATE TRIGGER IF NOT EXISTS album_batch_cancel_apply AFTER UPDATE OF status ON album_batches
+WHEN NEW.status='cancelled' AND OLD.status='pending'
+BEGIN
+  INSERT OR IGNORE INTO album_object_cleanup(object_key,owner_id,bytes,charge_bucket)
+    SELECT object_key,owner_id,declared_size,'reserved' FROM album_uploads WHERE batch_id=NEW.id;
+END;
+CREATE TRIGGER IF NOT EXISTS album_photo_delete_apply AFTER UPDATE OF deleted_at ON album_photos
+WHEN OLD.deleted_at IS NULL AND NEW.deleted_at IS NOT NULL
+BEGIN
+  INSERT OR IGNORE INTO album_object_cleanup(object_key,owner_id,bytes,charge_bucket) VALUES(OLD.preview_key,OLD.owner_id,OLD.preview_bytes,'used');
+  INSERT OR IGNORE INTO album_object_cleanup(object_key,owner_id,bytes,charge_bucket) VALUES(OLD.hd_key,OLD.owner_id,OLD.hd_bytes,'used');
+  INSERT OR IGNORE INTO album_object_cleanup(object_key,owner_id,bytes,charge_bucket)
+    SELECT OLD.original_key,OLD.owner_id,OLD.original_bytes,'used' WHERE OLD.original_key IS NOT NULL;
+END;
+CREATE TRIGGER IF NOT EXISTS album_delete_apply AFTER UPDATE OF deleted_at ON albums
+WHEN OLD.deleted_at IS NULL AND NEW.deleted_at IS NOT NULL
+BEGIN
+  UPDATE album_photos SET deleted_at=NEW.deleted_at WHERE album_id=NEW.id AND deleted_at IS NULL;
+  UPDATE album_batches SET status='cancelled' WHERE album_id=NEW.id AND status='pending';
+  DELETE FROM album_invites WHERE album_id=NEW.id;
+  DELETE FROM album_members WHERE album_id=NEW.id;
+END;
+CREATE TRIGGER IF NOT EXISTS album_cleanup_release AFTER UPDATE OF status ON album_object_cleanup
+WHEN OLD.status='pending' AND NEW.status='cleaned'
+BEGIN
+  UPDATE album_storage SET used_bytes=used_bytes-CASE NEW.charge_bucket WHEN 'used' THEN NEW.bytes ELSE 0 END,
+    reserved_bytes=reserved_bytes-CASE NEW.charge_bucket WHEN 'reserved' THEN NEW.bytes ELSE 0 END WHERE user_id=NEW.owner_id;
+END;
+CREATE TRIGGER IF NOT EXISTS album_visibility_revoke AFTER UPDATE OF visibility ON albums
+WHEN NEW.visibility!='shared'
+BEGIN DELETE FROM album_invites WHERE album_id=NEW.id; DELETE FROM album_members WHERE album_id=NEW.id; END;

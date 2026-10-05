@@ -6,13 +6,18 @@
 import { Hono } from 'hono'
 import type { Env, JWTPayload } from '../types/index.ts'
 import { query } from '../lib/db.ts'
-import { toAccount, toStatus } from './converter.ts'
+import { toAccount, toStatus, hydrateAlbumPostResponse } from './converter.ts'
+import { isNativeAppClient } from '../lib/app-clients.ts'
 import { getLastStatusProvinces } from './last-province.ts'
 import { mastodonAuth, buildInstance } from './shared.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
 const mastodonV2 = new Hono<AppType>()
+mastodonV2.use('*', async (c, next) => {
+  await next()
+  c.res = await hydrateAlbumPostResponse(c.env, c.res, isNativeAppClient(c.req.header('User-Agent')))
+})
 
 // ============================================================
 // GET /api/v2/instance

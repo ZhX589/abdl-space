@@ -52,7 +52,9 @@ function database(): DatabaseSync {
 			status TEXT NOT NULL,
 			created_at INTEGER NOT NULL,
 			expires_at INTEGER NOT NULL
-		)
+		);
+    CREATE TABLE post_images(id INTEGER PRIMARY KEY,post_id INTEGER,image_url TEXT,preview_url TEXT);
+    CREATE TABLE comment_images(id INTEGER PRIMARY KEY,comment_id INTEGER,image_url TEXT,preview_url TEXT);
 	`)
 	return db
 }
