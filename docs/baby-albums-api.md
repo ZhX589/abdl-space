@@ -1,6 +1,6 @@
 # 宝宝相册 API 与发布边界
 
-实现来源：后端与 Android 的 `feat/baby-albums`。2026-10-05 用户授权仅后端合入 main 并触发自动部署；已在生产应用 `migrations/0071_baby_albums.sql`，PR/main/Workers Builds 结果见 [生产交付记录](baby-albums-production-2026-10-05.md)。没有手动部署 Worker、上传正式 APK 或修改 latest 元数据。后端上线后仍须发布支持相册的新 App。
+实现来源：后端与 Android 的 `feat/baby-albums`。2026-10-05 用户授权仅后端合入 main 并触发自动部署；已在生产应用 `migrations/0071_baby_albums.sql`，PR #18/main `92a15f3`及Workers Builds自动部署已成功并核验；详情见 [生产交付记录](baby-albums-production-2026-10-05.md)。没有手动部署 Worker、上传正式 APK 或修改 latest 元数据。后端上线后仍须发布支持相册的新 App。
 
 ## 权限及存储规则
 
