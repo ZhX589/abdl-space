@@ -315,3 +315,54 @@ test('unavailable NBW-only native page returns safe503, while healthy terminal e
     assert.equal(home.status, 401)
   } finally { globalThis.fetch = originalFetch; f.sqlite.close() }
 })
+
+test('native merged feed fresh refresh recovers NBW after an outage exhausts all local and friend pages', async t => {
+  const f = routeFixture()
+  let healthy = false
+  const seenCursors: string[] = []
+  t.mock.method(globalThis, 'fetch', async (input: Parameters<typeof fetch>[0]) => {
+    const url = new URL(String(input))
+    assert.equal(url.origin, 'https://www.newbabyworld.top')
+    seenCursors.push(url.searchParams.get('cursor') || '')
+    if (!healthy) return new Response('error code: 526', { status: 526 })
+    return Response.json({ code: 200, data: { has_more: false, next_cursor: '', list: [
+      { tid: 90, authorid: 9, author: 'NBW', subject: 'recovered on refresh',
+        dateline: Date.parse('2026-10-05T00:00:09Z') / 1000 },
+    ] } })
+  })
+  t.mock.method(console, 'warn', () => {})
+  try {
+    const initialCursor = btoa(JSON.stringify({ a: 0, n: 'opaque-before-outage', f: 0 }))
+    let url = `/api/v1/timelines/all?limit=3&max_id=${encodeURIComponent(initialCursor)}`
+    const localIds = ['p_4', 'fr_4', 'p_3', 'fr_3', 'p_2', 'fr_2', 'p_1', 'fr_1']
+    for (let pageIndex = 0; pageIndex < 3; pageIndex++) {
+      const response = await f.app.request(url, { headers: nativeHeaders }, f.env)
+      assert.equal(response.status, 200)
+      assert.equal(response.headers.get('X-ABDL-Timeline-Degraded'), 'nbw')
+      const statuses = await response.json() as MastodonStatus[]
+      assert.deepEqual(statuses.map(s => s.id), localIds.slice(pageIndex * 3, (pageIndex + 1) * 3))
+      if (pageIndex < 2) {
+        const next = nextPage(response)
+        assert.equal(next.cursor.n, 'opaque-before-outage')
+        assert.notEqual(next.cursor.n, '!')
+        url = next.url
+      } else {
+        // This nonempty terminal page has exhausted both healthy sources, not NBW permanently.
+        assert.equal(statuses.length, 2)
+        assert.equal(response.headers.get('Link'), null)
+      }
+    }
+
+    healthy = true
+    // A fresh refresh must discard all source cursors rather than continue the exhausted page.
+    const freshUrl = '/api/v1/timelines/all?limit=20'
+    assert.equal(new URL(freshUrl, 'https://fixture.test').searchParams.has('max_id'), false)
+    const refreshed = await f.app.request(freshUrl, { headers: nativeHeaders }, f.env)
+    assert.equal(refreshed.status, 200)
+    assert.equal(refreshed.headers.get('X-ABDL-Timeline-Degraded'), null)
+    assert.deepEqual((await refreshed.json() as MastodonStatus[]).map(s => s.id), ['nbw_90', ...localIds])
+    assert.equal(refreshed.headers.get('Link'), null)
+    assert.deepEqual(seenCursors, ['opaque-before-outage', 'opaque-before-outage', 'opaque-before-outage', ''])
+    assert.equal(seenCursors.includes('!'), false)
+  } finally { f.sqlite.close() }
+})

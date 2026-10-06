@@ -3,6 +3,7 @@ import { cors } from 'hono/cors'
 import { bodyLimit } from 'hono/body-limit'
 import type { AlbumAppType } from '../lib/albums.ts'
 import { AlbumError, albumAuthMiddleware, albumDto, albumErrorResponse, albumPagination, authorizeAlbumBatch, authorizeAlbumPhoto, cancelAlbumBatch, completeAlbumUpload, createAlbum, createAlbumComment, createAlbumInvite, deleteAlbum, deleteAlbumComment, deleteAlbumPhoto, expireAlbumBatches, getAccessibleAlbum, getAlbumBatch, getAlbumPhoto, getAlbumStorageQuota, invalidateAlbumFeed, joinAlbum, likeAlbumPhoto, listAlbumComments, listAlbumMembers, listAlbumPhotos, listAlbums, patchAlbum, publishAlbumBatch, readAlbumJson, removeAlbumMember } from '../lib/albums.ts'
+import { createAlbumReport } from '../lib/album-reports.ts'
 import { bestEffortImportAlbumHistory, importAlbumHistoryHandler } from '../lib/album-history.ts'
 
 const albums = new Hono<AlbumAppType>({ strict: false })
@@ -69,6 +70,7 @@ albums.get('/:id/photos', async c => {
 })
 albums.post('/:id/batches/authorize', async c => c.json(await authorizeAlbumBatch(c.env, c.get('user').sub, c.req.param('id'), await readAlbumJson(c.req.raw))))
 albums.post('/:id/invites', async c => { await emptyBody(c.req.raw); return c.json(await createAlbumInvite(c.env, c.get('user').sub, c.req.param('id'))) })
+albums.post('/:id/report', async c => c.json({ report: await createAlbumReport(c.env, c.get('user').sub, c.req.param('id'), await readAlbumJson(c.req.raw)) }, 201))
 albums.get('/:id/members', async c => c.json(await listAlbumMembers(c.env, c.get('user').sub, c.req.param('id'))))
 albums.delete('/:id/members/:userId', async c => { await emptyBody(c.req.raw); return c.json(await removeAlbumMember(c.env, c.get('user').sub, c.req.param('id'), numericId(c.req.param('userId')))) })
 albums.patch('/:id', async c => c.json({ album: await patchAlbum(c.env, c.get('user').sub, c.req.param('id'), await readAlbumJson(c.req.raw)) }))

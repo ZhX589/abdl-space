@@ -251,13 +251,13 @@ async function storedOperation(env: SponsorEnv, id: string, hash: string): Promi
   return { me: JSON.parse(row.result_json) as SponsorMe, replayed: true }
 }
 
-async function operate(env: SponsorEnv, input: OperationInput, guards: D1PreparedStatement[] = []): Promise<{ me: SponsorMe; replayed: boolean }> {
+async function operate(env: SponsorEnv, input: OperationInput, guards: D1PreparedStatement[] = [], finalGuards: D1PreparedStatement[] = [], newOperationStatements: D1PreparedStatement[] = []): Promise<{ me: SponsorMe; replayed: boolean }> {
   const id = `${input.actorId}:${input.kind}:${sponsorOperationId(input.operationId)}`
   const hash = await sponsorHash(JSON.stringify([input.userId, input.payload, input.reason]))
   const prior = await storedOperation(env, id, hash)
   if (prior) {
-    if (guards.length) {
-      const results: D1Result[] = await env.abdl_space_db.batch(guards)
+    if (guards.length || finalGuards.length) {
+      const results: D1Result[] = await env.abdl_space_db.batch([...guards, ...finalGuards])
       if (results.some(result => !result.success)) throw new SponsorError('sponsors_unavailable', '权限验证暂不可用', 503)
     }
     return prior
@@ -265,9 +265,9 @@ async function operate(env: SponsorEnv, input: OperationInput, guards: D1Prepare
   try {
     const insert = env.abdl_space_db.prepare(`INSERT INTO sponsor_operations(id,operation_id,user_id,actor_id,kind,request_hash,reason,code_id,plan_json,benefit_id,color_key,media_key,notice_version,adjustment)
       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`).bind(id, input.operationId, input.userId, input.actorId, input.kind, hash, sponsorText(input.reason, '操作原因', 500), input.codeId ?? null, input.planJson ?? null, input.benefitId ?? null, input.colorKey ?? null, input.mediaKey ?? null, input.noticeVersion ?? null, input.adjustment ?? null)
-    const results: D1Result[] = guards.length ? await env.abdl_space_db.batch([...guards, insert]) : [await insert.run()]
+    const results: D1Result[] = guards.length || finalGuards.length || newOperationStatements.length ? await env.abdl_space_db.batch([...guards, insert, ...newOperationStatements, ...finalGuards]) : [await insert.run()]
     if (results.some(result => !result.success)) throw new SponsorError('sponsors_unavailable', '操作结果暂不可用', 503)
-    const result = results[results.length - 1]
+    const result = results[guards.length]
     const stored = await storedOperation(env, id, hash)
     if (!stored) throw new SponsorError('sponsors_unavailable', '操作结果暂不可用', 503)
     return { ...stored, replayed: result.meta.changes === 0 }
@@ -300,15 +300,17 @@ export async function redeemSponsorCode(env: SponsorEnv, userId: number, body: u
 
 /** Authorize a new original once; optional trusted server guards assert live ACL in the charge transaction.
  * Replays also execute the guards, so an old operation cannot bypass removed album membership.
+ * Optional final guards run after the debit within the same batch and roll it back on live state changes.
+ * Trusted new-operation statements can record an attempt in that transaction; never run on stored replays.
  */
-export async function authorizeSponsorOriginal(env: SponsorEnv, userId: number, body: unknown, guards: D1PreparedStatement[] = []): Promise<{ operation_id: string; quota: SponsorMe['quota']; replayed: boolean }> {
+export async function authorizeSponsorOriginal(env: SponsorEnv, userId: number, body: unknown, guards: D1PreparedStatement[] = [], finalGuards: D1PreparedStatement[] = [], newOperationStatements: D1PreparedStatement[] = []): Promise<{ operation_id: string; quota: SponsorMe['quota']; replayed: boolean }> {
   const b = sponsorObject(body)
   const operationId = sponsorOperationId(b.operation_id)
   const mediaKey = sponsorText(b.media_key, '媒体标识', 64).toLowerCase()
   if (!/^[0-9a-f]{64}$/.test(mediaKey)) throw new SponsorError('invalid_request', 'media_key 必须为 SHA-256')
   const noticeVersion = b.notice_version == null ? undefined : sponsorInteger(b.notice_version, 1, 2147483647)
   // Notice is acknowledgement evidence, not authorization identity. A retry can omit it.
-  const result = await operate(env, { kind: 'original', userId, actorId: String(userId), operationId, reason: '原图授权', payload: [mediaKey], mediaKey, noticeVersion }, guards)
+  const result = await operate(env, { kind: 'original', userId, actorId: String(userId), operationId, reason: '原图授权', payload: [mediaKey], mediaKey, noticeVersion }, guards, finalGuards, newOperationStatements)
   return { operation_id: operationId, quota: result.me.quota, replayed: result.replayed }
 }
 

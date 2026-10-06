@@ -7,7 +7,7 @@ export type AlbumStorageTier = 'free' | 'week' | 'month' | 'quarter' | 'year' | 
 /** Accessible album DTO; private COS keys are deliberately absent. */
 export interface Album {
   id: string; owner_id: number; name: string; visibility: AlbumVisibility; is_default: boolean
-  photo_count: number; cover_url: string | null; created_at: number; can_upload: boolean; is_owner: boolean; member_count: number
+  photo_count: number; cover_url: string | null; created_at: number; can_upload: boolean; is_owner: boolean; member_count: number; download_protected: boolean
 }
 /** Storage counts include every owned variant and unpublished reservations. */
 export interface StorageQuota {
@@ -17,8 +17,9 @@ export interface StorageQuota {
 /** Photo DTO includes only signed previews and explicitly permitted owner HD. */
 export interface Photo {
   id: string; album_id: string; batch_id: string; description: string; captured_at: number | null
-  uploaded_at: number; sort_at: number; preview_url: string; hd_url: string | null; original_available: boolean
+  uploaded_at: number; sort_at: number; preview_url: string | null; hd_url: string | null; original_available: boolean
   width: number; height: number; likes_count: number; comments_count: number; liked: boolean; is_owner: boolean; owner_sponsor: boolean
+  download_protected: boolean; can_download: boolean; admin_blocked: boolean
 }
 /** Persisted, display-safe comment author projection. */
 export interface AlbumComment {
@@ -39,7 +40,7 @@ export interface AlbumPhotoAuthorization { url: string; expires_at: number; char
 export interface AlbumInvite { url: string; token: string; expires_at: number }
 /** Native timeline metadata is rehydrated only for currently public albums. */
 export interface AlbumPostUpdate {
-  album_id: string; album_name: string; description: string; photo_count: number; cover_url: string; width: number; height: number
+  album_id: string; album_name: string; description: string; photo_count: number; cover_url: string; width: number; height: number; download_protected: boolean
 }
 /** Bounded album pagination. */
 export interface AlbumListResponse { albums: Album[]; has_more: boolean }
@@ -55,3 +56,35 @@ export interface AlbumCommentsResponse { comments: AlbumComment[]; has_more: boo
 export interface AlbumMembersResponse { members: Array<{ user_id: number; username: string }> }
 /** Bounded retryable history import progress. */
 export interface AlbumImportResponse { imported: number; skipped: number; remaining: boolean }
+
+/** Moderation reasons accepted by the album report endpoint. */
+export type AlbumReportReason = 'spam' | 'nsfw' | 'minor' | 'copyright' | 'other'
+/** Persisted report state; at most one open report per reporter and album. */
+export interface AlbumReport {
+  id: string; album_id: string; reporter_id: number; reason: AlbumReportReason; detail: string | null
+  status: 'open' | 'resolved'; created_at: number; resolved_at: number | null
+}
+/** Reporter-facing submission response. */
+export interface AlbumReportResponse { report: AlbumReport }
+/** Admin list projection with album context and moderation counts. */
+export interface AlbumReportListItem extends AlbumReport {
+  album_name: string; owner_id: number; blocked_photo_count: number; album_photo_count: number
+}
+/** Bounded admin report pagination; total honours the status filter. */
+export interface AlbumReportListResponse { reports: AlbumReportListItem[]; total: number }
+/** Admin-only review album summary; private COS keys and download URLs are absent. */
+export interface AdminReportAlbum {
+  id: string; name: string; visibility: AlbumVisibility; owner_id: number; is_default: boolean
+  photo_count: number; created_at: number; download_protected: boolean
+}
+/** Admin-only photo projection; blocked previews are never signed and originals are absent. */
+export interface AdminReportPhoto {
+  id: string; description: string; width: number; height: number; captured_at: number | null; uploaded_at: number
+  admin_blocked: boolean; preview_url: string | null
+}
+/** Full admin review payload for one report. */
+export interface AlbumReportDetail { report: AlbumReportListItem; album: AdminReportAlbum; photos: AdminReportPhoto[]; download_protected: boolean }
+/** Admin desired-state block response; blocked photos stay stored, only display is replaced. */
+export interface AlbumPhotoBlockResponse { blocked_photo_ids: string[] }
+/** Admin resolve response; the first resolution timestamp and actor win. */
+export interface AlbumReportResolveResponse { report: AlbumReportListItem }

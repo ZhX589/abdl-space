@@ -899,6 +899,7 @@ interface AlbumPostRow {
   width: number | null
   height: number | null
   deleted_at: number | null
+  download_protected: number
 }
 
 type AlbumPostEnv = Pick<Env, 'abdl_space_db' | 'COS_SECRET_ID' | 'COS_SECRET_KEY' | 'COS_BUCKET' | 'COS_REGION'>
@@ -975,10 +976,13 @@ export async function hydrateAlbumPostUpdates(env: AlbumPostEnv, payload: unknow
         CASE WHEN a.visibility='public' THEN p.preview_key END AS preview_key,
         CASE WHEN a.visibility='public' THEN p.width END AS width,
         CASE WHEN a.visibility='public' THEN p.height END AS height,
-        a.deleted_at AS deleted_at
+        a.deleted_at AS deleted_at, coalesce(protection.download_protected,0) AS download_protected
         FROM album_batches b JOIN albums a ON a.id=b.album_id AND a.owner_id=b.owner_id
+        LEFT JOIN album_protection protection ON protection.album_id=a.id
         LEFT JOIN album_photos p ON p.id=(SELECT cover.id FROM album_photos cover
-          WHERE cover.batch_id=b.id AND cover.owner_id=a.owner_id AND cover.deleted_at IS NULL ORDER BY cover.sort_order, cover.id LIMIT 1)
+          WHERE cover.batch_id=b.id AND cover.owner_id=a.owner_id AND cover.deleted_at IS NULL
+            AND NOT EXISTS(SELECT 1 FROM album_photo_blocks blk WHERE blk.album_id=cover.album_id AND blk.photo_id=cover.id)
+          ORDER BY cover.sort_order, cover.id LIMIT 1)
         WHERE b.status='published' AND b.post_id IN (${chunk.map(() => '?').join(',')})`, chunk)
       for (const row of rows) {
         const targets = statuses.get(row.post_id) ?? []
@@ -987,6 +991,10 @@ export async function hydrateAlbumPostUpdates(env: AlbumPostEnv, payload: unknow
         if (!native || row.visibility !== 'public' || row.deleted_at !== null || !row.preview_key || !row.album_name || row.photo_count < 1) continue
         // An album key is never a public URL and must remain in the server-owned owner's namespace.
         if (!row.preview_key.startsWith(`albums/${row.owner_id}/`)) continue
+        if (row.download_protected) {
+          signedCovers.set(row.post_id, { key: row.preview_key, url: '' })
+          continue
+        }
         const authorization = await createCosGetAuthorization({
           secretId: env.COS_SECRET_ID, secretKey: env.COS_SECRET_KEY, bucket: env.COS_BUCKET, region: env.COS_REGION,
           objectKey: row.preview_key, contentType: 'application/octet-stream', expiresInSeconds: 60,
@@ -1001,17 +1009,20 @@ export async function hydrateAlbumPostUpdates(env: AlbumPostEnv, payload: unknow
       const current = await query<AlbumPostRow>(env.abdl_space_db, `SELECT b.post_id,a.owner_id,a.visibility,a.id AS album_id,
         a.name AS album_name,b.description,
         (SELECT count(*) FROM album_photos active WHERE active.batch_id=b.id AND active.deleted_at IS NULL) AS photo_count,
-        p.preview_key,p.width,p.height,a.deleted_at
+        p.preview_key,p.width,p.height,a.deleted_at,coalesce(protection.download_protected,0) AS download_protected
         FROM album_batches b JOIN albums a ON a.id=b.album_id AND a.owner_id=b.owner_id
+        LEFT JOIN album_protection protection ON protection.album_id=a.id
         JOIN album_photos p ON p.id=(SELECT cover.id FROM album_photos cover WHERE cover.batch_id=b.id
-          AND cover.owner_id=a.owner_id AND cover.deleted_at IS NULL ORDER BY cover.sort_order,cover.id LIMIT 1)
+          AND cover.owner_id=a.owner_id AND cover.deleted_at IS NULL
+          AND NOT EXISTS(SELECT 1 FROM album_photo_blocks blk WHERE blk.album_id=cover.album_id AND blk.photo_id=cover.id)
+          ORDER BY cover.sort_order,cover.id LIMIT 1)
         WHERE b.status='published' AND a.visibility='public' AND a.deleted_at IS NULL
         AND b.post_id IN (${chunk.map(() => '?').join(',')})`, chunk)
       for (const row of current) {
         const cover = signedCovers.get(row.post_id)
-        if (!cover || cover.key !== row.preview_key || !row.album_name || row.photo_count < 1) continue
+        if (!cover || cover.key !== row.preview_key || !row.album_name || row.photo_count < 1 || !row.width || !row.height || (!row.download_protected && !cover.url)) continue
         const metadata: AlbumPostUpdate = { album_id: row.album_id, album_name: row.album_name, description: row.description ?? '',
-          photo_count: row.photo_count, cover_url: cover.url, width: row.width ?? 0, height: row.height ?? 0 }
+          photo_count: row.photo_count, cover_url: row.download_protected ? '' : cover.url, width: row.width, height: row.height, download_protected: !!row.download_protected }
         for (const status of statuses.get(row.post_id) ?? []) {
           if (isRecord(status.account) && Number(status.account.id) === row.owner_id) status.album_update = metadata
         }

@@ -50,7 +50,7 @@ function fixture() {
 
 const account = toAccount({ id: 42, username: 'owner', avatar: null, role: 'user', created_at: '2026-10-05 01:00:00' })
 const rawPost = { id: 100, user_id: 42, content: ALBUM_POST_FALLBACK, created_at: '2026-10-05 01:00:00' }
-const metadata: AlbumPostUpdate = { album_id: 'album', album_name: '公开相册', description: 'secret', photo_count: 1, cover_url: 'https://old.test/preview', width: 1000, height: 800 }
+const metadata: AlbumPostUpdate = { album_id: 'album', album_name: '公开相册', description: 'secret', photo_count: 1, cover_url: 'https://old.test/preview', width: 1000, height: 800, download_protected: false }
 
 test('sync converter uses exact fallback and no attachments, only explicitly current public metadata', () => {
   const rich = toStatus({ ...rawPost, content: 'private description must never replace fallback', album_update: metadata, album_visibility: 'public',
@@ -209,6 +209,60 @@ test('oversized stale snapshot is sanitized before response middleware size bypa
   assert.equal('album_update' in status, false)
   assert.equal(status.content, `<p>${ALBUM_POST_FALLBACK}</p>`)
   assert.deepEqual(status.media_attachments, [])
+})
+
+test('protected native cards are metadata-only for old/new native clients and web stays plain fallback', async () => {
+  const { sqlite, env } = fixture()
+  try {
+    sqlite.exec("INSERT INTO album_protection(album_id,download_protected) VALUES('album',1)")
+    for (const native of [false, true]) {
+      const status = { ...toStatus(rawPost, account), album_update: metadata, media_attachments: [{ url: 'https://cached.test/private.jpg' }] }
+      await hydrateAlbumPostUpdates(env, status, native)
+      assert.equal(status.content, `<p>${ALBUM_POST_FALLBACK}</p>`); assert.deepEqual(status.media_attachments, [])
+      if (native) {
+        assert.equal(status.album_update?.download_protected, true); assert.equal(status.album_update?.cover_url, '')
+        assert.equal(status.album_update?.width, 1000); assert.equal(status.album_update?.height, 800)
+      } else assert.equal('album_update' in status, false)
+      assert.doesNotMatch(JSON.stringify(status), /q-signature|cached.test|old.test/)
+    }
+    const app = new Hono(); app.route('/api/v1', mastodon)
+    for (const ua of ['MastodonAndroid/3.0.1', 'MastodonAndroid/3.1.0', 'Mozilla/5.0']) {
+      const response = await app.request('/api/v1/statuses/p_100', { headers: { 'User-Agent': ua } }, env)
+      assert.equal(response.status, 200)
+      const status = await response.json() as MastodonStatus
+      assert.equal(status.content, `<p>${ALBUM_POST_FALLBACK}</p>`); assert.deepEqual(status.media_attachments, [])
+      if (ua.startsWith('MastodonAndroid/')) { assert.equal(status.album_update?.download_protected, true); assert.equal(status.album_update?.cover_url, '') }
+      else assert.equal('album_update' in status, false)
+      assert.doesNotMatch(JSON.stringify(status), /q-signature|albums\/42\//)
+    }
+  } finally { sqlite.close() }
+})
+
+test('native card final live protection read strips signed cover on toggle and ignores cached metadata', async () => {
+  const { sqlite, env, hooks } = fixture()
+  try {
+    let reads = 0
+    hooks.beforeQuery = sql => { if (sql.includes('FROM album_batches') && ++reads === 2) sqlite.exec("INSERT INTO album_protection(album_id,download_protected) VALUES('album',1)") }
+    const status = { ...toStatus(rawPost, account), album_update: metadata }
+    await hydrateAlbumPostUpdates(env, status, true)
+    assert.equal(reads, 2); assert.equal(status.album_update?.download_protected, true); assert.equal(status.album_update?.cover_url, '')
+    assert.doesNotMatch(JSON.stringify(status), /q-signature|old.test/)
+    hooks.beforeQuery = undefined
+    sqlite.exec('UPDATE album_protection SET download_protected=0')
+    await hydrateAlbumPostUpdates(env, status, true)
+    assert.equal(status.album_update?.download_protected, false); assert.match(status.album_update!.cover_url, /q-signature/)
+  } finally { sqlite.close() }
+})
+
+test('unavailable protection table fails closed even with an old cached authorized cover', async () => {
+  const { sqlite, env, hooks } = fixture()
+  try {
+    hooks.beforeQuery = sql => { if (sql.includes('album_protection')) throw new Error('no such table: album_protection') }
+    const status = { ...toStatus(rawPost, account), album_update: metadata }
+    await hydrateAlbumPostUpdates(env, status, true)
+    assert.equal('album_update' in status, false); assert.equal(status.content, `<p>${ALBUM_POST_FALLBACK}</p>`)
+    assert.doesNotMatch(JSON.stringify(status), /old.test|q-signature/)
+  } finally { sqlite.close() }
 })
 
 test('ordinary native and web edits cannot rewrite album fallback posts or attach standard media', async () => {

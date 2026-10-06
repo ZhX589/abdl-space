@@ -47,8 +47,8 @@ function d1(db: DatabaseSync, controls: Control) {
   }
 }
 
-async function fixture() {
-  const db = new DatabaseSync(':memory:'); db.exec('PRAGMA foreign_keys=ON'); db.exec(schema); db.exec(file('migrations/oauth.sql')); db.exec(file('migrations/0062_sponsors.sql')); db.exec(migration)
+async function fixture(protectionAvailable = true) {
+  const db = new DatabaseSync(':memory:'); db.exec('PRAGMA foreign_keys=ON'); db.exec(protectionAvailable ? schema : schema.slice(0, schema.indexOf(file('migrations/0072_album_image_protection.sql').trim()))); db.exec(file('migrations/oauth.sql')); db.exec(file('migrations/0062_sponsors.sql')); db.exec(migration)
   db.exec("ALTER TABLE users ADD COLUMN banned INTEGER DEFAULT 0; INSERT INTO users(id,email,password_hash,username) VALUES(1,'one@test.invalid','x','one'),(2,'two@test.invalid','x','two'),(3,'three@test.invalid','x','three')")
   const controls: Control = { diagnostics: [] }
   const env = { abdl_space_db: d1(db, controls), JWT_SECRET: 'album-route-test-secret', COS_SECRET_ID: 'test-id', COS_SECRET_KEY: 'test-key', COS_BUCKET: 'album-test-123', COS_REGION: 'ap-shanghai' }
@@ -61,13 +61,16 @@ async function fixture() {
   const authorize = async (albumId: string, body = input()) => { const response = await request(`/${albumId}/batches/authorize`, body); assert.equal(response.status, 200, JSON.stringify(await response.clone().json())); return { auth: await response.json() as AlbumBatchAuthorization, body } }
   const complete = async (auth: AlbumBatchAuthorization) => { for (const upload of auth.uploads) { const response = await request(`/uploads/${upload.upload_id}/complete`, {}); assert.equal(response.status, 200, JSON.stringify(await response.clone().json())) } }
   const publish = async (auth: AlbumBatchAuthorization) => { const response = await request(`/batches/${auth.batch_id}/publish`, {}); assert.equal(response.status, 200, JSON.stringify(await response.clone().json())); return await response.json() as AlbumPublishResponse }
-  const mockCos = (t: TestContext, options: { actualBytes?: Uint8Array; length?: number; type?: string; etag?: string; status?: number; onHead?: () => void; deleteStatus?: number } = {}) => {
+  const mockCos = (t: TestContext, options: { actualBytes?: Uint8Array; length?: number; type?: string; etag?: string; status?: number; onHead?: () => void; deleteStatus?: number; headStatusOnce?: number } = {}) => {
     const calls: Array<{ method: string; url: string }> = []
     t.mock.method(globalThis, 'fetch', async (url: unknown, init?: RequestInit) => {
       assert.equal(new URL(String(url)).hostname, 'album-test-123.cos.ap-shanghai.myqcloud.com'); assert.equal(init?.redirect, 'manual')
       const method = init?.method ?? 'GET'; calls.push({ method, url: String(url) }); assert.ok(new Headers(init?.headers).get('Authorization'))
       if (method === 'DELETE') return new Response(null, { status: options.deleteStatus ?? 200 })
-      if (method === 'HEAD') options.onHead?.()
+      if (method === 'HEAD') {
+        options.onHead?.()
+        if (options.headStatusOnce) { const code = options.headStatusOnce; options.headStatusOnce = 0; return new Response(null, { status: code, headers: { 'x-cos-request-id': 'retry-fixture' } }) }
+      }
       const data = options.actualBytes ?? bytes
       return new Response(method === 'HEAD' ? null : data, { status: options.status ?? 200, headers: { 'content-length': String(options.length ?? data.byteLength), 'content-type': options.type ?? 'image/jpeg', etag: options.etag ?? md5hex } })
     })
@@ -262,6 +265,28 @@ test('completion rechecks membership after HEAD and publication rejects current 
     assert.equal((await f.request(`/batches/${auth.batch_id}/publish`, {})).status, 409)
     assert.equal(f.db.prepare('SELECT count(*) AS n FROM posts').get()?.n, 0)
   } finally { f.db.close() }
+})
+
+test('completion retries transient storage verification failures with bounded backoff; 404 is never retried', async t => {
+  const f = await fixture()
+  try {
+    const album = await f.create(); const { auth } = await f.authorize(album.id)
+    // First preview HEAD fails with a transient 503, the retry succeeds: one extra HEAD, upload completes.
+    const calls = f.mockCos(t, { headStatusOnce: 503 })
+    await f.complete(auth)
+    assert.equal(calls.filter(call => call.method === 'HEAD').length, auth.uploads.length + 1)
+    assert.equal(f.db.prepare("SELECT count(*) AS n FROM album_uploads WHERE status='complete'").get()?.n, auth.uploads.length)
+  } finally { f.db.close() }
+  const g = await fixture()
+  try {
+    const album = await g.create(); const { auth } = await g.authorize(album.id)
+    // A definitive missing object must stay an immediate upload_object_missing answer with no retry.
+    const calls = g.mockCos(t, { status: 404 })
+    const response = await g.request(`/uploads/${auth.uploads[0].upload_id}/complete`, {})
+    assert.equal(response.status, 409); assert.equal((await response.json() as { code: string }).code, 'upload_object_missing')
+    assert.equal(calls.filter(call => call.method === 'HEAD').length, 1)
+    assert.equal(g.db.prepare("SELECT count(*) AS n FROM album_uploads WHERE status='complete'").get()?.n, 0)
+  } finally { g.db.close() }
 })
 
 test('shared members can read/like/comment only; rotated invites, self-leave, removal and private transitions revoke access', async t => {
@@ -550,4 +575,203 @@ test('reservation late write failure and quota race during atomic reserve roll b
     assert.equal((await f.request(`/${album.id}/batches/authorize`, f.input())).status, 409)
     assert.equal(f.db.prepare('SELECT count(*) AS n FROM album_batches').get()?.n, 0)
   } finally { f.db.close() }
+})
+
+test('protection migration is additive, false-default, replay-safe on old/fresh databases and rejects invalid state atomically', () => {
+  const protection = file('migrations/0072_album_image_protection.sql')
+  assert.ok(schema.includes(protection.trim()))
+  assert.ok(file('scripts/database-bootstrap-files.mjs').includes('migrations/0072_album_image_protection.sql'))
+  assert.doesNotMatch(protection, /\b(?:ALTER|DROP)\b/i)
+  for (const fresh of [false, true]) {
+    const db = new DatabaseSync(':memory:')
+    try {
+      db.exec('PRAGMA foreign_keys=ON')
+      db.exec(fresh ? schema : schema.slice(0, schema.indexOf(protection.trim())))
+      db.exec("INSERT INTO users(id,email,password_hash,username) VALUES(1,'migration@test.invalid','x','migration'); INSERT INTO albums(id,owner_id,name,visibility) VALUES('old',1,'old','public')")
+      db.exec(protection); db.exec(protection); db.exec(migration)
+      assert.equal(db.prepare('SELECT coalesce(p.download_protected,0) AS flag FROM albums a LEFT JOIN album_protection p ON p.album_id=a.id WHERE a.id=?').get('old')?.flag, 0)
+      db.exec("INSERT INTO album_protection(album_id) VALUES('old')")
+      assert.equal(db.prepare('SELECT download_protected FROM album_protection').get()?.download_protected, 0)
+      db.exec('BEGIN IMMEDIATE')
+      assert.throws(() => db.exec("UPDATE album_protection SET download_protected=1; UPDATE album_protection SET download_protected=2"), /CHECK/)
+      db.exec('ROLLBACK')
+      assert.equal(db.prepare('SELECT download_protected FROM album_protection').get()?.download_protected, 0)
+      assert.throws(() => db.exec("INSERT INTO album_protection(album_id) VALUES('missing')"), /FOREIGN KEY/)
+      assert.equal(db.prepare('SELECT name FROM albums').get()?.name, 'old')
+    } finally { db.close() }
+  }
+})
+
+test('owner protection toggles default/shared/public albums; default name/privacy remain immutable and types are strict', async () => {
+  const f = await fixture()
+  try {
+    const normal = [await f.create('shared'), await f.create('public')]
+    f.db.prepare('INSERT INTO album_members(album_id,user_id) VALUES(?,2)').run(normal[0].id)
+    const defaultAlbum = await ensureDefaultAlbum(f.libEnv, 1)
+    for (const album of [defaultAlbum, ...normal]) {
+      assert.equal((await (await f.request(`/${album.id}`)).json() as { album: Album }).album.download_protected, false)
+      for (const enabled of [true, false, true]) {
+        const r = await f.request(`/${album.id}`, { download_protected: enabled }, 'PATCH')
+        assert.equal(r.status, 200, await r.clone().text())
+        const dto = (await r.json() as { album: Album }).album
+        assert.equal(dto.download_protected, enabled); assert.equal(dto.name, album.name); assert.equal(dto.visibility, album.visibility)
+      }
+      for (const invalid of [null, 0, 1, 'true', [], {}]) assert.equal((await f.request(`/${album.id}`, { download_protected: invalid }, 'PATCH')).status, 400)
+    }
+    for (const input of [{ name: '宝宝相册', download_protected: false }, { visibility: 'private', download_protected: false }]) assert.equal((await f.request(`/${defaultAlbum.id}`, input, 'PATCH')).status, 409)
+    for (const album of normal) {
+      assert.equal((await f.request(`/${album.id}`, { download_protected: false }, 'PATCH', 2)).status, 403)
+      assert.equal((await (await f.request(`/${album.id}`, undefined, 'GET', 2)).json() as { album: Album }).album.download_protected, true)
+    }
+    f.controls.failStatement = sql => sql.startsWith('INSERT INTO album_protection')
+    assert.equal((await f.request(`/${normal[1].id}`, { name: 'must roll back', download_protected: false }, 'PATCH')).status, 503)
+    assert.equal(f.db.prepare('SELECT name FROM albums WHERE id=?').get(normal[1].id)?.name, normal[1].name)
+  } finally { f.db.close() }
+})
+
+test('protected nonowners preview only, cover hidden, both HD intents denied before signing/quota; owners stay free and original rules unchanged', async t => {
+  const f = await fixture(); f.mockCos(t)
+  try {
+    f.sponsor()
+    for (const visibility of ['shared', 'public']) {
+      const album = await f.create(visibility); const { auth } = await f.authorize(album.id, f.input('original')); await f.complete(auth); await f.publish(auth)
+      f.db.prepare('INSERT INTO album_members(album_id,user_id) VALUES(?,2)').run(album.id)
+      const photo = String(f.db.prepare('SELECT id FROM album_photos WHERE album_id=?').get(album.id)?.id)
+      await f.request(`/${album.id}`, { download_protected: true }, 'PATCH')
+      const detail = (await (await f.request(`/photos/${photo}`, undefined, 'GET', 2)).json() as PhotoDetailResponse).photo
+      assert.equal(detail.download_protected, true); assert.equal(detail.can_download, false)
+      assert.ok(detail.preview_url); assert.equal(detail.hd_url, null); assert.equal(detail.original_available, false)
+      const list = (await (await f.request(`/${album.id}/photos`, undefined, 'GET', 2)).json() as AlbumPhotosResponse).photos[0]
+      assert.equal(list.download_protected, true); assert.equal(list.can_download, false)
+      const card = (await (await f.request(`/${album.id}`, undefined, 'GET', 2)).json() as { album: Album }).album
+      assert.equal(card.cover_url, null); assert.equal(card.download_protected, true)
+      const before = f.db.prepare('SELECT count(*) AS n FROM sponsor_operations').get()?.n
+      const secret = f.env.COS_SECRET_KEY; f.env.COS_SECRET_KEY = ''
+      for (const intent of [undefined, 'view', 'download']) {
+        const denied = await f.request(`/photos/${photo}/authorize`, { variant: 'hd', operation_id: crypto.randomUUID(), ...(intent ? { intent } : {}) }, 'POST', 2)
+        assert.equal(denied.status, 403); assert.equal((await denied.json() as { code: string }).code, 'album_download_protected')
+      }
+      assert.equal(f.db.prepare('SELECT count(*) AS n FROM sponsor_operations').get()?.n, before)
+      assert.equal(f.db.prepare('SELECT count(*) AS n FROM sponsor_daily_usage WHERE user_id=2').get()?.n, 0)
+      f.env.COS_SECRET_KEY = secret
+      const owner = (await (await f.request(`/photos/${photo}`)).json() as PhotoDetailResponse).photo
+      assert.equal(owner.download_protected, true); assert.equal(owner.can_download, true); assert.ok(owner.hd_url); assert.equal(owner.original_available, true)
+      assert.ok((await (await f.request(`/${album.id}`)).json() as { album: Album }).album.cover_url)
+      const hd = await f.request(`/photos/${photo}/authorize`, { variant: 'hd', intent: 'download', operation_id: crypto.randomUUID() })
+      assert.equal(hd.status, 200); assert.equal((await hd.json() as { charged: boolean }).charged, false)
+      const originalBody = { variant: 'original', intent: 'download', operation_id: crypto.randomUUID() }
+      assert.equal((await f.request(`/photos/${photo}/authorize`, originalBody)).status, 200)
+      assert.equal((await f.request(`/photos/${photo}/authorize`, { ...originalBody, intent: 'view' })).status, 409)
+      assert.equal((await f.request(`/photos/${photo}/authorize`, { variant: 'original', operation_id: crypto.randomUUID() }, 'POST', 2)).status, 403)
+      f.db.exec("UPDATE sponsor_settings SET config_json=json_set(config_json,'$.enabled',json('false'))")
+      assert.equal((await f.request(`/photos/${photo}/authorize`, { variant: 'hd', intent: 'view', operation_id: crypto.randomUUID() }, 'POST', 2)).status, 403)
+      f.db.exec("UPDATE sponsor_settings SET config_json=json_set(config_json,'$.enabled',json('true'))")
+      await f.request(`/${album.id}`, { download_protected: false }, 'PATCH')
+      const refreshed = (await (await f.request(`/photos/${photo}`, undefined, 'GET', 2)).json() as PhotoDetailResponse).photo
+      assert.equal(refreshed.download_protected, false); assert.equal(refreshed.can_download, true)
+    }
+  } finally { f.db.close() }
+})
+
+test('authorization intent is strict and bound to idempotency; default view stays compatible and protected old retries denied', async t => {
+  const f = await fixture(); f.mockCos(t)
+  try {
+    const album = await f.create('public'); const { auth } = await f.authorize(album.id); await f.complete(auth); await f.publish(auth)
+    const photo = String(f.db.prepare('SELECT id FROM album_photos').get()?.id)
+    f.db.exec("UPDATE sponsor_settings SET config_json=json_set(config_json,'$.enabled',json('true'))")
+    const body = { variant: 'hd', operation_id: crypto.randomUUID(), notice_version: 1 }
+    for (const invalid of [null, 0, '', 'save', true, {}]) assert.equal((await f.request(`/photos/${photo}/authorize`, { ...body, intent: invalid }, 'POST', 2)).status, 400)
+    assert.equal((await f.request(`/photos/${photo}/authorize`, body, 'POST', 2)).status, 200)
+    const repeated = await f.request(`/photos/${photo}/authorize`, { ...body, intent: 'view' }, 'POST', 2)
+    assert.equal(repeated.status, 200); assert.equal((await repeated.json() as { charged: boolean }).charged, false)
+    assert.equal((await f.request(`/photos/${photo}/authorize`, { ...body, intent: 'download' }, 'POST', 2)).status, 409)
+    const download = { ...body, operation_id: crypto.randomUUID(), intent: 'download' }
+    assert.equal((await f.request(`/photos/${photo}/authorize`, download, 'POST', 2)).status, 200)
+    assert.equal((await f.request(`/photos/${photo}/authorize`, { ...download, notice_version: undefined }, 'POST', 2)).status, 200)
+    assert.equal(f.db.prepare('SELECT used FROM sponsor_daily_usage WHERE user_id=2').get()?.used, 2)
+    await f.request(`/${album.id}`, { download_protected: true }, 'PATCH')
+    for (const old of [body, download]) {
+      const r = await f.request(`/photos/${photo}/authorize`, old, 'POST', 2)
+      assert.equal(r.status, 403); assert.doesNotMatch(await r.text(), /q-signature|albums\/1\//)
+    }
+    assert.equal(f.db.prepare('SELECT used FROM sponsor_daily_usage WHERE user_id=2').get()?.used, 2)
+    await f.request(`/${album.id}`, { download_protected: false }, 'PATCH')
+    const recovered = await f.request(`/photos/${photo}/authorize`, body, 'POST', 2)
+    assert.equal(recovered.status, 200); assert.equal((await recovered.json() as { charged: boolean }).charged, false)
+  } finally { f.db.close() }
+})
+
+test('live protection toggled before quota or inside debit rolls back sponsor operation, usage and in-transaction toggle', async t => {
+  const f = await fixture(); f.mockCos(t)
+  try {
+    const album = await f.create('public'); const { auth } = await f.authorize(album.id); await f.complete(auth); await f.publish(auth)
+    const photo = String(f.db.prepare('SELECT id FROM album_photos').get()?.id)
+    f.db.exec("UPDATE sponsor_settings SET config_json=json_set(config_json,'$.enabled',json('true'))")
+    const body = { variant: 'hd', intent: 'download', operation_id: crypto.randomUUID(), notice_version: 1 }
+    f.controls.beforeBatch = () => f.db.prepare('INSERT INTO album_protection(album_id,download_protected) VALUES(?,1)').run(album.id)
+    assert.equal((await f.request(`/photos/${photo}/authorize`, body, 'POST', 2)).status, 403)
+    assert.equal(f.db.prepare("SELECT count(*) AS n FROM sponsor_operations WHERE kind='original'").get()?.n, 0)
+    f.db.exec('UPDATE album_protection SET download_protected=0')
+    f.db.exec(`CREATE TRIGGER test_toggle_during_debit AFTER INSERT ON sponsor_operations WHEN NEW.kind='original'
+      BEGIN UPDATE album_protection SET download_protected=1; END;`)
+    const r = await f.request(`/photos/${photo}/authorize`, body, 'POST', 2)
+    assert.equal(r.status, 403); assert.doesNotMatch(await r.text(), /q-signature/)
+    assert.equal(f.db.prepare("SELECT count(*) AS n FROM sponsor_operations WHERE kind='original'").get()?.n, 0)
+    assert.equal(f.db.prepare('SELECT count(*) AS n FROM sponsor_daily_usage').get()?.n, 0)
+    assert.equal(f.db.prepare('SELECT download_protected FROM album_protection').get()?.download_protected, 0)
+    assert.equal(f.db.prepare('SELECT count(*) AS n FROM album_object_cleanup').get()?.n, 0)
+    assert.equal(f.db.prepare('SELECT count(*) AS n FROM album_uploads').get()?.n, 2)
+    assert.equal(f.db.prepare('SELECT used_bytes FROM album_storage').get()?.used_bytes, bytes.byteLength * 2)
+  } finally { f.db.close() }
+})
+
+test('fresh DTO protection and final authorization read reject post-quota toggles without signed URLs', async t => {
+  const f = await fixture(); f.mockCos(t)
+  try {
+    const album = await f.create('public'); const { auth } = await f.authorize(album.id); await f.complete(auth); await f.publish(auth)
+    const photo = String(f.db.prepare('SELECT id FROM album_photos').get()?.id)
+    const toggle = () => f.db.prepare('INSERT INTO album_protection(album_id,download_protected) VALUES(?,1) ON CONFLICT(album_id) DO UPDATE SET download_protected=1').run(album.id)
+    let reads = 0
+    f.controls.beforeFirst = sql => { if (sql.startsWith('SELECT a.*') && ++reads === 3) toggle() }
+    const card = (await (await f.request(`/${album.id}`, undefined, 'GET', 2)).json() as { album: Album }).album
+    assert.equal(card.download_protected, true); assert.equal(card.cover_url, null)
+    f.db.exec('UPDATE album_protection SET download_protected=0'); reads = 0
+    f.controls.beforeFirst = sql => { if (sql.startsWith('SELECT EXISTS(SELECT 1 FROM sponsor_memberships') && ++reads === 2) toggle() }
+    const dto = (await (await f.request(`/photos/${photo}`, undefined, 'GET', 2)).json() as PhotoDetailResponse).photo
+    assert.equal(dto.download_protected, true); assert.equal(dto.can_download, false); assert.equal(dto.hd_url, null)
+    for (const finalRead of [2, 3]) {
+      f.db.exec('UPDATE album_protection SET download_protected=0'); reads = 0
+      f.controls.beforeFirst = sql => { if (sql.startsWith('SELECT p.*') && ++reads === finalRead) toggle() }
+      const denied = await f.request(`/photos/${photo}/authorize`, { variant: 'hd', operation_id: crypto.randomUUID() }, 'POST', 2)
+      assert.equal(denied.status, 403); assert.doesNotMatch(await denied.text(), /q-signature/)
+    }
+  } finally { f.db.close() }
+})
+
+test('missing protection storage fails503 rather than claiming unprotected, and raw PATCH body is consumed exactly once', async () => {
+  const f = await fixture()
+  try {
+    const album = await f.create('public')
+    const raw = new Request(`http://localhost/api/v1/albums/${album.id}`, { method: 'PATCH', headers: { Authorization: `Bearer ${f.tokens[0]}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ download_protected: true }) })
+    const response = await f.app.request(raw, undefined, f.env as never)
+    assert.equal(response.status, 200); assert.equal((await response.json() as { album: Album }).album.download_protected, true)
+    f.controls.beforeFirst = sql => { if (sql.includes('FROM album_protection')) throw new Error('no such table: album_protection') }
+    for (const [method, body] of [['GET', undefined], ['PATCH', { download_protected: false }]] as const) {
+      const r = await f.request(`/${album.id}`, body, method)
+      assert.equal(r.status, 503); assert.equal((await r.json() as { code: string }).code, 'albums_unavailable')
+    }
+    assert.equal(f.db.prepare('SELECT download_protected FROM album_protection').get()?.download_protected, 1)
+  } finally { f.db.close() }
+  const old = await fixture(false)
+  try {
+    old.db.exec("INSERT INTO albums(id,owner_id,name,visibility) VALUES('old-live',1,'old','public')")
+    for (const [path, method, body] of [
+      ['/old-live', 'GET', undefined], ['/old-live/photos', 'GET', undefined],
+      ['/old-live', 'PATCH', { download_protected: true }], ['/old-live', 'PATCH', { download_protected: false }],
+    ] as const) {
+      const response = await old.request(path, body, method)
+      assert.equal(response.status, 503); assert.equal((await response.json() as { code: string }).code, 'albums_unavailable')
+    }
+    assert.equal(old.db.prepare('SELECT count(*) AS n FROM sqlite_master WHERE name=?').get('album_protection')?.n, 0, 'no request-time table creation')
+  } finally { old.db.close() }
 })

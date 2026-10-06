@@ -67,6 +67,7 @@ import babyVerification from './routes/baby-verification.ts'
 import adminBabyVerification from './routes/admin-baby-verification.ts'
 import qq from './routes/qq.ts'
 import albums from './routes/albums.ts'
+import albumReports from './routes/album-reports.ts'
 
 type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 
@@ -277,6 +278,7 @@ app.route('/api/v1/novels/store', novelStore)
 app.route('/api/v1/sponsors', sponsors)
 app.route('/api/v1/baby-verification', babyVerification)
 app.route('/api/v1/albums', albums)
+app.route('/api/admin/album-reports', albumReports)
 app.route('/api/admin/baby-verification', adminBabyVerification)
 // 库存管理挂载在核心 /api/admin/sponsors 之前，避免核心路由的中间件先匹配。
 app.route('/api/admin/sponsors/stock', adminSponsorStock)
