@@ -1,6 +1,13 @@
 # 宝宝相册 API 与发布边界
 
-实现来源：后端与 Android 的 `feat/baby-albums`。2026-10-05 用户授权仅后端合入 main 并触发自动部署；已在生产应用 `migrations/0071_baby_albums.sql`，PR #18/main `92a15f3`及Workers Builds自动部署已成功并核验；详情见 [生产交付记录](baby-albums-production-2026-10-05.md)。没有手动部署 Worker、上传正式 APK 或修改 latest 元数据。后端上线后仍须发布支持相册的新 App。
+实现来源：后端与 Android 的 `feat/baby-albums`。2026-10-05 用户授权仅后端合入 main 并触发自动部署；已在生产应用 `migrations/0071_baby_albums.sql`，PR #18/main `92a15f3`及Workers Builds自动部署已成功并核验；详情见 [生产交付记录](baby-albums-production-2026-10-05.md)。后续增量功能（防盗图、相册举报）见下方"防盗图保护与相册举报"，尚未生产部署。没有手动部署 Worker、上传正式 APK 或修改 latest 元数据。后端上线后仍须发布支持相册的新 App。
+
+## 防盗图保护与相册举报（0072/0073，本地实现待发布）
+
+- 防盗图：主人可在设置开关 `download_protected`（默认相册允许仅改此项）。开启后其他用户 HD/原图授权被 403 `album_download_protected`，仍可看 60 秒预览；授权在扣额前后与签名后复检，事务内切换回滚扣额。Album/Photo/原生卡片增补 `download_protected`（Photo 另有 `can_download`），受保护相册对非主人的封面为空。migration 0072 为 `album_protection` 侧表，默认关闭。**边界**：预览字节本身可被复制、已签发短链在有效期内可用、root/外部相机无法阻止，不能声称绝对防盗。
+- 相册举报：`POST /api/v1/albums/:id/report`（登录用户、非主人、可访问相册；`reason` 为 spam/nsfw/minor/copyright/other，`detail`≤2000，`operation_id` 幂等；同一相册同一举报人只保留一条 open 举报，重复 409 `duplicate_open`；10 次/小时）。管理端 `/api/admin/album-reports`（独立于帖子举报）：列表/详情/`block`（期望状态替换屏蔽图片）/`resolve`；详情照片仅 60 秒签名预览，绝不返回原图/高清地址。被屏蔽照片对所有人 `admin_blocked:true`、`preview_url:null`，客户端显示"图片内容违规"占位图；点赞/评论/授权对该图 404 `photo_blocked`。相册 `photo_count` 显示未屏蔽数；原生卡片在全部被屏蔽时省略。migration 0073 建 `album_reports` 与 `album_photo_blocks`。
+
+## 防盗图保护与相册举报（0072/0073，本地实现待发布）
 
 ## 权限及存储规则
 

@@ -1,6 +1,8 @@
 const DEFAULT_BUCKET = 'abdl-1339643562'
 const DEFAULT_REGION = 'ap-shanghai'
 const AUTHORIZATION_TTL_SECONDS = 5 * 60
+/** Per-request ceiling for server-side private-object verification/cleanup calls. */
+const PRIVATE_REQUEST_TIMEOUT_MS = 10_000
 
 const encoder = new TextEncoder()
 
@@ -51,7 +53,7 @@ export class CosHttpError extends Error {
 }
 
 interface PutObjectToCosOptions extends CosAuthorizationOptions {
-	body: BodyInit
+	body: RequestInit['body']
 }
 
 export function md5Base64(input: Uint8Array): string {
@@ -278,6 +280,7 @@ export async function headPrivateObjectFromCos(options: CosAuthorizationOptions)
 		method: 'HEAD',
 		headers: signed.headers,
 		redirect: 'manual',
+		signal: AbortSignal.timeout(PRIVATE_REQUEST_TIMEOUT_MS),
 	})
 	if (!response.ok) {
 		throw new CosHttpError(response.status >= 300 && response.status < 400 ? 502 : response.status, 'HEAD', response.headers.get('x-cos-request-id'))
@@ -291,6 +294,7 @@ export async function getPrivateObjectFromCos(options: CosAuthorizationOptions):
 		method: 'GET',
 		headers: signed.headers,
 		redirect: 'manual',
+		signal: AbortSignal.timeout(PRIVATE_REQUEST_TIMEOUT_MS),
 	})
 	if (!response.ok) {
 		throw new CosHttpError(response.status >= 300 && response.status < 400 ? 502 : response.status, 'GET', response.headers.get('x-cos-request-id'))
@@ -304,6 +308,7 @@ export async function deleteObjectFromCos(options: CosAuthorizationOptions): Pro
 		method: 'DELETE',
 		headers: signed.headers,
 		redirect: 'manual',
+		signal: AbortSignal.timeout(PRIVATE_REQUEST_TIMEOUT_MS),
 	})
 	if (!response.ok) {
 		throw new CosHttpError(response.status >= 300 && response.status < 400 ? 502 : response.status, 'DELETE')

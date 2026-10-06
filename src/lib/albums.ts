@@ -130,14 +130,16 @@ export function albumPagination(limit: string | undefined, offset: string | unde
 }
 
 /** Server-internal album row, not a response projection. */
-export interface AlbumRow { id: string; owner_id: number; name: string; visibility: AlbumVisibility; is_default: number; created_at: number; updated_at: number; deleted_at: number | null }
+export interface AlbumRow { id: string; owner_id: number; name: string; visibility: AlbumVisibility; is_default: number; created_at: number; updated_at: number; deleted_at: number | null; download_protected: number }
 interface PhotoRow {
   id: string; album_id: string; batch_id: string; owner_id: number; client_id: string; description: string; captured_at: number | null
   uploaded_at: number; width: number; height: number; preview_key: string; hd_key: string; original_key: string | null
-  preview_bytes: number; hd_bytes: number; original_bytes: number; deleted_at: number | null
+  preview_bytes: number; hd_bytes: number; original_bytes: number; deleted_at: number | null; download_protected: number; admin_blocked: number
 }
 interface PhotoProjectionRow extends PhotoRow { likes_count: number; comments_count: number; liked: number }
-const PHOTO_PROJECTION = `p.*,(SELECT count(*) FROM album_likes WHERE photo_id=p.id) AS likes_count,
+const PROTECTION = `coalesce((SELECT download_protected FROM album_protection WHERE album_id=a.id),0)`
+const BLOCKED = `EXISTS(SELECT 1 FROM album_photo_blocks b WHERE b.album_id=p.album_id AND b.photo_id=p.id)`
+const PHOTO_PROJECTION = `p.*,${PROTECTION} AS download_protected,${BLOCKED} AS admin_blocked,(SELECT count(*) FROM album_likes WHERE photo_id=p.id) AS likes_count,
   (SELECT count(*) FROM album_comments WHERE photo_id=p.id AND deleted_at IS NULL) AS comments_count,
   EXISTS(SELECT 1 FROM album_likes WHERE photo_id=p.id AND user_id=?) AS liked`
 interface BatchRow {
@@ -189,7 +191,7 @@ async function signRead(env: AlbumEnv, ownerId: number, key: string): Promise<{ 
 
 /** Read the currently permitted album without exposing existence of inaccessible private albums. */
 export async function getAccessibleAlbum(env: AlbumEnv, userId: number, albumId: string): Promise<AlbumRow> {
-  const row = await env.abdl_space_db.prepare(`SELECT a.* FROM albums a WHERE a.id=? AND a.deleted_at IS NULL AND ${ACL}`).bind(id(albumId), userId, userId).first<AlbumRow>()
+  const row = await env.abdl_space_db.prepare(`SELECT a.*,${PROTECTION} AS download_protected FROM albums a WHERE a.id=? AND a.deleted_at IS NULL AND ${ACL}`).bind(id(albumId), userId, userId).first<AlbumRow>()
   if (!row) throw new AlbumError('album_not_found', '相册不存在或无访问权限', 404)
   return row
 }
@@ -199,9 +201,14 @@ async function ownedAlbum(env: AlbumEnv, userId: number, albumId: string): Promi
   return row
 }
 async function accessiblePhoto(env: AlbumEnv, userId: number, photoId: string): Promise<PhotoRow> {
-  const row = await env.abdl_space_db.prepare(`SELECT p.* FROM album_photos p JOIN albums a ON a.id=p.album_id WHERE p.id=? AND p.deleted_at IS NULL AND a.deleted_at IS NULL AND ${ACL}`).bind(id(photoId), userId, userId).first<PhotoRow>()
+  const row = await env.abdl_space_db.prepare(`SELECT p.*,${PROTECTION} AS download_protected,${BLOCKED} AS admin_blocked FROM album_photos p JOIN albums a ON a.id=p.album_id WHERE p.id=? AND p.deleted_at IS NULL AND a.deleted_at IS NULL AND ${ACL}`).bind(id(photoId), userId, userId).first<PhotoRow>()
   if (!row) throw new AlbumError('photo_not_found', '照片不存在或无访问权限', 404)
   return row
+}
+
+/** Admin blocks apply to every viewer including the owner; the photo stays stored. */
+function assertPhotoNotBlocked(photo: { admin_blocked: number | boolean }): void {
+  if (photo.admin_blocked) throw new AlbumError('photo_blocked', '照片已被管理员处理，暂时无法查看或操作', 404)
 }
 
 /** Create exactly one immutable private default album, safely under concurrent retries. */
@@ -212,7 +219,7 @@ export async function ensureDefaultAlbum(env: AlbumEnv, userId: number): Promise
     env.abdl_space_db.prepare(`INSERT INTO albums(id,owner_id,name,visibility,is_default) VALUES(?,?,'宝宝相册','private',1) ON CONFLICT DO NOTHING`).bind(albumId, userId),
     env.abdl_space_db.prepare('INSERT INTO album_storage(user_id) VALUES(?) ON CONFLICT(user_id) DO NOTHING').bind(userId),
   ])
-  const row = await env.abdl_space_db.prepare('SELECT * FROM albums WHERE owner_id=? AND is_default=1').bind(userId).first<AlbumRow>()
+  const row = await env.abdl_space_db.prepare(`SELECT a.*,${PROTECTION} AS download_protected FROM albums a WHERE owner_id=? AND is_default=1`).bind(userId).first<AlbumRow>()
   if (!row) throw new AlbumError('albums_unavailable', '默认相册暂不可用', 503)
   return row
 }
@@ -230,18 +237,20 @@ async function activeSponsor(env: AlbumEnv, userId: number): Promise<boolean> {
 
 /** Project only DTO fields, with short-lived previews and a final current ACL read. */
 export async function albumDto(env: AlbumEnv, userId: number, album: AlbumRow): Promise<Album> {
-  const stats = await env.abdl_space_db.prepare(`SELECT (SELECT count(*) FROM album_photos WHERE album_id=? AND deleted_at IS NULL) AS photo_count,(SELECT count(*) FROM album_members WHERE album_id=?) AS member_count`).bind(album.id, album.id).first<{ photo_count: number; member_count: number }>()
-  const cover = await env.abdl_space_db.prepare(`SELECT preview_key FROM album_photos WHERE album_id=? AND deleted_at IS NULL ORDER BY coalesce(captured_at,uploaded_at) DESC,uploaded_at DESC,batch_id DESC,sort_order,id DESC LIMIT 1`).bind(album.id).first<{ preview_key: string }>()
-  const url = cover ? (await signRead(env, album.owner_id, cover.preview_key)).url : null
+  // Card counts exclude admin-blocked photos; every blocked photo stays stored and countable by admins.
+  const stats = await env.abdl_space_db.prepare(`SELECT (SELECT count(*) FROM album_photos p WHERE p.album_id=? AND p.deleted_at IS NULL AND NOT EXISTS(SELECT 1 FROM album_photo_blocks b WHERE b.album_id=p.album_id AND b.photo_id=p.id)) AS photo_count,(SELECT count(*) FROM album_members WHERE album_id=?) AS member_count`).bind(album.id, album.id).first<{ photo_count: number; member_count: number }>()
+  const cover = await env.abdl_space_db.prepare(`SELECT preview_key FROM album_photos WHERE album_id=? AND deleted_at IS NULL AND NOT EXISTS(SELECT 1 FROM album_photo_blocks b WHERE b.album_id=album_photos.album_id AND b.photo_id=album_photos.id) ORDER BY coalesce(captured_at,uploaded_at) DESC,uploaded_at DESC,batch_id DESC,sort_order,id DESC LIMIT 1`).bind(album.id).first<{ preview_key: string }>()
+  const before = await getAccessibleAlbum(env, userId, album.id)
+  const url = cover && (before.owner_id === userId || !before.download_protected) ? (await signRead(env, before.owner_id, cover.preview_key)).url : null
   const current = await getAccessibleAlbum(env, userId, album.id)
-  return { id: current.id, owner_id: current.owner_id, name: current.name, visibility: current.visibility, is_default: !!current.is_default, photo_count: stats?.photo_count ?? 0, cover_url: url, created_at: current.created_at, can_upload: current.owner_id === userId, is_owner: current.owner_id === userId, member_count: stats?.member_count ?? 0 }
+  return { id: current.id, owner_id: current.owner_id, name: current.name, visibility: current.visibility, is_default: !!current.is_default, download_protected: !!current.download_protected, photo_count: stats?.photo_count ?? 0, cover_url: current.download_protected && current.owner_id !== userId ? null : url, created_at: current.created_at, can_upload: current.owner_id === userId, is_owner: current.owner_id === userId, member_count: stats?.member_count ?? 0 }
 }
 
 /** List public/owned/shared-readable albums; another owner's private default is never created. */
 export async function listAlbums(env: AlbumEnv, userId: number, ownerId: number, pagination: { limit: number; offset: number }): Promise<AlbumListResponse> {
   integer(ownerId, 1, Number.MAX_SAFE_INTEGER)
   if (ownerId === userId) await ensureDefaultAlbum(env, userId)
-  const rows = await env.abdl_space_db.prepare(`SELECT a.* FROM albums a WHERE a.owner_id=? AND a.deleted_at IS NULL AND ${ACL} ORDER BY a.is_default DESC,a.created_at DESC,a.id DESC LIMIT ? OFFSET ?`).bind(ownerId, userId, userId, pagination.limit + 1, pagination.offset).all<AlbumRow>()
+  const rows = await env.abdl_space_db.prepare(`SELECT a.*,${PROTECTION} AS download_protected FROM albums a WHERE a.owner_id=? AND a.deleted_at IS NULL AND ${ACL} ORDER BY a.is_default DESC,a.created_at DESC,a.id DESC LIMIT ? OFFSET ?`).bind(ownerId, userId, userId, pagination.limit + 1, pagination.offset).all<AlbumRow>()
   if (!rows.success) throw new Error('Album query failed')
   return { albums: await Promise.all(rows.results.slice(0, pagination.limit).map(row => albumDto(env, userId, row))), has_more: rows.results.length > pagination.limit }
 }
@@ -254,28 +263,43 @@ export async function createAlbum(env: AlbumEnv, userId: number, input: unknown)
   return albumDto(env, userId, await getAccessibleAlbum(env, userId, albumId))
 }
 
-/** Patch owner metadata; defaults are immutable even if the same values are supplied. */
+/** Patch owner metadata atomically; default name/privacy stay immutable, protection is reversible. */
 export async function patchAlbum(env: AlbumEnv, userId: number, albumId: string, input: unknown): Promise<Album> {
-  const value = object(input); allowedKeys(value, ['name', 'visibility'])
+  const value = object(input); allowedKeys(value, ['name', 'visibility', 'download_protected'])
   if (!Object.keys(value).length) throw new AlbumError('invalid_request', '没有需要修改的字段')
+  if ('download_protected' in value && typeof value.download_protected !== 'boolean') throw new AlbumError('invalid_request', 'download_protected 必须为布尔值')
   const album = await ownedAlbum(env, userId, albumId)
-  if (album.is_default) throw new AlbumError('default_album_immutable', '默认相册不能修改或删除', 409)
-  const name = value.name === undefined ? album.name : text(value.name, 80)
-  const mode = value.visibility === undefined ? album.visibility : visibility(value.visibility)
-  await atomic(env, [ownerGuard(env, userId, albumId), env.abdl_space_db.prepare('UPDATE albums SET name=?,visibility=?,updated_at=unixepoch() WHERE id=? AND owner_id=? AND deleted_at IS NULL AND is_default=0').bind(name, mode, albumId, userId)])
+  if (album.is_default && ('name' in value || 'visibility' in value)) throw new AlbumError('default_album_immutable', '默认相册名称和可见性不能修改', 409)
+  const statements = [ownerGuard(env, userId, albumId)]
+  if ('name' in value || 'visibility' in value) {
+    const name = value.name === undefined ? album.name : text(value.name, 80)
+    const mode = value.visibility === undefined ? album.visibility : visibility(value.visibility)
+    statements.push(env.abdl_space_db.prepare('UPDATE albums SET name=?,visibility=?,updated_at=unixepoch() WHERE id=? AND owner_id=? AND deleted_at IS NULL AND is_default=0').bind(name, mode, albumId, userId))
+  }
+  if ('download_protected' in value) statements.push(env.abdl_space_db.prepare('INSERT INTO album_protection(album_id,download_protected) VALUES(?,?) ON CONFLICT(album_id) DO UPDATE SET download_protected=excluded.download_protected').bind(albumId, value.download_protected ? 1 : 0))
+  await atomic(env, statements)
   return albumDto(env, userId, await getAccessibleAlbum(env, userId, albumId))
 }
 
 async function photoDto(env: AlbumEnv, userId: number, row: PhotoProjectionRow, sponsor: boolean): Promise<Photo> {
+  const blocked = !!row.admin_blocked
   return {
     id: row.id, album_id: row.album_id, batch_id: row.batch_id, description: row.description,
     captured_at: row.captured_at, uploaded_at: row.uploaded_at, sort_at: row.captured_at ?? row.uploaded_at,
-    preview_url: (await signRead(env, row.owner_id, row.preview_key)).url,
-    hd_url: userId === row.owner_id && sponsor ? (await signRead(env, row.owner_id, row.hd_key)).url : null,
-    original_available: userId === row.owner_id && row.original_key !== null, width: row.width, height: row.height,
+    preview_url: blocked ? null : (await signRead(env, row.owner_id, row.preview_key)).url,
+    hd_url: !blocked && userId === row.owner_id && sponsor ? (await signRead(env, row.owner_id, row.hd_key)).url : null,
+    original_available: !blocked && userId === row.owner_id && row.original_key !== null, width: row.width, height: row.height,
     likes_count: row.likes_count, comments_count: row.comments_count, liked: !!row.liked,
     is_owner: userId === row.owner_id, owner_sponsor: sponsor,
+    download_protected: !!row.download_protected, can_download: !blocked && (userId === row.owner_id || !row.download_protected),
+    admin_blocked: blocked,
   }
+}
+
+/** Replace blocked display state on freshly read DTOs; signed leases older than a block are never returned. */
+function applyBlocked(photo: Photo): void {
+  if (!photo.admin_blocked) return
+  photo.preview_url = null; photo.hd_url = null; photo.original_available = false; photo.can_download = false
 }
 
 /** Renew one accessible photo preview without charging quota or returning a lossless original URL. */
@@ -285,10 +309,14 @@ export async function getAlbumPhoto(env: AlbumEnv, userId: number, photoId: stri
   if (!row) throw new AlbumError('photo_not_found', '照片不存在或无访问权限', 404)
   const photo = await photoDto(env, userId, row, await activeSponsor(env, row.owner_id))
   // Signing is asynchronous: a removed shared member or deleted photo must not receive the fresh URL.
-  await accessiblePhoto(env, userId, photoId)
   const currentSponsor = await activeSponsor(env, row.owner_id)
+  const current = await accessiblePhoto(env, userId, photoId)
   photo.owner_sponsor = currentSponsor
-  if (!currentSponsor) photo.hd_url = null
+  photo.download_protected = !!current.download_protected
+  photo.can_download = userId === current.owner_id || !current.download_protected
+  photo.admin_blocked = !!current.admin_blocked
+  if (!currentSponsor || userId !== current.owner_id) photo.hd_url = null
+  applyBlocked(photo)
   return photo
 }
 
@@ -299,9 +327,19 @@ export async function listAlbumPhotos(env: AlbumEnv, userId: number, albumId: st
   if (!rows.success) throw new Error('Photo query failed')
   const sponsor = await activeSponsor(env, album.owner_id)
   const photos = await Promise.all(rows.results.slice(0, pagination.limit).map(row => photoDto(env, userId, row, sponsor)))
-  await getAccessibleAlbum(env, userId, albumId)
   const currentSponsor = await activeSponsor(env, album.owner_id)
-  for (const photo of photos) { photo.owner_sponsor = currentSponsor; if (!currentSponsor) photo.hd_url = null }
+  const current = await getAccessibleAlbum(env, userId, albumId)
+  // A block committed while rows were read must still replace every signed preview.
+  const blocked = await env.abdl_space_db.prepare('SELECT photo_id FROM album_photo_blocks WHERE album_id=?').bind(albumId).all<{ photo_id: string }>()
+  const blockedIds = new Set(blocked.results.map(row => row.photo_id))
+  for (const photo of photos) {
+    photo.owner_sponsor = currentSponsor
+    photo.download_protected = !!current.download_protected
+    photo.can_download = userId === current.owner_id || !current.download_protected
+    photo.admin_blocked = blockedIds.has(photo.id)
+    if (!currentSponsor || userId !== current.owner_id) photo.hd_url = null
+    applyBlocked(photo)
+  }
   return { photos, has_more: rows.results.length > pagination.limit }
 }
 
@@ -395,27 +433,53 @@ function previewDimensions(bytes: Uint8Array): { width: number; height: number }
   }
   return null
 }
-async function verifyPreviewDimensions(env: AlbumEnv, upload: UploadRow): Promise<void> {
-  const response = await getPrivateObjectFromCos({ ...cosOptions(env), objectKey: upload.object_key, contentType: upload.mime_type })
-  const reader = response.body?.getReader()
-  if (!reader) throw new AlbumError('album_upload_mismatch', '照片内容不完整', 422)
-  const chunks: Uint8Array[] = []
-  let length = 0
-  try {
-    while (true) {
-      const chunk = await reader.read()
-      if (chunk.done) break
-      length += chunk.value.byteLength
-      if (length > upload.declared_size || length > 2 * MIB) throw new AlbumError('album_upload_mismatch', '预览图片过大', 422)
-      chunks.push(chunk.value)
+const VERIFICATION_RETRY_DELAYS_MS = [250, 1000]
+
+/** Transient storage failures get bounded retries so one flaky COS call cannot fail a whole batch. */
+function isRetryableVerificationFailure(error: unknown): boolean {
+  if (error instanceof AlbumError) return false
+  if (error instanceof CosHttpError) return error.status !== 404
+  return error instanceof Error
+}
+
+async function withVerificationRetries<T>(attempt: () => Promise<T>): Promise<T> {
+  for (let retries = 0; ; retries++) {
+    try { return await attempt() }
+    catch (error) {
+      if (retries >= VERIFICATION_RETRY_DELAYS_MS.length || !isRetryableVerificationFailure(error)) throw error
+      await new Promise(resolve => setTimeout(resolve, VERIFICATION_RETRY_DELAYS_MS[retries]))
     }
-  } catch (error) { await reader.cancel().catch(() => undefined); throw error }
-  const bytes = new Uint8Array(length)
-  let offset = 0
-  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength }
+  }
+}
+
+async function readVerifiedPreviewBytes(env: AlbumEnv, upload: UploadRow): Promise<Uint8Array> {
+  return withVerificationRetries(async () => {
+    const response = await getPrivateObjectFromCos({ ...cosOptions(env), objectKey: upload.object_key, contentType: upload.mime_type })
+    const reader = response.body?.getReader()
+    if (!reader) throw new AlbumError('album_upload_mismatch', '照片内容不完整', 422)
+    const chunks: Uint8Array[] = []
+    let length = 0
+    try {
+      while (true) {
+        const chunk = await reader.read()
+        if (chunk.done) break
+        length += chunk.value.byteLength
+        if (length > upload.declared_size || length > 2 * MIB) throw new AlbumError('album_upload_mismatch', '预览图片过大', 422)
+        chunks.push(chunk.value)
+      }
+    } catch (error) { await reader.cancel().catch(() => undefined); throw error }
+    const bytes = new Uint8Array(length)
+    let offset = 0
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength }
+    return bytes
+  })
+}
+
+async function verifyPreviewDimensions(env: AlbumEnv, upload: UploadRow): Promise<void> {
+  const bytes = await readVerifiedPreviewBytes(env, upload)
   const dimensions = previewDimensions(bytes)
   const magicMatches = upload.mime_type === 'image/jpeg' ? bytes[0] === 0xff && bytes[1] === 0xd8 : new TextDecoder().decode(bytes.subarray(8, 12)) === 'WEBP'
-  if (!magicMatches || dimensions?.width === 0 || dimensions?.height === 0 || length !== upload.declared_size || md5Base64(bytes) !== upload.content_md5 || !dimensions || Math.max(dimensions.width, dimensions.height) > 540
+  if (!magicMatches || dimensions?.width === 0 || dimensions?.height === 0 || bytes.byteLength !== upload.declared_size || md5Base64(bytes) !== upload.content_md5 || !dimensions || Math.max(dimensions.width, dimensions.height) > 540
     || (upload.variant_width !== null && dimensions.width !== upload.variant_width) || (upload.variant_height !== null && dimensions.height !== upload.variant_height)) throw new AlbumError('album_preview_dimensions', '预览图片内容或实际尺寸不正确（最长边 540）', 422)
 }
 
@@ -432,8 +496,9 @@ export async function completeAlbumUpload(env: AlbumEnv, userId: number, uploadI
   if (upload.status === 'complete') { await atomic(env, permission); return { complete: true } }
   if (upload.expires_at <= Math.floor(Date.now() / 1000)) throw new AlbumError('upload_expired', '上传授权已过期，请重新授权', 409)
   privateKey(userId, upload.object_key)
+  // A single transient COS failure must not abort the batch; 404 stays an immediate definitive answer.
   let head: Response
-  try { head = await headPrivateObjectFromCos({ ...cosOptions(env), objectKey: upload.object_key, contentType: upload.mime_type }) }
+  try { head = await withVerificationRetries(() => headPrivateObjectFromCos({ ...cosOptions(env), objectKey: upload.object_key, contentType: upload.mime_type })) }
   catch (error) { throw new AlbumError(error instanceof CosHttpError && error.status === 404 ? 'upload_object_missing' : 'upload_verification_unavailable', error instanceof CosHttpError && error.status === 404 ? '照片尚未上传' : '照片校验暂不可用', error instanceof CosHttpError && error.status === 404 ? 409 : 502) }
   const length = head.headers.get('content-length')
   const type = head.headers.get('content-type')?.split(';')[0].trim().toLowerCase()
@@ -536,56 +601,101 @@ export async function insertAlbumHistoryPhoto(env: AlbumEnv, userId: number, inp
   return publishReservedAlbumHistoryPhoto(env, userId, reserved.batch_id)
 }
 
-/** Explicit HD/original viewing uses a server-derived media hash, current ACL and atomic sponsor debit guards. */
+function assertPhotoDownloadAccess(photo: PhotoRow, userId: number): void {
+  if (photo.download_protected && photo.owner_id !== userId) throw new AlbumError('album_download_protected', '相册已开启防盗图保护，仅所有者可以获取高清或原图', 403)
+}
+function blockedGuard(env: AlbumEnv, photoId: string): D1PreparedStatement {
+  // Transaction-local sentinel raising only on CURRENT admin-blocked access, mirroring the protection guard.
+  return env.abdl_space_db.prepare(`SELECT CASE WHEN EXISTS(SELECT 1 FROM album_photo_blocks b JOIN album_photos p ON p.id=b.photo_id
+    WHERE p.id=? AND p.deleted_at IS NULL) THEN abs(-9223372036854775808) ELSE 1 END`).bind(photoId)
+}
+function protectionGuard(env: AlbumEnv, userId: number, photoId: string): D1PreparedStatement {
+  // This transaction-local sentinel raises only on CURRENT protected nonowner access.
+  // Unlike a cached boolean it also detects a toggle triggered by the quota insert itself.
+  return env.abdl_space_db.prepare(`SELECT CASE WHEN EXISTS(SELECT 1 FROM album_photos p JOIN albums a ON a.id=p.album_id
+    WHERE p.id=? AND a.owner_id!=? AND ${PROTECTION}=1) THEN abs(-9223372036854775808) ELSE 1 END`).bind(photoId, userId)
+}
+
+/** Authorize HD/original with live protection, intent-bound quota retries and pre/post-debit guards. */
 export async function authorizeAlbumPhoto(env: AlbumEnv, userId: number, photoId: string, input: unknown): Promise<AlbumPhotoAuthorization> {
-  const value = object(input); allowedKeys(value, ['variant', 'operation_id', 'notice_version'])
+  const value = object(input); allowedKeys(value, ['variant', 'operation_id', 'notice_version', 'intent'])
   if (value.variant !== 'hd' && value.variant !== 'original') throw new AlbumError('invalid_request', '照片变体不正确')
+  const intent = value.intent === undefined ? 'view' : value.intent
+  if (intent !== 'view' && intent !== 'download') throw new AlbumError('invalid_request', 'intent 必须为 view 或 download')
   const operationId = operation(value.operation_id)
   const photo = await accessiblePhoto(env, userId, photoId)
+  assertPhotoNotBlocked(photo)
+  assertPhotoDownloadAccess(photo, userId)
   const original = value.variant === 'original'
   if (original && photo.owner_id !== userId) throw new AlbumError('original_owner_only', '无损原图仅所有者可查看', 403)
   if (original && !photo.original_key) throw new AlbumError('original_not_available', '照片没有无损原图', 404)
-  const signed = await signRead(env, photo.owner_id, original ? photo.original_key! : photo.hd_key)
-  const check = photoGuard(env, userId, photoId, original)
-  // Free owner HD is checked under the transaction, then rechecked before returning the URL.
-  if (!original && photo.owner_id === userId && await activeSponsor(env, userId)) {
-    try {
-      await atomic(env, [check, guard(env, `EXISTS(SELECT 1 FROM sponsor_memberships WHERE user_id=? AND (permanent=1 OR expires_at>unixepoch()))`, userId)])
-      await accessiblePhoto(env, userId, photoId)
-      if (await activeSponsor(env, userId)) return { ...signed, charged: false }
-    } catch (error) { if (!(error instanceof AlbumError && error.code === 'album_conflict')) throw error }
+  cosOptions(env)
+  const checks = [photoGuard(env, userId, photoId, original), protectionGuard(env, userId, photoId), blockedGuard(env, photoId)]
+  const finish = async (result: Omit<AlbumPhotoAuthorization, 'url' | 'expires_at'>, freeSponsorOwner = false): Promise<AlbumPhotoAuthorization> => {
+    const current = await accessiblePhoto(env, userId, photoId)
+    assertPhotoNotBlocked(current)
+    assertPhotoDownloadAccess(current, userId)
+    if (original && (current.owner_id !== userId || current.original_key !== photo.original_key)) throw new AlbumError('original_owner_only', '无损原图仅所有者可查看', 403)
+    const signed = await signRead(env, current.owner_id, original ? current.original_key! : current.hd_key)
+    if (freeSponsorOwner && !await activeSponsor(env, userId)) throw new AlbumError('album_conflict', '赞助者状态已变更，请重新授权', 409)
+    const final = await accessiblePhoto(env, userId, photoId)
+    assertPhotoNotBlocked(final)
+    assertPhotoDownloadAccess(final, userId)
+    if (original && (final.owner_id !== userId || final.original_key !== current.original_key)) throw new AlbumError('original_owner_only', '无损原图仅所有者可查看', 403)
+    return { ...signed, ...result }
   }
-  const config = await getSponsorConfig(env)
-  if (!config.enabled) {
-    if (original) throw new AlbumError('original_quota_unavailable', '无损原图额度服务暂未开放', 503)
-    await atomic(env, [check, guard(env, `EXISTS(SELECT 1 FROM sponsor_settings WHERE id=1 AND json_extract(config_json,'$.enabled')=0)`)])
-    await accessiblePhoto(env, userId, photoId)
-    return { ...signed, charged: false }
+  try {
+    // Owner HD remains free only while the owner is a current sponsor.
+    if (!original && photo.owner_id === userId && await activeSponsor(env, userId)) {
+      try {
+        await atomic(env, [...checks, guard(env, `EXISTS(SELECT 1 FROM sponsor_memberships WHERE user_id=? AND (permanent=1 OR expires_at>unixepoch()))`, userId), ...checks])
+        if (await activeSponsor(env, userId)) return await finish({ charged: false }, true)
+      } catch (error) { if (!(error instanceof AlbumError && error.code === 'album_conflict')) throw error }
+    }
+    const config = await getSponsorConfig(env)
+    if (!config.enabled) {
+      if (original) throw new AlbumError('original_quota_unavailable', '无损原图额度服务暂未开放', 503)
+      await atomic(env, [...checks, guard(env, `EXISTS(SELECT 1 FROM sponsor_settings WHERE id=1 AND json_extract(config_json,'$.enabled')=0)`), ...checks])
+      return await finish({ charged: false })
+    }
+    // Preserve old/default view operation identity; explicit downloads have a distinct hash.
+    const mediaKey = await sponsorHash(`abdl-space:album-photo:${photo.id}:${value.variant}${intent === 'download' ? ':download' : ''}`)
+    const result = await authorizeSponsorOriginal(env, userId, { operation_id: operationId, media_key: mediaKey, notice_version: value.notice_version },
+      [...checks, guard(env, `EXISTS(SELECT 1 FROM sponsor_settings WHERE id=1 AND json_extract(config_json,'$.enabled')=1)`)], checks)
+    return await finish({ charged: !result.replayed, quota: result.quota })
+  } catch (error) {
+    if (error instanceof Error && /integer overflow/.test(error.message)) {
+      // The sentinel does not say which guard tripped; re-read the live state to name the denial.
+      const current = await accessiblePhoto(env, userId, photoId).catch(() => null)
+      if (current?.admin_blocked) throw new AlbumError('photo_blocked', '照片已被管理员处理，暂时无法查看或操作', 404)
+      throw new AlbumError('album_download_protected', '相册已开启防盗图保护，仅所有者可以获取高清或原图', 403)
+    }
+    throw error
   }
-  const result = await authorizeSponsorOriginal(env, userId, { operation_id: operationId, media_key: await sponsorHash(`abdl-space:album-photo:${photo.id}:${value.variant}`), notice_version: value.notice_version }, [check, guard(env, `EXISTS(SELECT 1 FROM sponsor_settings WHERE id=1 AND json_extract(config_json,'$.enabled')=1)`)])
-  const current = await accessiblePhoto(env, userId, photoId)
-  if (original && (current.owner_id !== userId || current.original_key !== photo.original_key)) throw new AlbumError('original_owner_only', '无损原图仅所有者可查看', 403)
-  return { ...signed, charged: !result.replayed, quota: result.quota }
 }
 
 /** Idempotent like/unlike guarded by current album access within the transaction. */
 export async function likeAlbumPhoto(env: AlbumEnv, userId: number, photoId: string, input: unknown): Promise<{ liked: boolean; likes_count: number }> {
   const value = object(input); allowedKeys(value, ['liked'])
   if (typeof value.liked !== 'boolean') throw new AlbumError('invalid_request', 'liked 必须为布尔值')
-  await accessiblePhoto(env, userId, photoId)
+  const photo = await accessiblePhoto(env, userId, photoId)
+  assertPhotoNotBlocked(photo)
   await atomic(env, [photoGuard(env, userId, photoId), value.liked ? env.abdl_space_db.prepare('INSERT INTO album_likes(photo_id,user_id) VALUES(?,?) ON CONFLICT(photo_id,user_id) DO NOTHING').bind(photoId, userId) : env.abdl_space_db.prepare('DELETE FROM album_likes WHERE photo_id=? AND user_id=?').bind(photoId, userId)])
-  await accessiblePhoto(env, userId, photoId)
+  const current = await accessiblePhoto(env, userId, photoId)
+  assertPhotoNotBlocked(current)
   const row = await env.abdl_space_db.prepare('SELECT count(*) AS likes_count,EXISTS(SELECT 1 FROM album_likes WHERE photo_id=? AND user_id=?) AS liked FROM album_likes WHERE photo_id=?').bind(photoId, userId, photoId).first<{ likes_count: number; liked: number }>()
   return { liked: !!row?.liked, likes_count: row?.likes_count ?? 0 }
 }
 const COMMENT_SELECT = `SELECT c.id,c.user_id,u.username,u.display_name,u.avatar,c.content,c.created_at FROM album_comments c JOIN users u ON u.id=c.user_id`
 
-/** Paginate comments only while the photo remains accessible. */
+/** Paginate comments only while the photo remains accessible and unblocked. */
 export async function listAlbumComments(env: AlbumEnv, userId: number, photoId: string, pagination: { limit: number; offset: number }): Promise<AlbumCommentsResponse> {
-  await accessiblePhoto(env, userId, photoId)
+  const photo = await accessiblePhoto(env, userId, photoId)
+  assertPhotoNotBlocked(photo)
   const rows = await env.abdl_space_db.prepare(`${COMMENT_SELECT} WHERE c.photo_id=? AND c.deleted_at IS NULL ORDER BY c.created_at,c.id LIMIT ? OFFSET ?`).bind(photoId, pagination.limit + 1, pagination.offset).all<AlbumComment>()
   if (!rows.success) throw new Error('Comment query failed')
-  await accessiblePhoto(env, userId, photoId)
+  const current = await accessiblePhoto(env, userId, photoId)
+  assertPhotoNotBlocked(current)
   return { comments: rows.results.slice(0, pagination.limit), has_more: rows.results.length > pagination.limit }
 }
 
@@ -593,15 +703,17 @@ export async function listAlbumComments(env: AlbumEnv, userId: number, photoId: 
 export async function createAlbumComment(env: AlbumEnv, userId: number, photoId: string, input: unknown): Promise<AlbumComment> {
   const value = object(input); allowedKeys(value, ['content', 'operation_id'])
   const content = text(value.content, 2000); const operationId = operation(value.operation_id); const hash = await sponsorHash(JSON.stringify([photoId, content]))
-  await accessiblePhoto(env, userId, photoId)
+  const photo = await accessiblePhoto(env, userId, photoId)
+  assertPhotoNotBlocked(photo)
   const commentId = crypto.randomUUID()
-  await atomic(env, [photoGuard(env, userId, photoId), env.abdl_space_db.prepare('INSERT INTO album_comments(id,photo_id,user_id,operation_id,request_hash,content) VALUES(?,?,?,?,?,?) ON CONFLICT(user_id,operation_id) DO NOTHING').bind(commentId, photoId, userId, operationId, hash, content)])
+  await atomic(env, [photoGuard(env, userId, photoId), blockedGuard(env, photoId), env.abdl_space_db.prepare('INSERT INTO album_comments(id,photo_id,user_id,operation_id,request_hash,content) VALUES(?,?,?,?,?,?) ON CONFLICT(user_id,operation_id) DO NOTHING').bind(commentId, photoId, userId, operationId, hash, content)])
   const row = await env.abdl_space_db.prepare('SELECT id,request_hash,deleted_at FROM album_comments WHERE user_id=? AND operation_id=?').bind(userId, operationId).first<{ id: string; request_hash: string; deleted_at: number | null }>()
   if (!row || row.request_hash !== hash) throw new AlbumError('idempotency_conflict', '操作编号已用于其他评论', 409)
   if (row.deleted_at !== null) throw new AlbumError('comment_deleted', '评论已删除', 409)
   const comment = await env.abdl_space_db.prepare(`${COMMENT_SELECT} WHERE c.id=?`).bind(row.id).first<AlbumComment>()
   if (!comment) throw new Error('Comment disappeared')
-  await accessiblePhoto(env, userId, photoId)
+  const current = await accessiblePhoto(env, userId, photoId)
+  assertPhotoNotBlocked(current)
   return comment
 }
 
@@ -609,7 +721,8 @@ export async function createAlbumComment(env: AlbumEnv, userId: number, photoId:
 export async function deleteAlbumComment(env: AlbumEnv, userId: number, commentId: string): Promise<{ deleted: true }> {
   const row = await env.abdl_space_db.prepare('SELECT c.photo_id,c.user_id,p.owner_id FROM album_comments c JOIN album_photos p ON p.id=c.photo_id WHERE c.id=?').bind(id(commentId)).first<{ photo_id: string; user_id: number; owner_id: number }>()
   if (!row) throw new AlbumError('comment_not_found', '评论不存在', 404)
-  await accessiblePhoto(env, userId, row.photo_id)
+  const photo = await accessiblePhoto(env, userId, row.photo_id)
+  assertPhotoNotBlocked(photo)
   if (row.user_id !== userId && row.owner_id !== userId) throw new AlbumError('comment_forbidden', '没有删除评论权限', 403)
   await atomic(env, [photoGuard(env, userId, row.photo_id), guard(env, `EXISTS(SELECT 1 FROM album_comments c JOIN album_photos p ON p.id=c.photo_id WHERE c.id=? AND (c.user_id=? OR p.owner_id=?))`, commentId, userId, userId), env.abdl_space_db.prepare('UPDATE album_comments SET deleted_at=coalesce(deleted_at,unixepoch()) WHERE id=?').bind(commentId)])
   return { deleted: true }
