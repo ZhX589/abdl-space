@@ -8,6 +8,13 @@ import { recordAdvertisingEvent, validateAdvertisingUrl } from '../lib/advertisi
 
  type AppType = { Bindings: Env; Variables: { user: JWTPayload } }
 const merchant = new Hono<AppType>()
+merchant.onError((error, c) => {
+  if (/no such table|no such column|database schema/i.test(String(error))) {
+    return c.json({ error: 'Merchant service is temporarily unavailable', code: 'merchant_unavailable' }, 503)
+  }
+  console.error(JSON.stringify({ event: 'merchant_route_error', error: String(error) }))
+  return c.json({ error: 'Internal Server Error' }, 500)
+})
 merchant.use('*', async (c, next) => { c.header('Cache-Control', 'private, no-store'); await next() })
 merchant.use('*', async (c, next) => {
   if (c.req.method === 'POST' && /\/ads\/\d+\/events$/.test(c.req.path)) return next()
