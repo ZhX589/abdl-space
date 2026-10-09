@@ -1,47 +1,22 @@
 import { PhotonImage, SamplingFilter, resize } from '@cf-wasm/photon'
 
-const PREVIEW_PATH_PREFIX = '/api/v1/media/preview/v3/'
-const PREVIEW_LONG_EDGE = 720
+export const PREVIEW_PATH_PREFIX = '/api/v1/media/preview/v3/'
+export const AVATAR_PREVIEW_PATH_PREFIX = '/api/v1/media/avatar/v3/'
+export const PREVIEW_LONG_EDGE = 720
+export const AVATAR_LONG_EDGE = 160
 const MAX_IMAGE_EDGE = 8192
 const MAX_IMAGE_PIXELS = 12_000_000
 export const MAX_MEDIA_PREVIEW_SOURCE_BYTES = 10 * 1024 * 1024
 
+// 自有图床与自有 COS 桶（ap-shanghai，公共读）。两者都允许拼 v3 预览地址，也允许 Worker 回源抓取：
+// 前端只拿到地址、由 Worker 代取，浏览器不再直连 COS 原图，缩略图落在 caches.default 上按 colo 共享。
+// COS 桶另会经 additionalOrigins（env 的 COS_PUBLIC_ORIGIN）注入，这里写死是为了让拿不到 env 的
+// 调用点（posts/advertising/uploads 组装 preview_url 时）也能纳入同一套边缘缓存。
 const TRUSTED_MEDIA_HOSTS = new Set([
   'img.abdl-space.top',
   'cloudflare-imgbed-790.pages.dev',
+  'abdl-1339643562.cos.ap-shanghai.myqcloud.com',
 ])
-
-// COS 直连对象（未配 CDN）交给源站图片处理按需缩放转码：长边 720 且不放大，输出 WebP。
-const COS_MEDIA_HOST_SUFFIX = '.myqcloud.com'
-const COS_THUMBNAIL_QUERY = 'imageMogr2/thumbnail/720x720>/format/webp/quality/80'
-const ANIMATED_MEDIA_EXTENSIONS = ['.gif']
-
-export function isCosMediaUrl(value: string): boolean {
-  try {
-    const url = new URL(value)
-    return url.protocol === 'https:' && url.hostname.toLowerCase().endsWith(COS_MEDIA_HOST_SUFFIX)
-  } catch {
-    return false
-  }
-}
-
-/**
- * 腾讯云 COS 源站缩略图地址；返回 null 表示该对象不适用，调用方应回退到原地址。
- * 动态图（GIF）经 imageMogr2 只剩静态首帧，故不改写；已带查询串的对象可能是签名 URL，改写会破坏签名。
- */
-export function buildCosThumbnailUrl(source: string): string | null {
-  if (!isCosMediaUrl(source)) return null
-  let url: URL
-  try {
-    url = new URL(source)
-  } catch {
-    return null
-  }
-  if (url.search) return null
-  const path = url.pathname.toLowerCase()
-  if (ANIMATED_MEDIA_EXTENSIONS.some(extension => path.endsWith(extension))) return null
-  return `${source}?${COS_THUMBNAIL_QUERY}`
-}
 
 function isTrustedMediaUrl(value: string, additionalOrigins: string[] = []): boolean {
   try {
@@ -75,23 +50,26 @@ function decodeSource(value: string): string | null {
 }
 
 export function buildMediaPreviewUrl(source: string, apiOrigin = 'https://api.abdl-space.top', trustedSource = false): string {
-  // COS 直连对象优先走源站处理：浏览器直接拿到 720px WebP，不必回源整张原图。
-  const cosThumbnail = buildCosThumbnailUrl(source)
-  if (cosThumbnail) return cosThumbnail
   if (!trustedSource && !isTrustedMediaUrl(source)) return source
   return `${apiOrigin.replace(/\/$/, '')}${PREVIEW_PATH_PREFIX}${encodeSource(source)}`
 }
 
-export function parseMediaPreviewSource(pathname: string, additionalOrigins: string[] = []): string | null {
-  if (!pathname.startsWith(PREVIEW_PATH_PREFIX)) return null
-  const encoded = pathname.slice(PREVIEW_PATH_PREFIX.length)
+/** 头像专用预览地址：与内容图同一套边缘缓存，只是长边压到 160px（列表里实际显示 24–80px）。 */
+export function buildAvatarPreviewUrl(source: string, apiOrigin = 'https://api.abdl-space.top', trustedSource = false): string {
+  if (!trustedSource && !isTrustedMediaUrl(source)) return source
+  return `${apiOrigin.replace(/\/$/, '')}${AVATAR_PREVIEW_PATH_PREFIX}${encodeSource(source)}`
+}
+
+export function parseMediaPreviewSource(pathname: string, additionalOrigins: string[] = [], prefix = PREVIEW_PATH_PREFIX): string | null {
+  if (!pathname.startsWith(prefix)) return null
+  const encoded = pathname.slice(prefix.length)
   const source = encoded && !encoded.includes('/') ? decodeSource(encoded) : null
   return source && isTrustedMediaUrl(source, additionalOrigins) ? source : null
 }
 
-export function calculateMediaPreviewSize(width: number, height: number): { width: number; height: number } | null {
+export function calculateMediaPreviewSize(width: number, height: number, longEdge = PREVIEW_LONG_EDGE): { width: number; height: number } | null {
   if (!Number.isFinite(width) || !Number.isFinite(height) || width < 1 || height < 1) return null
-  const scale = Math.min(1, PREVIEW_LONG_EDGE / Math.max(width, height))
+  const scale = Math.min(1, longEdge / Math.max(width, height))
   return {
     width: Math.max(1, Math.round(width * scale)),
     height: Math.max(1, Math.round(height * scale)),
@@ -152,13 +130,13 @@ export function canonicalMediaPreviewCacheUrl(value: string): string {
   return url.toString()
 }
 
-export function resizeMediaPreview(bytes: Uint8Array): { bytes: Uint8Array; width: number; height: number; contentType: string } | null {
+export function resizeMediaPreview(bytes: Uint8Array, longEdge = PREVIEW_LONG_EDGE): { bytes: Uint8Array; width: number; height: number; contentType: string } | null {
   let source: PhotonImage | null = null
   let preview: PhotonImage | null = null
   try {
     if (!inspectMediaImageDimensions(bytes)) return null
     source = PhotonImage.new_from_byteslice(bytes)
-    const size = calculateMediaPreviewSize(source.get_width(), source.get_height())
+    const size = calculateMediaPreviewSize(source.get_width(), source.get_height(), longEdge)
     if (!size) return null
     preview = resize(source, size.width, size.height, SamplingFilter.Lanczos3)
     const pixels = preview.get_raw_pixels()

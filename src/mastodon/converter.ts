@@ -8,11 +8,17 @@ import type { Env } from '../types/index.ts'
 import { createCosGetAuthorization } from '../lib/tencent-cos.ts'
 import { toMastoId } from './shared.ts'
 import { query } from '../lib/db.ts'
-import { buildMediaPreviewUrl } from '../lib/media-preview.ts'
+import { buildAvatarPreviewUrl, buildMediaPreviewUrl } from '../lib/media-preview.ts'
 
 const INSTANCE_DOMAIN = 'abdl-space.top'
 const DEFAULT_AVATAR = 'https://img.abdl-space.top/file/system/1781439303787_play_store_512.png'
 const DEFAULT_HEADER = 'https://img.abdl-space.top/file/system/1781439303787_play_store_512.png'
+
+// 头像统一改走 160px 预览端点：客户端里实际只显示 24–80px，直发原图（COS 上均 ~53KB、默认头像还是
+// 512px PNG）是 App 侧最大的一块图片下行。NBW 等非可信源会被原样返回，不受影响。
+function avatarPreviewUrl(raw: string | null | undefined): string {
+  return buildAvatarPreviewUrl(raw || DEFAULT_AVATAR)
+}
 /** Required fallback for all channels, including native clients which receive extra card metadata. */
 export const ALBUM_POST_FALLBACK = '【宝宝相册】当前渠道不支持查看此内容，请下载最新版ABDL Space APP查看详情'
 
@@ -44,7 +50,7 @@ export function toAccount(user: {
   verified?: boolean
   badge?: { name: string; color: string } | null
 }): MastodonAccount {
-  const avatar = user.avatar || DEFAULT_AVATAR
+  const avatar = avatarPreviewUrl(user.avatar)
   const header = user.header || DEFAULT_HEADER
   return {
     id: String(user.id),
@@ -598,8 +604,8 @@ export function toStatusFromNBWReply(tid: number, reply: NBWReplyItem): Mastodon
         note: '',
         url: threadUrl,
         uri: threadUrl,
-        avatar: DEFAULT_AVATAR,
-        avatar_static: DEFAULT_AVATAR,
+        avatar: avatarPreviewUrl(DEFAULT_AVATAR),
+        avatar_static: avatarPreviewUrl(DEFAULT_AVATAR),
         header: DEFAULT_HEADER,
         header_static: DEFAULT_HEADER,
         followers_count: 0,

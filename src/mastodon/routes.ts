@@ -31,7 +31,7 @@ import { mergeAllTimelinePage } from './all-timeline.ts'
 import { fetchFriendRequestPosts } from './friend-timeline.ts'
 import { computeHeat, computeHeatFromRow, isWithin24h, VIEW_DEDUP_WINDOW_SECONDS } from './heat.ts'
 import { generateBlurhash, sanitizeBlurhash } from '../lib/blurhash.ts'
-import { buildMediaPreviewUrl, canonicalMediaPreviewCacheUrl, fetchTrustedMediaSource, inspectMediaImageDimensions, parseMediaPreviewSource, resizeMediaPreview } from '../lib/media-preview.ts'
+import { AVATAR_LONG_EDGE, AVATAR_PREVIEW_PATH_PREFIX, PREVIEW_LONG_EDGE, PREVIEW_PATH_PREFIX, buildMediaPreviewUrl, canonicalMediaPreviewCacheUrl, fetchTrustedMediaSource, inspectMediaImageDimensions, parseMediaPreviewSource, resizeMediaPreview } from '../lib/media-preview.ts'
 import { buildMediaObjectKey, validateMediaUpload } from '../lib/media-upload.ts'
 import { buildCosObjectUrl, putObjectToCos } from '../lib/tencent-cos.ts'
 import { getCompletedUploadReference, uploadLegacyObject } from '../lib/upload-consumer.ts'
@@ -2309,10 +2309,11 @@ mastodon.get('/notifications', async (c) => {
 
 // ============================================================
 // GET /api/v1/media/preview/v3/:source — Cached media preview
+// GET /api/v1/media/avatar/v3/:source  — Cached avatar preview
 // ============================================================
-mastodon.on(['GET', 'HEAD'], '/media/preview/v3/:source', async (c) => {
+async function serveCachedMediaPreview(c: Context, prefix: string, longEdge: number): Promise<Response> {
   const trustedOrigins = [cosOrigin(mediaOptions(c.env))].filter(Boolean)
-  const source = parseMediaPreviewSource(c.req.path, trustedOrigins)
+  const source = parseMediaPreviewSource(c.req.path, trustedOrigins, prefix)
   if (!source) return c.json({ error: 'Invalid media preview source' }, 400)
 
   const cache = caches.default
@@ -2328,7 +2329,7 @@ mastodon.on(['GET', 'HEAD'], '/media/preview/v3/:source', async (c) => {
   try {
     const sourceBytes = await fetchTrustedMediaSource(source, trustedOrigins)
     if (!sourceBytes) return fallback()
-    const preview = resizeMediaPreview(sourceBytes)
+    const preview = resizeMediaPreview(sourceBytes, longEdge)
     if (!preview) return fallback()
 
     const response = new Response(preview.bytes, {
@@ -2341,12 +2342,14 @@ mastodon.on(['GET', 'HEAD'], '/media/preview/v3/:source', async (c) => {
       },
     })
     c.executionCtx.waitUntil(cache.put(cacheKey, response.clone()))
-    if (c.req.method === 'HEAD') return new Response(null, { status: 200, headers: response.headers })
     return response
   } catch {
     return fallback()
   }
-})
+}
+
+mastodon.on(['GET', 'HEAD'], '/media/preview/v3/:source', c => serveCachedMediaPreview(c, PREVIEW_PATH_PREFIX, PREVIEW_LONG_EDGE))
+mastodon.on(['GET', 'HEAD'], '/media/avatar/v3/:source', c => serveCachedMediaPreview(c, AVATAR_PREVIEW_PATH_PREFIX, AVATAR_LONG_EDGE))
 
 // ============================================================
 // POST /api/v1/media — Upload media
