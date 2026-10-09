@@ -4,6 +4,7 @@ import { cors } from 'hono/cors'
 import { generateBlurhash } from '../lib/blurhash.ts'
 import { queryOne } from '../lib/db.ts'
 import { buildMediaObjectKey, validateMediaUpload } from '../lib/media-upload.ts'
+import { buildMediaPreviewUrl } from '../lib/media-preview.ts'
 import { buildCosObjectUrl, createCosPutAuthorization, headObjectFromCos } from '../lib/tencent-cos.ts'
 import { mastodonAuthDetails } from '../mastodon/shared.ts'
 import type { Env } from '../types/index.ts'
@@ -169,7 +170,7 @@ function attachment(row: MediaUploadRow, preview?: MediaUploadRow) {
 	return {
 		id: row.id,
 		url: row.public_url,
-		preview_url: preview?.public_url ?? row.preview_url ?? row.public_url,
+		preview_url: preview?.public_url ?? row.preview_url ?? buildMediaPreviewUrl(row.public_url),
 		type: mediaType(row.mime_type),
 		blurhash: row.blurhash,
 		meta: {

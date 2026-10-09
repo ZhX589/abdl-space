@@ -8,6 +8,7 @@ import { syncPostToNBW } from '../lib/nbw-sync.ts'
 import { sendJPushNotification } from '../lib/jpush.ts'
 import { cacheFeedCount, cacheFeedCountInMemory, getFeedCountFromKv, getFeedCountFromMemory, invalidateFeedCount } from '../lib/post-count-cache.ts'
 import { bestEffortImportAlbumHistory } from '../lib/album-history.ts'
+import { buildMediaPreviewUrl } from '../lib/media-preview.ts'
 import { ALBUM_POST_FALLBACK } from '../mastodon/converter.ts'
 
 
@@ -48,12 +49,14 @@ async function safeGetImages(db: D1Database, postId: number): Promise<{image_url
   }
 }
 
-// 网页端图片下发：带上小图地址（preview_url），原图供点击大图使用
+// 网页端图片下发：始终带小图地址，避免缺预览时前端回退到原图。
+// 优先用后端存储的 preview_url，其次由 buildMediaPreviewUrl 现算（COS 源站缩略 / 图床 v3），最后才是原图。
 function shapeImage(img: { image_url: string; is_nsfw: number; preview_url?: string | null }) {
+  const imageUrl = img.image_url || ''
   return {
-    image_url: img.image_url,
+    image_url: imageUrl,
     is_nsfw: !!img.is_nsfw,
-    ...(img.preview_url ? { preview_url: img.preview_url } : {}),
+    preview_url: img.preview_url || buildMediaPreviewUrl(imageUrl),
   }
 }
 
@@ -258,7 +261,10 @@ posts.get('/', async (c) => {
           FROM advertisements a JOIN merchants m ON m.id=a.merchant_id WHERE a.status='active' AND m.status='active'
           AND (a.starts_at IS NULL OR a.starts_at<=CURRENT_TIMESTAMP) AND (a.ends_at IS NULL OR a.ends_at>CURRENT_TIMESTAMP)
           ORDER BY a.updated_at ASC,a.id ASC LIMIT 1`)
-        if (ad) advertisements = [{ ...ad, is_advertisement: true, type: 'merchant', impression_id: crypto.randomUUID(), images: ad.image_url ? [{ image_url: ad.image_url, preview_url: ad.image_url }] : [] }]
+        if (ad) {
+          const adImageUrl = typeof ad.image_url === 'string' ? ad.image_url : ''
+          advertisements = [{ ...ad, is_advertisement: true, type: 'merchant', impression_id: crypto.randomUUID(), images: adImageUrl ? [{ image_url: adImageUrl, preview_url: buildMediaPreviewUrl(adImageUrl) }] : [] }]
+        }
       }
     } catch { advertisements = [] }
   }

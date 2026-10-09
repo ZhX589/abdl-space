@@ -1,5 +1,6 @@
 import type { D1Database } from '@cloudflare/workers-types'
 import { queryOne, run } from './db.ts'
+import { buildMediaPreviewUrl } from './media-preview.ts'
 import type { MastodonAccount, MastodonStatus } from '../mastodon/types.ts'
 
 export const AD_EVENT_TYPES = ['impression', 'link_click', 'image_view', 'ad_navigation'] as const
@@ -131,7 +132,7 @@ export function toAdvertisementStatus(ad: AdvertisementRow, account: MastodonAcc
     replies_count: 0, reblogs_count: 0, favourites_count: 0, bookmarks_count: 0, shares_count: 0, views_count: 0, heat: 0,
     favourited: false, reblogged: false, muted: false, bookmarked: false,
     content: `<p>${ad.ad_type === 'merchant' ? '商家广告' : '官方广告'}</p><p>${escapeHtml(ad.title)}</p><p>${escapeHtml(ad.body)}</p>`, reblog: null, application: { name: 'ABDL Space Advertising', website: 'https://abdl-space.top' },
-    account, media_attachments: ad.image_url ? [{ id: `ad_image_${ad.id}`, type: 'image', url: ad.image_url, preview_url: ad.image_url, remote_url: null, text_url: null, meta: {}, description: ad.title, blurhash: null }] : [],
+    account, media_attachments: ad.image_url ? [{ id: `ad_image_${ad.id}`, type: 'image', url: ad.image_url, preview_url: buildMediaPreviewUrl(ad.image_url), remote_url: null, text_url: null, meta: {}, description: ad.title, blurhash: null }] : [],
     mentions: [], tags: [], emojis: [], card: null, poll: null, advertisement: { id: ad.id, merchant_id: ad.merchant_id, merchant_name: ad.merchant_name, title: ad.title, landing_url: ad.landing_url, image_url: ad.image_url, type: ad.ad_type, official: ad.ad_type !== 'merchant' },
   }
 }

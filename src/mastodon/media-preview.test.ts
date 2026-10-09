@@ -1,15 +1,18 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  buildCosThumbnailUrl,
   buildMediaPreviewUrl,
   calculateMediaPreviewSize,
   canonicalMediaPreviewCacheUrl,
   inspectMediaImageDimensions,
+  isCosMediaUrl,
   parseMediaPreviewSource,
   resizeMediaPreview,
 } from '../lib/media-preview.ts'
 
 const apiOrigin = 'https://api.abdl-space.top'
+const cosSource = 'https://abdl-1339643562.cos.ap-shanghai.myqcloud.com/posts/example.jpg'
 
 test('builds deterministic preview URLs for trusted media hosts', () => {
   const source = 'https://img.abdl-space.top/file/posts/example image.jpg'
@@ -59,4 +62,28 @@ test('canonical cache URL ignores query strings', () => {
     canonicalMediaPreviewCacheUrl(`${apiOrigin}/api/v1/media/preview/v3/source?nonce=1`),
     `${apiOrigin}/api/v1/media/preview/v3/source`,
   )
+})
+
+test('routes COS objects through origin image processing instead of the worker endpoint', () => {
+  assert.ok(isCosMediaUrl(cosSource))
+
+  const preview = buildMediaPreviewUrl(cosSource, apiOrigin)
+  assert.equal(preview, `${cosSource}?imageMogr2/thumbnail/720x720>/format/webp/quality/80`)
+  assert.equal(buildCosThumbnailUrl(cosSource), preview)
+  assert.equal(buildMediaPreviewUrl(cosSource, apiOrigin), preview)
+})
+
+test('leaves animated, pre-signed and non-https COS objects untouched', () => {
+  const gif = 'https://abdl-1339643562.cos.ap-shanghai.myqcloud.com/posts/anim.GIF'
+  assert.equal(buildCosThumbnailUrl(gif), null)
+  assert.equal(buildMediaPreviewUrl(gif, apiOrigin), gif)
+
+  // 签名 URL 已带查询串，改写会破坏签名
+  const signed = `${cosSource}?sign=q-sign-algorithm%3Dsha1&q-ak=AKID`
+  assert.equal(buildCosThumbnailUrl(signed), null)
+  assert.equal(buildMediaPreviewUrl(signed, apiOrigin), signed)
+
+  const insecure = 'http://abdl-1339643562.cos.ap-shanghai.myqcloud.com/posts/example.jpg'
+  assert.equal(isCosMediaUrl(insecure), false)
+  assert.equal(buildMediaPreviewUrl(insecure, apiOrigin), insecure)
 })

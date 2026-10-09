@@ -11,6 +11,38 @@ const TRUSTED_MEDIA_HOSTS = new Set([
   'cloudflare-imgbed-790.pages.dev',
 ])
 
+// COS 直连对象（未配 CDN）交给源站图片处理按需缩放转码：长边 720 且不放大，输出 WebP。
+const COS_MEDIA_HOST_SUFFIX = '.myqcloud.com'
+const COS_THUMBNAIL_QUERY = 'imageMogr2/thumbnail/720x720>/format/webp/quality/80'
+const ANIMATED_MEDIA_EXTENSIONS = ['.gif']
+
+export function isCosMediaUrl(value: string): boolean {
+  try {
+    const url = new URL(value)
+    return url.protocol === 'https:' && url.hostname.toLowerCase().endsWith(COS_MEDIA_HOST_SUFFIX)
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 腾讯云 COS 源站缩略图地址；返回 null 表示该对象不适用，调用方应回退到原地址。
+ * 动态图（GIF）经 imageMogr2 只剩静态首帧，故不改写；已带查询串的对象可能是签名 URL，改写会破坏签名。
+ */
+export function buildCosThumbnailUrl(source: string): string | null {
+  if (!isCosMediaUrl(source)) return null
+  let url: URL
+  try {
+    url = new URL(source)
+  } catch {
+    return null
+  }
+  if (url.search) return null
+  const path = url.pathname.toLowerCase()
+  if (ANIMATED_MEDIA_EXTENSIONS.some(extension => path.endsWith(extension))) return null
+  return `${source}?${COS_THUMBNAIL_QUERY}`
+}
+
 function isTrustedMediaUrl(value: string, additionalOrigins: string[] = []): boolean {
   try {
     const url = new URL(value)
@@ -43,6 +75,9 @@ function decodeSource(value: string): string | null {
 }
 
 export function buildMediaPreviewUrl(source: string, apiOrigin = 'https://api.abdl-space.top', trustedSource = false): string {
+  // COS 直连对象优先走源站处理：浏览器直接拿到 720px WebP，不必回源整张原图。
+  const cosThumbnail = buildCosThumbnailUrl(source)
+  if (cosThumbnail) return cosThumbnail
   if (!trustedSource && !isTrustedMediaUrl(source)) return source
   return `${apiOrigin.replace(/\/$/, '')}${PREVIEW_PATH_PREFIX}${encodeSource(source)}`
 }
