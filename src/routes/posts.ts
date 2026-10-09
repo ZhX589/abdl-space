@@ -115,7 +115,7 @@ posts.get('/', async (c) => {
 
   if (search) {
     conditions.push("p.content LIKE ? ESCAPE '\\'")
-    const escapedSearch = search.replace(/%/g, '\%').replace(/_/g, '\_')
+    const escapedSearch = search.replace(/%/g, '\\%').replace(/_/g, '\\_')
     params.push(`%${escapedSearch}%`)
   }
 
@@ -244,8 +244,28 @@ posts.get('/', async (c) => {
     created_at: r.created_at
   }))
 
+  let advertisements: Record<string, unknown>[] = []
+  if (isDefaultFeed) {
+    try {
+      const policy = await queryOne<{ enabled: number; ad_probability: number }>(c.env.abdl_space_db, 'SELECT enabled,ad_probability FROM advertising_policies WHERE id=1')
+      let sponsor = false
+      if (userId) {
+        const membership = await queryOne<{ active: number }>(c.env.abdl_space_db, 'SELECT CASE WHEN permanent=1 OR expires_at>unixepoch() THEN 1 ELSE 0 END AS active FROM sponsor_memberships WHERE user_id=?', [userId])
+        sponsor = !!membership?.active
+      }
+      if (!sponsor && policy?.enabled && Math.random() * 100 < policy.ad_probability) {
+        const ad = await queryOne<Record<string, unknown>>(c.env.abdl_space_db, `SELECT a.id,a.merchant_id,m.display_name AS merchant_name,a.title,a.body,a.landing_url,a.image_url,a.impression_count,a.link_click_count,a.image_view_count,a.ad_navigation_count
+          FROM advertisements a JOIN merchants m ON m.id=a.merchant_id WHERE a.status='active' AND m.status='active'
+          AND (a.starts_at IS NULL OR a.starts_at<=CURRENT_TIMESTAMP) AND (a.ends_at IS NULL OR a.ends_at>CURRENT_TIMESTAMP)
+          ORDER BY a.updated_at ASC,a.id ASC LIMIT 1`)
+        if (ad) advertisements = [{ ...ad, is_advertisement: true, type: 'merchant', impression_id: crypto.randomUUID(), images: ad.image_url ? [{ image_url: ad.image_url, preview_url: ad.image_url }] : [] }]
+      }
+    } catch { advertisements = [] }
+  }
+
   return c.json({
     posts: postsList,
+    advertisements,
     pagination: {
       page, limit,
       total,

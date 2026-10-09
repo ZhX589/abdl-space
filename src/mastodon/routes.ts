@@ -38,6 +38,7 @@ import { getCompletedUploadReference, uploadLegacyObject } from '../lib/upload-c
 import { invalidateFeedCount } from '../lib/post-count-cache.ts'
 import type { MediaUploadPurpose } from '../lib/media-upload.ts'
 import { getPublicBabyVerification } from '../lib/baby-verification.ts'
+import { pickTimelineAdvertisement, toAdvertisementStatus } from '../lib/advertising.ts'
 import { appClientCacheMiddleware, appClientTimelineMiddleware } from '../middleware/app-clients.ts'
 import type { AppClientVariables } from '../types/app-clients.ts'
 
@@ -1652,6 +1653,16 @@ mastodon.get('/timelines/home', async (c) => {
   await attachDisplayedBadges(c.env.abdl_space_db, homeStatuses)
   const link = buildLinkHeader('/api/v1/timelines/home', homeStatuses, limit)
   if (link) c.header('Link', link)
+  const sponsor = await queryOne<{ active: number }>(c.env.abdl_space_db, 'SELECT CASE WHEN permanent=1 OR expires_at>unixepoch() THEN 1 ELSE 0 END AS active FROM sponsor_memberships WHERE user_id=?', [user.sub]).catch(() => null)
+  const ad = await pickTimelineAdvertisement(c.env.abdl_space_db, { isSponsor: !!sponsor?.active })
+  if (ad) {
+    const account = toAccount({ id: -2, username: `merchant-${ad.merchant_id}`, display_name: ad.merchant_name, avatar: ad.merchant_avatar, role: 'user', created_at: new Date().toISOString() })
+    account.id = '-2'; account.acct = ad.merchant_name; account.display_name = ad.merchant_name; account.url = ad.landing_url || 'https://abdl-space.top/merchant'; account.uri = ad.landing_url || 'https://abdl-space.top/merchant'
+    const status = toAdvertisementStatus(ad, account)
+    status.text = `商家广告\n${ad.title}\n${ad.body}`
+    const at = Math.floor(Math.random() * (homeStatuses.length + 1))
+    homeStatuses.splice(at, 0, status)
+  }
   return c.json(homeStatuses)
 })
 
@@ -2121,6 +2132,16 @@ mastodon.get('/timelines/all', async (c) => {
     }
 
     await attachDisplayedBadges(c.env.abdl_space_db, page.statuses)
+    const user = await mastodonAuth(c)
+    const sponsor = user ? await queryOne<{ active: number }>(c.env.abdl_space_db, 'SELECT CASE WHEN permanent=1 OR expires_at>unixepoch() THEN 1 ELSE 0 END AS active FROM sponsor_memberships WHERE user_id=?', [user.sub]).catch(() => null) : null
+    const ad = await pickTimelineAdvertisement(c.env.abdl_space_db, { isSponsor: !!sponsor?.active })
+    if (ad) {
+      const account = toAccount({ id: -2, username: `merchant-${ad.merchant_id}`, display_name: ad.merchant_name, avatar: ad.merchant_avatar, role: 'user', created_at: new Date().toISOString() })
+      account.id = '-2'; account.acct = ad.merchant_name; account.display_name = ad.merchant_name; account.url = ad.landing_url || 'https://abdl-space.top/merchant'; account.uri = ad.landing_url || 'https://abdl-space.top/merchant'
+      const status = toAdvertisementStatus(ad, account)
+      status.text = `商家广告\n${ad.title}\n${ad.body}`
+      page.statuses.splice(Math.floor(Math.random() * (page.statuses.length + 1)), 0, status)
+    }
     return c.json(page.statuses)
   } catch {
     console.error(JSON.stringify({ event: 'all_timeline_unavailable', source: 'local' }))

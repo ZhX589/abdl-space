@@ -79,6 +79,16 @@ export interface MastodonStatus {
   edited_at?: string | null
   quote?: MastodonStatusQuote | null
   album_update?: AlbumPostUpdate
+  advertisement?: {
+    id: number
+    merchant_id: number
+    merchant_name: string
+    title: string
+    landing_url: string | null
+    image_url: string | null
+    type?: string
+    official?: boolean
+  }
 }
 
 export interface MastodonStatusQuote {

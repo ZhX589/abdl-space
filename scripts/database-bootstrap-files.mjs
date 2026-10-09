@@ -15,4 +15,5 @@ export const databaseBootstrapFiles = [
   'migrations/0071_baby_albums.sql',
   'migrations/0072_album_image_protection.sql',
   'migrations/0073_album_reports.sql',
+  'migrations/0074_advertising.sql',
 ]

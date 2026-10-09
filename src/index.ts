@@ -62,6 +62,8 @@ import mastodonAbdl from './mastodon/abdl.ts'
 import sponsors from './routes/sponsors.ts'
 import adminSponsorStock from './routes/admin-sponsor-stock.ts'
 import adminSponsors from './routes/admin-sponsors.ts'
+import merchant from './routes/merchant.ts'
+import adminAdvertising from './routes/admin-advertising.ts'
 import { sponsorAccountProjectionMiddleware } from './lib/sponsors.ts'
 import babyVerification from './routes/baby-verification.ts'
 import adminBabyVerification from './routes/admin-baby-verification.ts'
@@ -283,6 +285,8 @@ app.route('/api/admin/baby-verification', adminBabyVerification)
 // 库存管理挂载在核心 /api/admin/sponsors 之前，避免核心路由的中间件先匹配。
 app.route('/api/admin/sponsors/stock', adminSponsorStock)
 app.route('/api/admin/sponsors', adminSponsors)
+app.route('/api/merchant', merchant)
+app.route('/api/admin/advertising', adminAdvertising)
 app.route('/api/v1', mastodon)
 app.route('/api/v1/push', mastodonPush)
 app.route('/api/v1/abdl', mastodonAbdl)
